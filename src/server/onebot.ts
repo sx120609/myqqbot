@@ -15,6 +15,15 @@ interface OneBotEvent {
   message?: string | Array<{ type: string; data?: Record<string, string | number> }>;
 }
 
+interface OneBotActionResponse {
+  echo?: string;
+  status?: string;
+  retcode?: number;
+  data?: {
+    message_id?: number | string;
+  };
+}
+
 interface ExtractedContent {
   text: string;
   images: Array<{
@@ -33,11 +42,23 @@ type OutgoingMessage =
       };
     }>;
 
+const GENERATING_NOTICE_DELAY_MS = 10_000;
+const ACTION_RESPONSE_TIMEOUT_MS = 5_000;
+const GENERATING_NOTICE_TEXT = "回复仍在生成中，请稍等。";
+
 export class OneBotGateway {
   private sockets = new Set<WebSocket>();
   private connectedAt: string | null = null;
   private lastEventAt: string | null = null;
   private selfId: string | null = null;
+  private actionSeq = 0;
+  private readonly pendingActions = new Map<
+    string,
+    {
+      timer: ReturnType<typeof setTimeout>;
+      resolve: (response: OneBotActionResponse | null) => void;
+    }
+  >();
 
   constructor(
     private readonly settings: SettingsStore,
@@ -79,13 +100,19 @@ export class OneBotGateway {
   }
 
   private async handleMessage(socket: WebSocket, raw: string): Promise<void> {
-    let event: OneBotEvent;
+    let payload: unknown;
     try {
-      event = JSON.parse(raw) as OneBotEvent;
+      payload = JSON.parse(raw) as unknown;
     } catch {
       return;
     }
 
+    if (isActionResponse(payload)) {
+      this.resolveActionResponse(payload);
+      return;
+    }
+
+    const event = payload as OneBotEvent;
     if (event.self_id) this.selfId = String(event.self_id);
     this.lastEventAt = new Date().toISOString();
     if (event.post_type !== "message" || !event.message_type || !event.user_id) return;
@@ -97,19 +124,33 @@ export class OneBotGateway {
     const conversationKey =
       event.message_type === "group" ? `group:${event.group_id}:user:${event.user_id}` : `private:${event.user_id}`;
 
-    const result = await this.processor.process({
-      platform: "onebot",
-      text: content.text,
-      images: content.images,
-      messageType: event.message_type,
-      userId: String(event.user_id),
-      groupId: event.group_id == null ? undefined : String(event.group_id),
-      conversationKey,
-      mentionedBot
-    });
+    let generatingNotice: Promise<OneBotActionResponse | null> | null = null;
+    const generatingTimer = setTimeout(() => {
+      generatingNotice = this.sendMessage(socket, event, GENERATING_NOTICE_TEXT, "generating", true);
+    }, GENERATING_NOTICE_DELAY_MS);
 
-    if (result.handled && result.reply) {
-      await this.sendReply(socket, event, result.reply);
+    try {
+      const result = await this.processor.process({
+        platform: "onebot",
+        text: content.text,
+        images: content.images,
+        messageType: event.message_type,
+        userId: String(event.user_id),
+        groupId: event.group_id == null ? undefined : String(event.group_id),
+        conversationKey,
+        mentionedBot
+      });
+
+      clearTimeout(generatingTimer);
+      if (result.handled && result.reply) {
+        await this.sendReply(socket, event, result.reply);
+      }
+    } catch (error) {
+      clearTimeout(generatingTimer);
+      console.error("[onebot] Failed to process message:", error);
+    } finally {
+      clearTimeout(generatingTimer);
+      await this.deleteGeneratingNotice(socket, generatingNotice);
     }
   }
 
@@ -117,7 +158,7 @@ export class OneBotGateway {
     if (this.settings.runtime().onebot.replyAsImage) {
       try {
         const image = renderReplyImage(reply);
-        this.sendMessage(socket, event, [
+        await this.sendMessage(socket, event, [
           {
             type: "image",
             data: {
@@ -132,24 +173,74 @@ export class OneBotGateway {
     }
 
     const chunks = splitMessage(markdownToPlainText(reply), 850);
-    chunks.forEach((message, index) => {
-      this.sendMessage(socket, event, message, index);
-    });
+    for (const [index, message] of chunks.entries()) {
+      await this.sendMessage(socket, event, message, `reply-${index}`);
+    }
   }
 
-  private sendMessage(socket: WebSocket, event: OneBotEvent, message: OutgoingMessage, index = 0): void {
+  private async deleteGeneratingNotice(
+    socket: WebSocket,
+    generatingNotice: Promise<OneBotActionResponse | null> | null
+  ): Promise<void> {
+    if (!generatingNotice) return;
+    const response = await generatingNotice;
+    const messageId = response?.data?.message_id;
+    if (messageId == null) return;
+    await this.sendAction(socket, "delete_msg", { message_id: messageId });
+  }
+
+  private sendMessage(
+    socket: WebSocket,
+    event: OneBotEvent,
+    message: OutgoingMessage,
+    purpose = "reply",
+    waitForResponse = false
+  ): Promise<OneBotActionResponse | null> {
     const action = event.message_type === "group" ? "send_group_msg" : "send_private_msg";
     const params =
       event.message_type === "group"
         ? { group_id: event.group_id, message }
         : { user_id: event.user_id, message };
-    socket.send(
-      JSON.stringify({
-        action,
-        params,
-        echo: `reply-${Date.now()}-${index}`
-      })
-    );
+    return this.sendAction(socket, action, params, purpose, waitForResponse);
+  }
+
+  private sendAction(
+    socket: WebSocket,
+    action: string,
+    params: Record<string, unknown>,
+    purpose = "action",
+    waitForResponse = false
+  ): Promise<OneBotActionResponse | null> {
+    const echo = `${purpose}-${Date.now()}-${this.actionSeq++}`;
+    if (!waitForResponse) {
+      socket.send(JSON.stringify({ action, params, echo }));
+      return Promise.resolve(null);
+    }
+
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingActions.delete(echo);
+        resolve(null);
+      }, ACTION_RESPONSE_TIMEOUT_MS);
+      this.pendingActions.set(echo, { timer, resolve });
+      socket.send(JSON.stringify({ action, params, echo }), (error) => {
+        if (!error) return;
+        const pending = this.pendingActions.get(echo);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.pendingActions.delete(echo);
+        pending.resolve(null);
+      });
+    });
+  }
+
+  private resolveActionResponse(response: OneBotActionResponse): void {
+    if (!response.echo) return;
+    const pending = this.pendingActions.get(response.echo);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingActions.delete(response.echo);
+    pending.resolve(response);
   }
 
   private authorized(request: FastifyRequest): boolean {
@@ -191,6 +282,12 @@ function isMentioned(event: OneBotEvent, selfId: string | null): boolean {
   if (typeof event.raw_message === "string" && event.raw_message.includes(`[CQ:at,qq=${selfId}]`)) return true;
   if (!Array.isArray(event.message)) return false;
   return event.message.some((segment) => segment.type === "at" && String(segment.data?.qq) === selfId);
+}
+
+function isActionResponse(value: unknown): value is OneBotActionResponse {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.echo === "string" && ("retcode" in record || "status" in record || "data" in record);
 }
 
 function splitMessage(text: string, size: number): string[] {
