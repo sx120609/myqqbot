@@ -18,6 +18,7 @@ interface InlineSegment {
 }
 
 interface VisualLine {
+  kind?: "text" | "rule";
   segments: InlineSegment[];
   x: number;
   y: number;
@@ -51,7 +52,9 @@ const FONT_FAMILY = "Noto Sans CJK SC, Microsoft YaHei, PingFang SC, SimHei, Ari
 export function renderReplyImage(markdown: string, options: ReplyImageOptions = {}): RenderedReplyImage {
   const clean = normalizeMarkdown(markdown);
   const lines = layoutMarkdown(clean || " ");
-  const height = Math.max(220, Math.ceil((lines.at(-1)?.y ?? BODY_TOP) + BOTTOM));
+  const lastLine = lines.at(-1);
+  const contentBottom = lastLine ? lastLine.y + (lastLine.kind === "rule" ? lastLine.lineHeight : 0) : BODY_TOP;
+  const height = Math.max(220, Math.ceil(contentBottom + BOTTOM));
   const svg = renderSvg(lines, height, options);
   const png = new Resvg(svg, {
     fitTo: { mode: "original" },
@@ -74,6 +77,7 @@ export function markdownToPlainText(markdown: string): string {
   return normalizeMarkdown(markdown)
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
     .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/gm, "")
     .replace(/(^|\s)\*\*([^*]+)\*\*/g, "$1$2")
     .replace(/(^|\s)__([^_]+)__/g, "$1$2")
     .replace(/`([^`]+)`/g, "$1")
@@ -99,16 +103,17 @@ function layoutMarkdown(markdown: string): VisualLine[] {
       continue;
     }
 
-    const heading = /^(#{1,3})\s+(.+)$/.exec(line);
+    const horizontalRule = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line);
+    if (horizontalRule) {
+      flushParagraph();
+      addHorizontalRule(visual);
+      continue;
+    }
+
+    const heading = /^(#{1,6})\s+(.+)$/.exec(line);
     if (heading) {
       flushParagraph();
-      addWrappedText(visual, heading[2], {
-        fontSize: heading[1].length === 1 ? 34 : 31,
-        lineHeight: heading[1].length === 1 ? 48 : 44,
-        color: "#162033",
-        weight: 800,
-        marginTop: visual.length === 0 ? 0 : 22
-      });
+      addWrappedText(visual, heading[2].replace(/\s+#{1,}\s*$/, ""), headingStyle(heading[1].length, visual.length === 0 ? 0 : 22));
       continue;
     }
 
@@ -163,6 +168,33 @@ function bodyStyle(marginTop: number): LineStyle {
     weight: 500,
     marginTop
   };
+}
+
+function headingStyle(level: number, marginTop: number): LineStyle {
+  const sizes = [34, 31, 29, 28, 27, 26];
+  const lineHeights = [48, 44, 42, 41, 39, 38];
+  const index = Math.min(Math.max(level, 1), 6) - 1;
+  return {
+    fontSize: sizes[index],
+    lineHeight: lineHeights[index],
+    color: "#162033",
+    weight: 800,
+    marginTop
+  };
+}
+
+function addHorizontalRule(target: VisualLine[]): void {
+  target.push({
+    kind: "rule",
+    segments: [],
+    x: CONTENT_X,
+    y: 0,
+    fontSize: 0,
+    lineHeight: 28,
+    color: "#eee6da",
+    weight: 0,
+    marginTop: target.length === 0 ? 0 : 18
+  });
 }
 
 function addWrappedText(target: VisualLine[], text: string, style: LineStyle): void {
@@ -302,6 +334,10 @@ function estimateCharWidth(char: string, fontSize: number): number {
 function renderSvg(lines: VisualLine[], height: number, options: ReplyImageOptions): string {
   const lineSvg = lines
     .map((line) => {
+      if (line.kind === "rule") {
+        const y = line.y + 11;
+        return `<line x1="${CONTENT_X}" y1="${y}" x2="${WIDTH - CONTENT_X}" y2="${y}" stroke="${line.color}" stroke-width="2"/>`;
+      }
       const segments = line.segments
         .map((segment) => {
           const weight = segment.bold ? 800 : line.weight;
@@ -313,16 +349,23 @@ function renderSvg(lines: VisualLine[], height: number, options: ReplyImageOptio
     })
     .join("");
 
-  const headerTitle = fitText(options.headerTitle || "高校资料助手", 26, WIDTH - 340);
-  const headerBadge = fitText(options.headerBadge || "AI 生成回复", 20, 210);
+  const titleX = 84;
+  const headerRight = WIDTH - CONTENT_X;
+  const headerGap = 28;
+  const rawHeaderTitle = options.headerTitle || "高校资料助手";
+  const rawHeaderBadge = options.headerBadge || "AI 生成回复";
+  const badgeMaxWidth = Math.min(470, headerRight - titleX - 160 - headerGap);
+  const headerBadge = fitText(rawHeaderBadge, 20, badgeMaxWidth);
   const badgeWidth = measureText(headerBadge, 20);
-  const badgeX = Math.max(CONTENT_X + 320, WIDTH - CONTENT_X - badgeWidth);
+  const badgeX = headerRight - badgeWidth;
+  const titleMaxWidth = Math.max(120, badgeX - titleX - headerGap);
+  const headerTitle = fitText(rawHeaderTitle, 26, titleMaxWidth);
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${height}" viewBox="0 0 ${WIDTH} ${height}">
   <rect width="100%" height="100%" fill="#f4f1ea"/>
   <rect x="${CARD_X}" y="22" width="${WIDTH - CARD_X * 2}" height="${height - 44}" rx="26" fill="#fffdf9" stroke="#e5ded3" stroke-width="2"/>
   <circle cx="58" cy="${HEADER_Y}" r="14" fill="#16a34a"/>
-  <text x="84" y="${HEADER_Y + 9}" font-family="${FONT_FAMILY}" font-size="26" font-weight="800" fill="#182235">${escapeXml(headerTitle)}</text>
+  <text x="${titleX}" y="${HEADER_Y + 9}" font-family="${FONT_FAMILY}" font-size="26" font-weight="800" fill="#182235">${escapeXml(headerTitle)}</text>
   <text x="${badgeX}" y="${HEADER_Y + 7}" font-family="${FONT_FAMILY}" font-size="20" font-weight="500" fill="#8a8177">${escapeXml(headerBadge)}</text>
   <line x1="${CONTENT_X}" y1="88" x2="${WIDTH - CONTENT_X}" y2="88" stroke="#eee6da" stroke-width="2"/>
   ${lineSvg}

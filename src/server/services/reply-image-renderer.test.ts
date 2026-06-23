@@ -20,6 +20,24 @@ describe("reply-image-renderer", () => {
     expect(image.bytes).toBeGreaterThan(1000);
   });
 
+  it("renders with a longer configurable header badge", () => {
+    const image = renderReplyImage("测试回复", {
+      headerTitle: "Carbene的高校咨询助手",
+      headerBadge: "由ChatGPT基于公开资料生成回复"
+    });
+
+    expect(image.mimeType).toBe("image/png");
+    expect(image.bytes).toBeGreaterThan(1000);
+  });
+
+  it("renders deeper markdown headings and dividers", () => {
+    const image = renderReplyImage("#### 食堂 共性是：\n\n- 能吃\n- 但整体评价中等\n\n---\n\n#### 校园环境\n图书馆评价不错");
+
+    expect(image.mimeType).toBe("image/png");
+    expect(image.bytes).toBeGreaterThan(1000);
+    expect(markdownToPlainText("#### 食堂 共性是：\n---")).toBe("食堂 共性是：");
+  });
+
   it("strips markdown syntax for plain-text fallback", () => {
     expect(markdownToPlainText("**你是什么模型**：后台配置为 `gpt-5.5`")).toBe("你是什么模型：后台配置为 gpt-5.5");
   });
