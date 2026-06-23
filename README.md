@@ -37,7 +37,7 @@ ws://127.0.0.1:8787/onebot/v11/ws
 
 ## Linux 部署
 
-服务器需要 Node.js 24+、git、npm 和 systemd。克隆仓库后运行：
+服务器需要 Node.js 24+、git、npm 和 systemd。脚本默认使用 `https://gh.lizmt.cn/CollegesChat/university-information.git` 同步高校数据，适合国内服务器。克隆仓库后运行：
 
 ```bash
 chmod +x scripts/deploy.sh
@@ -65,6 +65,12 @@ sudo SERVICE_NAME=myqqbot APP_DIR=/opt/myqqbot APP_PORT=8787 scripts/deploy.sh i
 sudo NODE_BIN=/usr/local/bin/node APP_DIR=/opt/myqqbot scripts/deploy.sh install
 sudo APP_DIR=/opt/myqqbot SKIP_DATA_SYNC=1 scripts/deploy.sh update
 sudo APP_DIR=/opt/myqqbot SKIP_SYSTEMD=1 scripts/deploy.sh update
+```
+
+如果你的服务器已经生成过旧 `.env`，更新脚本会把默认 GitHub 数据源自动迁移到 `gh.lizmt.cn` 镜像。也可以手动确认：
+
+```bash
+grep DATA_REPO_URL /opt/myqqbot/.env
 ```
 
 部署后编辑：

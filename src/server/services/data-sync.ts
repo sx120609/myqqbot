@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { AppConfig } from "../config.js";
@@ -93,26 +93,41 @@ export class DataSyncService {
   private async ensureRepo(): Promise<string> {
     mkdirSync(this.config.dataDir, { recursive: true });
     if (!existsSync(join(this.repoDir, ".git"))) {
-      this.report(`Cloning ${this.config.dataSource.repoUrl} (${this.config.dataSource.branch})...`);
-      await execFileAsync("git", [
-        "-c",
-        "core.longpaths=true",
-        "clone",
-        "--depth",
-        "1",
-        "--filter=blob:none",
-        "--no-checkout",
-        "--branch",
-        this.config.dataSource.branch,
-        this.config.dataSource.repoUrl,
-        this.repoDir
-      ]);
-      return this.git(["rev-parse", "HEAD"]);
+      return this.cloneDataRepo();
+    }
+
+    await this.git(["remote", "set-url", "origin", this.config.dataSource.repoUrl]);
+    if (await this.isPartialClone()) {
+      this.report("Existing data repository is a partial clone; recreating it to avoid lazy blob fetch failures...");
+      rmSync(this.repoDir, { recursive: true, force: true });
+      return this.cloneDataRepo();
     }
 
     this.report(`Fetching latest ${this.config.dataSource.branch} branch...`);
     await this.git(["fetch", "--depth", "1", "origin", this.config.dataSource.branch]);
     return this.git(["rev-parse", "FETCH_HEAD"]);
+  }
+
+  private async cloneDataRepo(): Promise<string> {
+    if (existsSync(this.repoDir) && !existsSync(join(this.repoDir, ".git"))) {
+      this.report("Removing incomplete data repository directory...");
+      rmSync(this.repoDir, { recursive: true, force: true });
+    }
+    this.report(`Cloning ${this.config.dataSource.repoUrl} (${this.config.dataSource.branch})...`);
+    await execFileAsync("git", [
+      "-c",
+      "core.longpaths=true",
+      "clone",
+      "--depth",
+      "1",
+      "--single-branch",
+      "--no-checkout",
+      "--branch",
+      this.config.dataSource.branch,
+      this.config.dataSource.repoUrl,
+      this.repoDir
+    ]);
+    return this.git(["rev-parse", "HEAD"]);
   }
 
   private async git(args: string[]): Promise<string> {
@@ -121,6 +136,21 @@ export class DataSyncService {
       maxBuffer: 1024 * 1024 * 20
     });
     return stdout;
+  }
+
+  private async gitOptional(args: string[]): Promise<string> {
+    try {
+      return await this.git(args);
+    } catch {
+      return "";
+    }
+  }
+
+  private async isPartialClone(): Promise<boolean> {
+    const promisor = (await this.gitOptional(["config", "--get", "remote.origin.promisor"])).trim();
+    const partialFilter = (await this.gitOptional(["config", "--get", "remote.origin.partialclonefilter"])).trim();
+    const extension = (await this.gitOptional(["config", "--get", "extensions.partialclone"])).trim();
+    return promisor === "true" || Boolean(partialFilter || extension);
   }
 
   private async listMarkdownFiles(commitSha: string): Promise<string[]> {

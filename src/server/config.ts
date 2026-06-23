@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+export const DEFAULT_DATA_REPO_URL = "https://gh.lizmt.cn/CollegesChat/university-information.git";
+
 export interface AppConfig {
   cwd: string;
   dataDir: string;
@@ -60,10 +62,9 @@ export function loadConfig(): AppConfig {
       publicBaseUrl: readString("PUBLIC_BASE_URL", "http://127.0.0.1:8787")
     },
     dataSource: {
-      repoUrl: readString("DATA_REPO_URL", "https://github.com/CollegesChat/university-information.git"),
+      repoUrl: readString("DATA_REPO_URL", DEFAULT_DATA_REPO_URL),
       branch: readString("DATA_REPO_BRANCH", "generated"),
       dataPath: readString("DATA_PATH", "docs/universities")
     }
   };
 }
-

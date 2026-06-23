@@ -12,6 +12,8 @@ SKIP_DATA_SYNC="${SKIP_DATA_SYNC:-0}"
 SKIP_SYSTEMD="${SKIP_SYSTEMD:-0}"
 PRUNE_DEV_DEPS="${PRUNE_DEV_DEPS:-1}"
 NODE_BIN="${NODE_BIN:-}"
+DEFAULT_DATA_REPO_URL="https://gh.lizmt.cn/CollegesChat/university-information.git"
+OLD_DATA_REPO_URL="https://github.com/CollegesChat/university-information.git"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -180,6 +182,14 @@ prepare_env() {
     set_env_value .env APP_PORT "$APP_PORT"
   else
     log "Keeping existing .env"
+  fi
+
+  if ! grep -q '^DATA_REPO_URL=' .env; then
+    log "Adding DATA_REPO_URL mirror to .env"
+    set_env_value .env DATA_REPO_URL "$DEFAULT_DATA_REPO_URL"
+  elif grep -q "^DATA_REPO_URL=${OLD_DATA_REPO_URL}$" .env; then
+    log "Switching DATA_REPO_URL to gh.lizmt.cn mirror"
+    set_env_value .env DATA_REPO_URL "$DEFAULT_DATA_REPO_URL"
   fi
 }
 

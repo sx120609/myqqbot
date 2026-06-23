@@ -37,7 +37,6 @@ export class UniversityRepository {
     const now = new Date().toISOString();
     this.database.transaction(() => {
       this.database.db.exec(`
-        DELETE FROM university_fts;
         DELETE FROM aliases;
         DELETE FROM answers;
         DELETE FROM questions;
@@ -248,7 +247,16 @@ export class UniversityRepository {
   }
 
   private rebuildFts(): void {
-    this.database.db.exec("DELETE FROM university_fts;");
+    this.database.db.exec(`
+      DROP TABLE IF EXISTS university_fts;
+      CREATE VIRTUAL TABLE university_fts USING fts5(
+        name,
+        slug,
+        aliases,
+        content,
+        tokenize='unicode61'
+      );
+    `);
     const rows = this.database.db
       .prepare(
         `
