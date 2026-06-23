@@ -14,6 +14,8 @@ PRUNE_DEV_DEPS="${PRUNE_DEV_DEPS:-1}"
 NODE_BIN="${NODE_BIN:-}"
 SYNC_DATA_ON_UPDATE="${SYNC_DATA_ON_UPDATE:-0}"
 SYNC_TIMER_CALENDAR="${SYNC_TIMER_CALENDAR:-03:40}"
+SRGAOXIAO_TIMER_CALENDAR="${SRGAOXIAO_TIMER_CALENDAR:-04:20}"
+SRGAOXIAO_TIMER_LIMIT="${SRGAOXIAO_TIMER_LIMIT:-120}"
 SKIP_CJK_FONT_INSTALL="${SKIP_CJK_FONT_INSTALL:-0}"
 DEFAULT_DATA_REPO_URL="https://gh.lizmt.cn/CollegesChat/university-information.git"
 OLD_DATA_REPO_URL="https://github.com/CollegesChat/university-information.git"
@@ -48,10 +50,16 @@ Usage:
   scripts/deploy.sh status       Show the systemd service status.
   scripts/deploy.sh logs         Follow service logs.
   scripts/deploy.sh sync         Sync CollegesChat data in the deployed app directory.
+  scripts/deploy.sh sync-srgaoxiao
+                                  Sync cached srgaoxiao school profiles.
   scripts/deploy.sh enable-sync-timer
                                   Enable daily CollegesChat data sync timer.
   scripts/deploy.sh disable-sync-timer
                                   Disable the data sync timer.
+  scripts/deploy.sh enable-srgaoxiao-timer
+                                  Enable daily srgaoxiao profile cache timer.
+  scripts/deploy.sh disable-srgaoxiao-timer
+                                  Disable the srgaoxiao profile cache timer.
   scripts/deploy.sh help         Show this help.
 
 Common environment variables:
@@ -65,6 +73,8 @@ Common environment variables:
   SKIP_DATA_SYNC=1               Skip data sync during install/update.
   SYNC_DATA_ON_UPDATE=1          Also sync data during update. Default: 0.
   SYNC_TIMER_CALENDAR=03:40      systemd OnCalendar value for data sync.
+  SRGAOXIAO_TIMER_CALENDAR=04:20 systemd OnCalendar value for srgaoxiao cache.
+  SRGAOXIAO_TIMER_LIMIT=120      Number of school profiles refreshed each run.
   SKIP_CJK_FONT_INSTALL=1        Do not auto-install Noto CJK fonts for image replies.
   SKIP_SYSTEMD=1                 Do not install/restart systemd service.
 
@@ -269,6 +279,16 @@ prepare_env() {
     log "Switching DATA_REPO_URL to gh.lizmt.cn mirror"
     set_env_value .env DATA_REPO_URL "$DEFAULT_DATA_REPO_URL"
   fi
+
+  if ! grep -q '^SRGAOXIAO_BASE_URL=' .env; then
+    log "Adding SRGAOXIAO_BASE_URL to .env"
+    set_env_value .env SRGAOXIAO_BASE_URL "https://srgaoxiao.cn"
+  fi
+
+  if ! grep -q '^SRGAOXIAO_DELAY_MS=' .env; then
+    log "Adding SRGAOXIAO_DELAY_MS to .env"
+    set_env_value .env SRGAOXIAO_DELAY_MS "1200"
+  fi
 }
 
 install_and_build() {
@@ -442,6 +462,71 @@ disable_sync_timer() {
   log "Disabled sync timer: $sync_timer"
 }
 
+install_srgaoxiao_timer() {
+  [ "$SKIP_SYSTEMD" != "1" ] || {
+    log "Skipping systemd timer installation"
+    return
+  }
+
+  need_cmd systemctl
+  prepare_runtime_user
+
+  local sync_service="${SERVICE_NAME}-srgaoxiao-sync.service"
+  local sync_timer="${SERVICE_NAME}-srgaoxiao-sync.timer"
+  local service_tmp
+  local timer_tmp
+  service_tmp="$(mktemp)"
+  timer_tmp="$(mktemp)"
+
+  cat >"$service_tmp" <<EOF
+[Unit]
+Description=Sync srgaoxiao school profile cache for ${SERVICE_NAME}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=${APP_DIR}
+Environment=NODE_ENV=production
+Environment=SRGAOXIAO_SYNC_LIMIT=${SRGAOXIAO_TIMER_LIMIT}
+EnvironmentFile=${APP_DIR}/.env
+ExecStart=/usr/bin/env bash ${APP_DIR}/scripts/deploy.sh sync-srgaoxiao
+User=${RUN_USER}
+Group=${RUN_GROUP}
+EOF
+
+  cat >"$timer_tmp" <<EOF
+[Unit]
+Description=Daily srgaoxiao school profile cache sync for ${SERVICE_NAME}
+
+[Timer]
+OnCalendar=${SRGAOXIAO_TIMER_CALENDAR}
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  log "Installing systemd timer: $sync_timer"
+  run_root install -m 0644 "$service_tmp" "/etc/systemd/system/${sync_service}"
+  run_root install -m 0644 "$timer_tmp" "/etc/systemd/system/${sync_timer}"
+  rm -f "$service_tmp" "$timer_tmp"
+  run_root systemctl daemon-reload
+  run_root systemctl enable --now "$sync_timer"
+}
+
+disable_srgaoxiao_timer() {
+  [ "$SKIP_SYSTEMD" != "1" ] || fail "SKIP_SYSTEMD=1 is set."
+  need_cmd systemctl
+  local sync_service="${SERVICE_NAME}-srgaoxiao-sync.service"
+  local sync_timer="${SERVICE_NAME}-srgaoxiao-sync.timer"
+  run_root systemctl disable --now "$sync_timer" 2>/dev/null || true
+  run_root rm -f "/etc/systemd/system/${sync_timer}" "/etc/systemd/system/${sync_service}"
+  run_root systemctl daemon-reload
+  log "Disabled srgaoxiao sync timer: $sync_timer"
+}
+
 print_install_summary() {
   cat <<EOF
 
@@ -533,6 +618,17 @@ sync_command() {
   fi
 }
 
+sync_srgaoxiao_command() {
+  ensure_linux_and_node
+  resolve_app_dir
+  cd "$APP_DIR"
+  if [ -f dist/server/scripts/sync-srgaoxiao.js ]; then
+    node dist/server/scripts/sync-srgaoxiao.js
+  else
+    npm run sync:srgaoxiao
+  fi
+}
+
 systemd_command() {
   local action="$1"
   [ "$SKIP_SYSTEMD" != "1" ] || fail "SKIP_SYSTEMD=1 is set."
@@ -561,6 +657,9 @@ main() {
     sync)
       sync_command
       ;;
+    sync-srgaoxiao)
+      sync_srgaoxiao_command
+      ;;
     restart|status|logs)
       systemd_command "$COMMAND"
       ;;
@@ -572,6 +671,15 @@ main() {
       ;;
     disable-sync-timer)
       disable_sync_timer
+      ;;
+    enable-srgaoxiao-timer)
+      ensure_linux_and_node
+      resolve_app_dir
+      prepare_env
+      install_srgaoxiao_timer
+      ;;
+    disable-srgaoxiao-timer)
+      disable_srgaoxiao_timer
       ;;
     help|-h|--help)
       usage

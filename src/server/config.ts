@@ -23,6 +23,10 @@ export interface AppConfig {
     branch: string;
     dataPath: string;
   };
+  srgaoxiao: {
+    baseUrl: string;
+    delayMs: number;
+  };
 }
 
 export function loadDotEnv(cwd = process.cwd()): void {
@@ -77,6 +81,10 @@ export function loadConfig(): AppConfig {
       repoUrl: readString("DATA_REPO_URL", DEFAULT_DATA_REPO_URL),
       branch: readString("DATA_REPO_BRANCH", "generated"),
       dataPath: readString("DATA_PATH", "docs/universities")
+    },
+    srgaoxiao: {
+      baseUrl: readString("SRGAOXIAO_BASE_URL", "https://srgaoxiao.cn"),
+      delayMs: readNumber("SRGAOXIAO_DELAY_MS", 1200)
     }
   };
 }

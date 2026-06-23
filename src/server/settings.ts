@@ -21,6 +21,13 @@ export interface RuntimeSettings {
     contextTtlMinutes: number;
     cooldownSeconds: number;
   };
+  sync: {
+    collegesAutoEnabled: boolean;
+    collegesIntervalHours: number;
+    srgaoxiaoAutoEnabled: boolean;
+    srgaoxiaoIntervalHours: number;
+    srgaoxiaoLimit: number;
+  };
 }
 
 const DEFAULTS: Record<string, string> = {
@@ -37,7 +44,12 @@ const DEFAULTS: Record<string, string> = {
   "nl.requireMentionInGroup": "false",
   "nl.confidenceThreshold": "0.55",
   "nl.contextTtlMinutes": "10",
-  "nl.cooldownSeconds": "5"
+  "nl.cooldownSeconds": "5",
+  "sync.collegesAutoEnabled": "false",
+  "sync.collegesIntervalHours": "24",
+  "sync.srgaoxiaoAutoEnabled": "false",
+  "sync.srgaoxiaoIntervalHours": "24",
+  "sync.srgaoxiaoLimit": "120"
 };
 
 export class SettingsStore {
@@ -53,6 +65,7 @@ export class SettingsStore {
     const values: Record<string, string | boolean> = {};
     for (const row of rows) {
       if (row.key.startsWith("auth.")) continue;
+      if (row.key.startsWith("sync.internal.")) continue;
       if (maskSecrets && row.key === "llm.apiKey") {
         values[row.key] = row.value ? "********" : "";
       } else {
@@ -84,6 +97,13 @@ export class SettingsStore {
         confidenceThreshold: this.getNumber("nl.confidenceThreshold", 0.55),
         contextTtlMinutes: this.getNumber("nl.contextTtlMinutes", 10),
         cooldownSeconds: this.getNumber("nl.cooldownSeconds", 5)
+      },
+      sync: {
+        collegesAutoEnabled: this.getBoolean("sync.collegesAutoEnabled", false),
+        collegesIntervalHours: this.getNumber("sync.collegesIntervalHours", 24),
+        srgaoxiaoAutoEnabled: this.getBoolean("sync.srgaoxiaoAutoEnabled", false),
+        srgaoxiaoIntervalHours: this.getNumber("sync.srgaoxiaoIntervalHours", 24),
+        srgaoxiaoLimit: this.getNumber("sync.srgaoxiaoLimit", 120)
       }
     };
   }

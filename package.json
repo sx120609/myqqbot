@@ -11,7 +11,8 @@
     "build:web": "vite build",
     "start": "node dist/server/main.js",
     "test": "vitest run",
-    "sync:data": "tsx src/server/scripts/sync-data.ts"
+    "sync:data": "tsx src/server/scripts/sync-data.ts",
+    "sync:srgaoxiao": "tsx src/server/scripts/sync-srgaoxiao.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.1",

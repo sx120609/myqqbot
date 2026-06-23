@@ -110,10 +110,22 @@ export class AppDatabase {
         error TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS school_profiles (
+        university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+        source TEXT NOT NULL,
+        source_school_id TEXT,
+        source_url TEXT,
+        payload_json TEXT NOT NULL,
+        profile_text TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (university_id, source)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_questions_university_topic ON questions(university_id, topic);
       CREATE INDEX IF NOT EXISTS idx_answers_question ON answers(question_id);
       CREATE INDEX IF NOT EXISTS idx_message_logs_created ON message_logs(created_at);
       CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(created_at);
+      CREATE INDEX IF NOT EXISTS idx_school_profiles_source ON school_profiles(source);
     `);
 
     this.db.exec(`
@@ -128,4 +140,3 @@ export class AppDatabase {
     `);
   }
 }
-

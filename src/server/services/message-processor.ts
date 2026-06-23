@@ -43,6 +43,7 @@ interface ImageSchoolContext {
   topic: string;
   sourceUrl: string;
   contextText: string;
+  schoolProfileText: string | null;
 }
 
 export class MessageProcessor {
@@ -175,11 +176,13 @@ export class MessageProcessor {
     const contextText = questions.length
       ? this.nlu.buildRetrievalContext(university.name, questions)
       : `这次没有检索到 ${university.name} 在“${analysis.topicLabel ?? "这个方向"}”上的 CollegesChat 问卷片段。请先基于公开常识给出院校定位，再如实说明生活体验问卷资料缺口，然后可以结合常见大学生活经验、公开常识和理性推断给出建议，但不要把这些补充说成该校问卷事实。`;
+    const schoolProfile = this.universities.getSchoolProfile?.(university.id, "srgaoxiao");
     const reply = await this.answerWithLlm({
       userMessage: input.text,
       universityName: university.name,
       topic: analysis.topicLabel ?? topicLabel(topicKey),
       contextText,
+      schoolProfileText: schoolProfile?.profileText ?? null,
       sourceUrl: university.source_url
     });
 
@@ -198,6 +201,7 @@ export class MessageProcessor {
     universityName: string;
     topic: string;
     contextText: string;
+    schoolProfileText: string | null;
     sourceUrl: string;
   }): Promise<string> {
     try {
@@ -207,24 +211,25 @@ export class MessageProcessor {
             role: "system",
             content:
               "你是专业但口语化的高校资料顾问。回答高校问题时，先给用户一个“院校定位”，再结合 CollegesChat 问卷资料讲生活体验，最后给适合人群、风险点或追问建议。" +
-              "院校定位可以使用公开常识和模型知识，包括：所在城市/校区、办学层次、211/双一流/行业特色、优势学科或就业方向、学校规模等。只有在很有把握时才写占地面积、具体校区数量等数字；不确定就不要写具体数字，也不要硬编。" +
+              "如果给出了“外部院校画像补充资料”，院校定位要优先参考它，包括所在城市/校区、办学层次、211/双一流/行业特色、优势学科、占地、建校年份、官网和综合评分等。神人高校网评分属于公开站点聚合评价，不是官方评价，必须用“参考”语气。" +
+              "院校定位也可以补充公开常识和模型知识，包括学校规模、优势方向或就业方向等。只有在很有把握或资料明确给出时才写占地面积、具体校区数量等数字；不确定就不要写具体数字，也不要硬编。" +
               "生活体验部分请优先基于用户给出的 CollegesChat 问卷资料回答；具体到该校的宿舍、管理、食堂、校园网、外卖、早晚自习等事实只能来自问卷资料。资料存在分歧时要明确说存在差异。" +
               "如果没有检索到相关问卷片段，要直接说明资料缺口，然后再用“一般来说”“通常建议”“如果按常见情况看”等表达给出公开常识或理性建议，不要把常识包装成该校确定事实。" +
               "用户问评价、能不能、适不适合、体验怎么样时，可以展开分析：先概括学校定位，再讲生活条件，再讲适合哪些学生和需要注意什么。回答要适合 QQ 阅读，可用 Markdown 标题、加粗和列表；简单问题简洁，复杂问题可以更详细。" +
-              "不要说这是官方信息。结尾必须包含“院校画像为公开常识参考，生活体验数据来自 CollegesChat 问卷，常识建议仅供参考。”"
+              "不要说这是官方信息。结尾必须包含“院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷，常识建议仅供参考。”"
           },
           {
             role: "user",
-            content: `用户问题：${input.userMessage}\n学校：${input.universityName}\n主题：${input.topic}\n资料来源：${input.sourceUrl}\n\n可用问卷资料：\n${input.contextText}`
+            content: `用户问题：${input.userMessage}\n学校：${input.universityName}\n主题：${input.topic}\nCollegesChat 资料来源：${input.sourceUrl}\n\n外部院校画像补充资料：\n${input.schoolProfileText ?? "本地没有外部院校画像补充资料。"}\n\n可用问卷资料：\n${input.contextText}`
           }
         ],
         "university-answer"
       );
-      if (answer.includes("数据来自 CollegesChat 问卷")) return answer;
-      return `${answer}\n\n院校画像为公开常识参考，生活体验数据来自 CollegesChat 问卷，常识建议仅供参考。`;
+      if (answer.includes("生活体验数据来自 CollegesChat 问卷")) return answer;
+      return `${answer}\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷，常识建议仅供参考。`;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return `我检索到了 ${input.universityName} 的相关问卷资料，但调用模型总结失败：${message}\n\n院校画像为公开常识参考，生活体验数据来自 CollegesChat 问卷，常识建议仅供参考。`;
+      return `我检索到了 ${input.universityName} 的相关资料，但调用模型总结失败：${message}\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷，常识建议仅供参考。`;
     }
   }
 
@@ -287,13 +292,15 @@ export class MessageProcessor {
     const contextText = questions.length
       ? this.nlu.buildRetrievalContext(university.name, questions)
       : `这条图片消息没有检索到 ${university.name} 在“${topic}”上的 CollegesChat 问卷片段。请先结合公开常识和用户文字确认学校语境，再基于图片可见内容分析，不要把常识说成问卷事实。`;
+    const schoolProfile = this.universities.getSchoolProfile?.(university.id, "srgaoxiao");
 
     return {
       universityId: university.id,
       universityName: university.name,
       topic,
       sourceUrl: university.source_url,
-      contextText
+      contextText,
+      schoolProfileText: schoolProfile?.profileText ?? null
     };
   }
 
@@ -317,7 +324,7 @@ export class MessageProcessor {
         .join("、") || "无"}`
     ].join("；");
     const schoolLine = schoolContext
-      ? `已识别学校：${schoolContext.universityName}；主题：${schoolContext.topic}；资料来源：${schoolContext.sourceUrl}\n可用院校/问卷语境：\n${schoolContext.contextText}`
+      ? `已识别学校：${schoolContext.universityName}；主题：${schoolContext.topic}；CollegesChat 资料来源：${schoolContext.sourceUrl}\n外部院校画像补充资料：\n${schoolContext.schoolProfileText ?? "本地没有外部院校画像补充资料。"}\n\n可用问卷语境：\n${schoolContext.contextText}`
       : "没有可靠识别到具体学校。若图片或用户文字里出现学校简称，请先说明你的判断依据；不确定时要追问。";
     const text =
       userMessage.trim() ||
@@ -332,7 +339,7 @@ export class MessageProcessor {
             content:
               "你是 QQ 里的高校生活资料助手。用户发送了图片，可能是学校相关截图、环境照片、通知、聊天截图、梗图或普通图片。" +
               "如果用户文字、对话上下文或本地识别结果提到学校简称/学校名，你必须先把图片放回这个学校语境里解读；例如用户说“南航的同学这样说”，应结合南京航空航天大学的院校定位和可能的食堂/校园生活语境，不要只解释图片梗本身。" +
-              "涉及具体学校时，先用 1 到 2 句给院校定位，可以提城市、办学层次、行业特色或优势方向；再解释图片内容和它可能反映的生活体验/情绪/吐槽点。" +
+              "涉及具体学校时，先用 1 到 2 句给院校定位，优先参考外部院校画像补充资料，可以提城市、办学层次、行业特色或优势方向；再解释图片内容和它可能反映的生活体验/情绪/吐槽点。" +
               "图片里看得见的内容可以直接分析；问卷语境里有的生活事实可以引用；公开常识或推断要说成“可能”“一般来说”“从吐槽语境看”。看不清或无法判断时要直接说明，不要编造图片中没有的信息。"
           },
           {

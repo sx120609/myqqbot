@@ -3,10 +3,12 @@ import type { AppConfig } from "./config.js";
 import type { AppDatabase } from "./db.js";
 import type { OneBotGateway } from "./onebot.js";
 import type { SettingsStore } from "./settings.js";
+import type { AutoSyncScheduler } from "./services/auto-sync-scheduler.js";
 import type { DataSyncService } from "./services/data-sync.js";
 import type { LlmClient } from "./services/llm-client.js";
 import type { LogStore } from "./services/log-store.js";
 import type { MessageProcessor } from "./services/message-processor.js";
+import type { SrgaoxiaoSyncService } from "./services/srgaoxiao-sync.js";
 import type { UniversityRepository } from "./services/university-repository.js";
 
 export interface ApiDeps {
@@ -15,6 +17,8 @@ export interface ApiDeps {
   settings: SettingsStore;
   universities: UniversityRepository;
   sync: DataSyncService;
+  srgaoxiaoSync: SrgaoxiaoSyncService;
+  autoSync: AutoSyncScheduler;
   llm: LlmClient;
   logs: LogStore;
   processor: MessageProcessor;
@@ -31,6 +35,7 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       onebot: deps.onebot.status(),
       totals: {
         universities: deps.universities.countUniversities(),
+        srgaoxiaoProfiles: deps.universities.countSchoolProfiles("srgaoxiao"),
         messages: messageCount.count,
         llmCalls: llmCount.count
       },
@@ -44,8 +49,11 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
 
   app.put("/api/settings", async (request) => {
     deps.settings.update(request.body as Record<string, unknown>);
+    deps.autoSync.refresh();
     return { ok: true, settings: deps.settings.all(true) };
   });
+
+  app.get("/api/sync-scheduler", async () => deps.autoSync.status());
 
   app.post("/api/settings/test-llm", async () => {
     const text = await deps.llm.testConnection();
@@ -54,6 +62,15 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
 
   app.post("/api/data/sync", async () => {
     const result = await deps.sync.sync();
+    return { ok: true, ...result };
+  });
+
+  app.post("/api/data/sync-srgaoxiao", async (request) => {
+    const body = request.body as { query?: string; limit?: number };
+    const result = await deps.srgaoxiaoSync.sync({
+      query: body.query,
+      limit: body.limit
+    });
     return { ok: true, ...result };
   });
 
@@ -68,7 +85,8 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
     if (!university) return reply.code(404).send({ error: "not_found" });
     return {
       ...university,
-      aliases: deps.universities.getAliases(university.id)
+      aliases: deps.universities.getAliases(university.id),
+      srgaoxiaoProfile: deps.universities.getSchoolProfile(university.id, "srgaoxiao") ?? null
     };
   });
 

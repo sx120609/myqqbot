@@ -25,6 +25,16 @@ export interface QuestionWithAnswers {
   }>;
 }
 
+export interface SchoolProfileRow {
+  universityId: number;
+  source: string;
+  sourceSchoolId: string | null;
+  sourceUrl: string | null;
+  payloadJson: string;
+  profileText: string;
+  updatedAt: string;
+}
+
 export class UniversityRepository {
   constructor(private readonly database: AppDatabase) {}
 
@@ -109,6 +119,37 @@ export class UniversityRepository {
       .all(limit) as unknown as UniversityRow[];
   }
 
+  listUniversitiesForProfileSync(source: string, query = "", limit = 50): UniversityRow[] {
+    const trimmed = query.trim();
+    const normalized = `%${trimmed}%`;
+    const where = trimmed ? "WHERE u.name LIKE ? OR u.slug LIKE ? OR a.alias LIKE ?" : "";
+    const params = trimmed ? [source, normalized, normalized, normalized, limit] : [source, limit];
+
+    return this.database.db
+      .prepare(
+        `
+        SELECT DISTINCT u.id, u.name, u.slug, u.file_path, u.source_url, u.updated_at,
+          p.updated_at AS profileUpdatedAt
+        FROM universities u
+        LEFT JOIN aliases a ON a.university_id = u.id
+        LEFT JOIN school_profiles p ON p.university_id = u.id AND p.source = ?
+        ${where}
+        ORDER BY CASE WHEN p.updated_at IS NULL THEN 0 ELSE 1 END,
+          COALESCE(p.updated_at, ''),
+          u.name
+        LIMIT ?
+      `
+      )
+      .all(...params) as unknown as UniversityRow[];
+  }
+
+  countSchoolProfiles(source?: string): number {
+    const row = source
+      ? (this.database.db.prepare("SELECT COUNT(*) AS count FROM school_profiles WHERE source = ?").get(source) as { count: number })
+      : (this.database.db.prepare("SELECT COUNT(*) AS count FROM school_profiles").get() as { count: number });
+    return row.count;
+  }
+
   getUniversity(id: number): UniversityRow | undefined {
     return this.database.db
       .prepare(
@@ -118,6 +159,52 @@ export class UniversityRepository {
       `
       )
       .get(id) as UniversityRow | undefined;
+  }
+
+  getSchoolProfile(universityId: number, source = "srgaoxiao"): SchoolProfileRow | undefined {
+    return this.database.db
+      .prepare(
+        `
+        SELECT university_id AS universityId, source, source_school_id AS sourceSchoolId,
+          source_url AS sourceUrl, payload_json AS payloadJson, profile_text AS profileText,
+          updated_at AS updatedAt
+        FROM school_profiles
+        WHERE university_id = ? AND source = ?
+      `
+      )
+      .get(universityId, source) as SchoolProfileRow | undefined;
+  }
+
+  upsertSchoolProfile(input: {
+    universityId: number;
+    source: string;
+    sourceSchoolId?: string | null;
+    sourceUrl?: string | null;
+    payloadJson: string;
+    profileText: string;
+  }): void {
+    this.database.db
+      .prepare(
+        `
+        INSERT INTO school_profiles(university_id, source, source_school_id, source_url, payload_json, profile_text, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(university_id, source) DO UPDATE SET
+          source_school_id = excluded.source_school_id,
+          source_url = excluded.source_url,
+          payload_json = excluded.payload_json,
+          profile_text = excluded.profile_text,
+          updated_at = excluded.updated_at
+      `
+      )
+      .run(
+        input.universityId,
+        input.source,
+        input.sourceSchoolId ?? null,
+        input.sourceUrl ?? null,
+        input.payloadJson,
+        input.profileText,
+        new Date().toISOString()
+      );
   }
 
   getAliases(universityId?: number): Array<{ id: number; alias: string; universityId: number; universityName: string; priority: number }> {

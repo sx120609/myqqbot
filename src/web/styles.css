@@ -196,7 +196,7 @@ nav button:hover {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
   margin-bottom: 14px;
 }
@@ -321,6 +321,13 @@ textarea {
   max-width: 760px;
 }
 
+.scheduler-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 18px;
+  margin-top: 12px;
+}
+
 .searchbox {
   width: min(460px, 100%);
   display: flex;
@@ -336,6 +343,10 @@ textarea {
   border: 0;
   padding-left: 0;
   outline: 0;
+}
+
+.small-input {
+  width: 82px;
 }
 
 .split {
@@ -449,6 +460,7 @@ tbody tr:hover {
   .section-grid,
   .logs-grid,
   .form-grid,
+  .scheduler-grid,
   .split {
     grid-template-columns: 1fr;
   }

@@ -31,6 +31,7 @@ interface Dashboard {
   };
   totals: {
     universities: number;
+    srgaoxiaoProfiles: number;
     messages: number;
     llmCalls: number;
   };
@@ -51,6 +52,13 @@ interface University {
   source_url: string;
   updated_at: string;
   raw_markdown?: string;
+  srgaoxiaoProfile?: {
+    source: string;
+    sourceSchoolId: string | null;
+    sourceUrl: string | null;
+    profileText: string;
+    updatedAt: string;
+  } | null;
 }
 
 interface AliasRow {
@@ -64,6 +72,29 @@ interface AliasRow {
 interface AuthStatus {
   configured: boolean;
   authenticated: boolean;
+}
+
+interface SyncSchedulerStatus {
+  jobs: {
+    colleges: {
+      enabled: boolean;
+      intervalHours: number;
+      running: boolean;
+      lastStartedAt: string | null;
+      lastFinishedAt: string | null;
+      lastError: string | null;
+      nextRunAt: string | null;
+    };
+    srgaoxiao: {
+      enabled: boolean;
+      intervalHours: number;
+      running: boolean;
+      lastStartedAt: string | null;
+      lastFinishedAt: string | null;
+      lastError: string | null;
+      nextRunAt: string | null;
+    };
+  };
 }
 
 const NAV = [
@@ -226,6 +257,7 @@ function DashboardPage() {
       <div className="metrics">
         <Metric label="NapCat" value={dashboard?.onebot.connected ? "已连接" : "未连接"} tone={dashboard?.onebot.connected ? "good" : "warn"} />
         <Metric label="高校数据" value={String(dashboard?.totals.universities ?? 0)} />
+        <Metric label="神人画像" value={String(dashboard?.totals.srgaoxiaoProfiles ?? 0)} />
         <Metric label="消息日志" value={String(dashboard?.totals.messages ?? 0)} />
         <Metric label="LLM 调用" value={String(dashboard?.totals.llmCalls ?? 0)} />
       </div>
@@ -382,13 +414,26 @@ function SecurityPage() {
 
 function DataPage() {
   const [query, setQuery] = useState("");
+  const [profileLimit, setProfileLimit] = useState("20");
+  const [settings, setSettings] = useState<Record<string, string | boolean>>({});
+  const [scheduler, setScheduler] = useState<SyncSchedulerStatus | null>(null);
   const [schools, setSchools] = useState<University[]>([]);
   const [selected, setSelected] = useState<University | null>(null);
   const [status, setStatus] = useState("");
 
   const search = async () => setSchools(await api<University[]>(`/api/universities?query=${encodeURIComponent(query)}&limit=80`));
-  useEffect(() => void search(), []);
+  const loadAutoSync = async () => {
+    setSettings(await api<Record<string, string | boolean>>("/api/settings"));
+    setScheduler(await api<SyncSchedulerStatus>("/api/sync-scheduler"));
+  };
+  useEffect(() => {
+    void search();
+    void loadAutoSync();
+    const timer = window.setInterval(() => void loadAutoSync(), 15000);
+    return () => window.clearInterval(timer);
+  }, []);
   const open = async (id: number) => setSelected(await api<University>(`/api/universities/${id}`));
+  const updateSetting = (key: string, value: string | boolean) => setSettings((current) => ({ ...current, [key]: value }));
   const sync = async () => {
     setStatus("同步中...");
     try {
@@ -399,14 +444,68 @@ function DataPage() {
       setStatus(error instanceof Error ? error.message : String(error));
     }
   };
+  const syncSrgaoxiao = async () => {
+    setStatus("神人高校画像同步中...");
+    try {
+      const result = await api<{ saved: number; total: number; errors: unknown[] }>("/api/data/sync-srgaoxiao", {
+        method: "POST",
+        body: JSON.stringify({
+          query: query.trim(),
+          limit: Number(profileLimit) || 20
+        })
+      });
+      setStatus(`神人高校画像同步完成：${result.saved}/${result.total}${result.errors.length ? `，失败 ${result.errors.length} 个` : ""}`);
+      await search();
+      if (selected) await open(selected.id);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const saveAutoSync = async () => {
+    setStatus("保存自动同步设置中...");
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify(settings) });
+      await loadAutoSync();
+      setStatus("自动同步设置已保存");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   return (
     <section>
-      <Header title="高校数据" subtitle="同步 CollegesChat 资料，查看解析后的学校条目。" />
+      <Header title="高校数据" subtitle="同步 CollegesChat 资料和神人高校画像，查看解析后的学校条目。" />
+      <Panel title="自动同步" icon={<RefreshCcw size={18} />}>
+        <div className="toggle-row">
+          <Switch label="定期同步 CollegesChat" checked={settings["sync.collegesAutoEnabled"] === "true"} onChange={(v) => updateSetting("sync.collegesAutoEnabled", String(v))} />
+          <Switch label="定期同步神人画像" checked={settings["sync.srgaoxiaoAutoEnabled"] === "true"} onChange={(v) => updateSetting("sync.srgaoxiaoAutoEnabled", String(v))} />
+        </div>
+        <FormGrid>
+          <Input label="主数据间隔小时" value={String(settings["sync.collegesIntervalHours"] ?? "24")} onChange={(v) => updateSetting("sync.collegesIntervalHours", v)} />
+          <Input label="画像间隔小时" value={String(settings["sync.srgaoxiaoIntervalHours"] ?? "24")} onChange={(v) => updateSetting("sync.srgaoxiaoIntervalHours", v)} />
+          <Input label="画像每批学校数" value={String(settings["sync.srgaoxiaoLimit"] ?? "120")} onChange={(v) => updateSetting("sync.srgaoxiaoLimit", v)} />
+        </FormGrid>
+        <div className="scheduler-grid">
+          <KeyValue label="主数据状态" value={scheduler?.jobs.colleges.running ? "运行中" : scheduler?.jobs.colleges.enabled ? "已启用" : "未启用"} />
+          <KeyValue label="主数据下次" value={formatScheduleTime(scheduler?.jobs.colleges.nextRunAt)} />
+          <KeyValue label="画像状态" value={scheduler?.jobs.srgaoxiao.running ? "运行中" : scheduler?.jobs.srgaoxiao.enabled ? "已启用" : "未启用"} />
+          <KeyValue label="画像下次" value={formatScheduleTime(scheduler?.jobs.srgaoxiao.nextRunAt)} />
+          <KeyValue label="主数据最近" value={formatTime(scheduler?.jobs.colleges.lastFinishedAt)} />
+          <KeyValue label="画像最近" value={formatTime(scheduler?.jobs.srgaoxiao.lastFinishedAt)} />
+        </div>
+        {(scheduler?.jobs.colleges.lastError || scheduler?.jobs.srgaoxiao.lastError) && (
+          <p className="notice">{scheduler.jobs.colleges.lastError || scheduler.jobs.srgaoxiao.lastError}</p>
+        )}
+        <div className="actions">
+          <button className="primary" onClick={saveAutoSync}><Save size={16} />保存自动同步</button>
+        </div>
+      </Panel>
       <div className="toolbar">
         <div className="searchbox"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void search()} placeholder="搜索学校或 slug" /></div>
+        <input className="small-input" value={profileLimit} onChange={(e) => setProfileLimit(e.target.value)} inputMode="numeric" aria-label="画像同步数量" />
         <button onClick={search}><Search size={16} />搜索</button>
         <button className="primary" onClick={sync}><RefreshCcw size={16} />同步</button>
+        <button onClick={syncSrgaoxiao}><RefreshCcw size={16} />同步画像</button>
       </div>
       {status && <p className="notice">{status}</p>}
       <div className="split">
@@ -428,6 +527,9 @@ function DataPage() {
           {selected ? (
             <>
               <KeyValue label="来源" value={selected.source_url} />
+              <KeyValue label="神人高校画像" value={selected.srgaoxiaoProfile ? formatTime(selected.srgaoxiaoProfile.updatedAt) : "未同步"} />
+              {selected.srgaoxiaoProfile?.sourceUrl && <KeyValue label="画像来源" value={selected.srgaoxiaoProfile.sourceUrl} />}
+              {selected.srgaoxiaoProfile?.profileText && <pre className="raw">{selected.srgaoxiaoProfile.profileText}</pre>}
               <pre className="raw">{selected.raw_markdown?.slice(0, 3000) ?? ""}</pre>
             </>
           ) : <p className="muted">选择左侧学校查看原始 Markdown 摘要。</p>}
@@ -585,6 +687,13 @@ function Switch({ label, checked, onChange }: { label: string; checked: boolean;
 function formatTime(value?: string | null) {
   if (!value) return "-";
   return new Date(value).toLocaleString("zh-CN");
+}
+
+function formatScheduleTime(value?: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN");
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

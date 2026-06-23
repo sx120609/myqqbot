@@ -13,8 +13,10 @@ import { LlmClient } from "./services/llm-client.js";
 import { LogStore } from "./services/log-store.js";
 import { MessageProcessor } from "./services/message-processor.js";
 import { NaturalLanguageService } from "./services/nlu.js";
+import { SrgaoxiaoSyncService } from "./services/srgaoxiao-sync.js";
 import { UniversityRepository } from "./services/university-repository.js";
 import { registerAdminAuth } from "./services/admin-auth.js";
+import { AutoSyncScheduler } from "./services/auto-sync-scheduler.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -23,16 +25,19 @@ async function main(): Promise<void> {
   const logs = new LogStore(database);
   const universities = new UniversityRepository(database);
   const sync = new DataSyncService(config, database, universities);
+  const srgaoxiaoSync = new SrgaoxiaoSyncService(config, universities);
   const llm = new LlmClient(settings, logs);
   const nlu = new NaturalLanguageService(universities);
   const processor = new MessageProcessor(settings, universities, nlu, llm, logs);
   const onebot = new OneBotGateway(settings, processor);
+  const autoSync = new AutoSyncScheduler(settings, sync, srgaoxiaoSync);
 
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });
   await registerAdminAuth(app, config, settings);
   await onebot.register(app);
-  await registerApi(app, { config, database, settings, universities, sync, llm, logs, processor, onebot });
+  app.addHook("onClose", async () => autoSync.stop());
+  await registerApi(app, { config, database, settings, universities, sync, srgaoxiaoSync, autoSync, llm, logs, processor, onebot });
 
   const webRoot = resolve(config.cwd, "dist/web");
   if (existsSync(webRoot)) {
@@ -50,6 +55,7 @@ async function main(): Promise<void> {
   }
 
   const address = await app.listen({ host: config.server.host, port: config.server.port });
+  autoSync.start();
   app.log.info(`WebUI: ${address}`);
   app.log.info(`NapCat reverse WS: ${address.replace(/^http/, "ws")}/onebot/v11/ws`);
 }

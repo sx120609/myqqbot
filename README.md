@@ -7,6 +7,7 @@
 - NapCat / OneBot v11 反向 WebSocket 接入。
 - 自然语言学校和主题识别，支持“安大”“西电”“南航”等默认别名。
 - 同步并解析 CollegesChat `generated` 分支的 `docs/universities/*.md`。
+- 可按需同步神人高校网学校画像，补充城市、标签、地址、占地、评分等结构化信息。
 - SQLite 本地索引，包含学校、问题、回答、问卷 ID 和来源链接。
 - OpenAI-compatible LLM 客户端，可配置 sub2api 源站、API Key 和模型名。
 - 支持 QQ 图片消息，会把图片传给支持视觉能力的模型进行回复。
@@ -86,6 +87,22 @@ sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync
 sudo APP_DIR=/opt/myqqbot FORCE_DATA_SYNC=1 scripts/deploy.sh sync
 ```
 
+同步一批神人高校网学校画像：
+
+```bash
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-srgaoxiao
+```
+
+只同步某个学校或控制数量：
+
+```bash
+cd /opt/myqqbot
+sudo SRGAOXIAO_SYNC_QUERY='中国药科大学' SRGAOXIAO_SYNC_LIMIT=1 npm run sync:srgaoxiao
+sudo SRGAOXIAO_SYNC_LIMIT=50 npm run sync:srgaoxiao
+```
+
+WebUI 的“高校数据”页可以直接开启和调整应用内自动同步，包括 CollegesChat 主数据同步间隔、神人高校画像同步间隔、画像每批刷新数量。应用内自动同步设置保存在 SQLite 中，不需要 root 权限。
+
 如需定期更新高校数据，可启用 systemd 定时器，默认每天 `03:40` 附近执行一次：
 
 ```bash
@@ -103,6 +120,25 @@ sudo APP_DIR=/opt/myqqbot SYNC_TIMER_CALENDAR='04:30' scripts/deploy.sh enable-s
 
 ```bash
 sudo APP_DIR=/opt/myqqbot scripts/deploy.sh disable-sync-timer
+```
+
+如需定期更新神人高校画像，可启用独立定时器，默认每天 `04:20` 附近刷新 120 所学校。同步时会优先补未缓存学校，其次刷新最久未更新的缓存：
+
+```bash
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh enable-srgaoxiao-timer
+systemctl list-timers | grep srgaoxiao
+```
+
+修改时间或每次刷新数量：
+
+```bash
+sudo APP_DIR=/opt/myqqbot SRGAOXIAO_TIMER_CALENDAR='04:20' SRGAOXIAO_TIMER_LIMIT=200 scripts/deploy.sh enable-srgaoxiao-timer
+```
+
+关闭画像定时同步：
+
+```bash
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh disable-srgaoxiao-timer
 ```
 
 如果你的服务器已经生成过旧 `.env`，更新脚本会把默认 GitHub 数据源自动迁移到 `gh.lizmt.cn` 镜像。也可以手动确认：
@@ -156,4 +192,4 @@ npm.cmd run build
 
 ## 数据来源与提示
 
-高校生活资料来自 [CollegesChat/university-information](https://github.com/CollegesChat/university-information) 的问卷生成文档。机器人会先用公开常识给出院校定位，例如城市、办学层次、行业特色、优势方向等，再优先引用问卷资料总结宿舍、食堂、校园网、管理等生活体验。回复会提示“院校画像为公开常识参考，生活体验数据来自 CollegesChat 问卷，常识建议仅供参考”，不会把问卷内容包装成官方结论，也不会把常识补充伪装成该校确定事实。
+高校生活资料来自 [CollegesChat/university-information](https://github.com/CollegesChat/university-information) 的问卷生成文档。院校定位可补充 [神人高校网](https://srgaoxiao.cn/) 的公开学校画像缓存，用于城市、标签、校区、占地、建校年份和聚合评分等信息；默认不抓取评论列表，也不把这些数据用于模型训练。机器人会优先引用问卷资料总结宿舍、食堂、校园网、管理等生活体验。回复会提示“院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷，常识建议仅供参考”，不会把问卷内容包装成官方结论，也不会把常识补充伪装成该校确定事实。

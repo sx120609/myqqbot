@@ -110,7 +110,16 @@ describe("MessageProcessor", () => {
       buildRetrievalContext: vi.fn()
     } as unknown as NaturalLanguageService;
     const universities = {
-      getTopicQuestions: vi.fn(() => [])
+      getTopicQuestions: vi.fn(() => []),
+      getSchoolProfile: vi.fn(() => ({
+        universityId: 1,
+        source: "srgaoxiao",
+        sourceSchoolId: "114",
+        sourceUrl: "https://srgaoxiao.cn/school/%E4%B8%AD%E5%9B%BD%E8%8D%AF%E7%A7%91%E5%A4%A7%E5%AD%A6",
+        payloadJson: "{}",
+        profileText: "来源：神人高校网\n学校：中国药科大学\n定位：医药类；江苏省；南京市\n标签：211；双一流\n建校/占地：1936 年建校；占地约 2100 亩",
+        updatedAt: "2026-06-24T00:00:00.000Z"
+      }))
     } as unknown as UniversityRepository;
     const llm = {
       chat: vi.fn().mockResolvedValue("问卷里没查到这一项，可以先按常见情况判断。\n\n数据来自 CollegesChat 问卷，常识建议仅供参考。")
@@ -133,6 +142,8 @@ describe("MessageProcessor", () => {
     expect(result.reason).toBe("已回答");
     expect(llm.chat).toHaveBeenCalledWith(expect.any(Array), "university-answer");
     expect(JSON.stringify(vi.mocked(llm.chat).mock.calls[0][0])).toContain("这次没有检索到 中国药科大学");
+    expect(JSON.stringify(vi.mocked(llm.chat).mock.calls[0][0])).toContain("外部院校画像补充资料");
+    expect(JSON.stringify(vi.mocked(llm.chat).mock.calls[0][0])).toContain("占地约 2100 亩");
     expect(String(vi.mocked(llm.chat).mock.calls[0][0][0].content)).toContain("院校定位");
   });
 
