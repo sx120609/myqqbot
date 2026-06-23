@@ -9,13 +9,16 @@ import { UniversityRepository } from "./university-repository.js";
 
 const execFileAsync = promisify(execFile);
 
+export type SyncProgressReporter = (message: string) => void;
+
 export class DataSyncService {
   private readonly repoDir: string;
 
   constructor(
     private readonly config: AppConfig,
     private readonly database: AppDatabase,
-    private readonly universities: UniversityRepository
+    private readonly universities: UniversityRepository,
+    private readonly progress?: SyncProgressReporter
   ) {
     this.repoDir = resolve(config.dataDir, "university-information");
   }
@@ -28,16 +31,29 @@ export class DataSyncService {
     const syncId = Number(syncInfo.lastInsertRowid);
 
     try {
+      this.report("Preparing CollegesChat data repository...");
       const commitSha = (await this.ensureRepo()).trim();
+      this.report(`Using data commit ${commitSha.slice(0, 12)}.`);
+      this.report(`Listing markdown files under ${this.config.dataSource.dataPath}...`);
       const files = await this.listMarkdownFiles(commitSha);
+      this.report(`Found ${files.length} markdown files.`);
+      let completed = 0;
+      let lastReported = 0;
       const parsed = (
         await mapLimit(files, 8, async (filePath) => {
           const markdown = await this.git(["show", `${commitSha}:${filePath}`]);
           const sourceUrl = `https://raw.githubusercontent.com/CollegesChat/university-information/${this.config.dataSource.branch}/${filePath}`;
-          return parseUniversityMarkdown(filePath, sourceUrl, markdown);
+          const result = parseUniversityMarkdown(filePath, sourceUrl, markdown);
+          completed += 1;
+          if (completed === files.length || completed - lastReported >= 100) {
+            lastReported = completed;
+            this.report(`Parsed ${completed}/${files.length} files...`);
+          }
+          return result;
         })
       ).filter((item): item is NonNullable<typeof item> => Boolean(item));
 
+      this.report(`Importing ${parsed.length} universities into SQLite...`);
       this.universities.importAll(parsed);
       this.database.db
         .prepare(
@@ -49,6 +65,7 @@ export class DataSyncService {
         )
         .run("success", new Date().toISOString(), commitSha.trim(), files.length, parsed.length, syncId);
 
+      this.report("Data sync finished.");
       return { commitSha: commitSha.trim(), totalFiles: files.length, totalUniversities: parsed.length };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -76,6 +93,7 @@ export class DataSyncService {
   private async ensureRepo(): Promise<string> {
     mkdirSync(this.config.dataDir, { recursive: true });
     if (!existsSync(join(this.repoDir, ".git"))) {
+      this.report(`Cloning ${this.config.dataSource.repoUrl} (${this.config.dataSource.branch})...`);
       await execFileAsync("git", [
         "-c",
         "core.longpaths=true",
@@ -92,6 +110,7 @@ export class DataSyncService {
       return this.git(["rev-parse", "HEAD"]);
     }
 
+    this.report(`Fetching latest ${this.config.dataSource.branch} branch...`);
     await this.git(["fetch", "--depth", "1", "origin", this.config.dataSource.branch]);
     return this.git(["rev-parse", "FETCH_HEAD"]);
   }
@@ -111,6 +130,10 @@ export class DataSyncService {
       .map((line) => line.trim())
       .filter((line) => line.endsWith(".md"))
       .sort();
+  }
+
+  private report(message: string): void {
+    this.progress?.(message);
   }
 }
 

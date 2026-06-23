@@ -6,7 +6,9 @@ import { UniversityRepository } from "../services/university-repository.js";
 const config = loadConfig();
 const database = new AppDatabase(config.dbPath);
 const universities = new UniversityRepository(database);
-const sync = new DataSyncService(config, database, universities);
+const sync = new DataSyncService(config, database, universities, (message) => {
+  console.log(`[sync:data] ${message}`);
+});
 
 try {
   const result = await sync.sync();
@@ -14,4 +16,3 @@ try {
 } finally {
   database.close();
 }
-

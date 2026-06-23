@@ -15,6 +15,10 @@ NODE_BIN="${NODE_BIN:-}"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+COMMAND="${1:-install}"
+if [ "$#" -gt 0 ]; then
+  shift
+fi
 
 log() {
   printf '\033[1;34m[deploy]\033[0m %s\n' "$*"
@@ -27,6 +31,34 @@ fail() {
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"
+}
+
+usage() {
+  cat <<EOF
+Usage:
+  scripts/deploy.sh install      Initial deploy or reinstall. This is the default command.
+  scripts/deploy.sh update       Pull latest code, rebuild, and restart the service.
+  scripts/deploy.sh restart      Restart the systemd service.
+  scripts/deploy.sh status       Show the systemd service status.
+  scripts/deploy.sh logs         Follow service logs.
+  scripts/deploy.sh sync         Sync CollegesChat data in the deployed app directory.
+  scripts/deploy.sh help         Show this help.
+
+Common environment variables:
+  APP_DIR=/opt/myqqbot           Deploy/update directory. Defaults to current checkout.
+  SERVICE_NAME=myqqbot           systemd service name.
+  BRANCH=main                    Git branch to deploy.
+  REPO_URL=https://...           Required when cloning into a new APP_DIR and origin is unavailable.
+  APP_PORT=8787                  Port written to a newly created .env.
+  NODE_BIN=/usr/local/bin/node   Node binary used by systemd.
+  SKIP_DATA_SYNC=1               Skip data sync during install/update.
+  SKIP_SYSTEMD=1                 Do not install/restart systemd service.
+
+Examples:
+  sudo APP_DIR=/opt/myqqbot scripts/deploy.sh install
+  sudo APP_DIR=/opt/myqqbot scripts/deploy.sh update
+  sudo scripts/deploy.sh logs
+EOF
 }
 
 run_root() {
@@ -50,17 +82,31 @@ set_env_value() {
   fi
 }
 
-prepare_app_dir() {
+resolve_app_dir() {
   if [ -z "$APP_DIR" ]; then
     APP_DIR="$SOURCE_DIR"
-    log "Using current checkout: $APP_DIR"
-    return
+  else
+    APP_DIR="$(mkdir -p "$(dirname "$APP_DIR")" && cd "$(dirname "$APP_DIR")" && pwd)/$(basename "$APP_DIR")"
   fi
+}
 
-  APP_DIR="$(mkdir -p "$(dirname "$APP_DIR")" && cd "$(dirname "$APP_DIR")" && pwd)/$(basename "$APP_DIR")"
+pull_existing_checkout() {
+  [ -d "$APP_DIR/.git" ] || fail "$APP_DIR is not a git checkout. Run install first or set APP_DIR correctly."
+
+  log "Updating git checkout in $APP_DIR ($BRANCH)"
+  git -C "$APP_DIR" fetch origin "$BRANCH"
+  git -C "$APP_DIR" checkout "$BRANCH"
+  git -C "$APP_DIR" pull --ff-only origin "$BRANCH"
+}
+
+prepare_app_dir_for_install() {
+  resolve_app_dir
 
   if [ "$APP_DIR" = "$SOURCE_DIR" ]; then
     log "Using current checkout: $APP_DIR"
+    if [ -d "$APP_DIR/.git" ] && [ "${UPDATE_CURRENT_ON_INSTALL:-0}" = "1" ]; then
+      pull_existing_checkout
+    fi
     return
   fi
 
@@ -70,16 +116,18 @@ prepare_app_dir() {
   [ -n "$REPO_URL" ] || fail "REPO_URL is required when APP_DIR points to another directory."
 
   if [ -d "$APP_DIR/.git" ]; then
-    log "Updating $APP_DIR from $REPO_URL ($BRANCH)"
-    git -C "$APP_DIR" fetch origin "$BRANCH"
-    git -C "$APP_DIR" checkout "$BRANCH"
-    git -C "$APP_DIR" pull --ff-only origin "$BRANCH"
+    pull_existing_checkout
   elif [ -e "$APP_DIR" ] && [ "$(find "$APP_DIR" -mindepth 1 -maxdepth 1 | wc -l)" -gt 0 ]; then
     fail "$APP_DIR exists and is not an empty git checkout."
   else
     log "Cloning $REPO_URL into $APP_DIR"
     git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
   fi
+}
+
+prepare_app_dir_for_update() {
+  resolve_app_dir
+  pull_existing_checkout
 }
 
 ensure_linux_and_node() {
@@ -142,6 +190,7 @@ install_and_build() {
 
   if [ "$SKIP_DATA_SYNC" != "1" ]; then
     log "Syncing CollegesChat university data"
+    log "First sync may take a few minutes depending on GitHub/network speed"
     npm run sync:data
   else
     log "Skipping data sync"
@@ -153,6 +202,26 @@ install_and_build() {
   if [ "$PRUNE_DEV_DEPS" = "1" ]; then
     log "Pruning development dependencies"
     npm prune --omit=dev
+  fi
+}
+
+service_exists() {
+  command -v systemctl >/dev/null 2>&1 && systemctl cat "$SERVICE_NAME" >/dev/null 2>&1
+}
+
+restart_service() {
+  [ "$SKIP_SYSTEMD" != "1" ] || {
+    log "Skipping systemd restart"
+    return
+  }
+
+  need_cmd systemctl
+  if service_exists; then
+    log "Restarting systemd service: $SERVICE_NAME"
+    run_root systemctl restart "$SERVICE_NAME"
+  else
+    log "Service $SERVICE_NAME does not exist yet; installing it now"
+    install_systemd_service
   fi
 }
 
@@ -207,7 +276,7 @@ EOF
   run_root systemctl restart "$SERVICE_NAME"
 }
 
-print_summary() {
+print_install_summary() {
   cat <<EOF
 
 Deploy finished.
@@ -233,13 +302,89 @@ Set your sub2api values:
 EOF
 }
 
-main() {
+print_update_summary() {
+  cat <<EOF
+
+Update finished.
+
+Service:
+  systemctl status ${SERVICE_NAME}
+  journalctl -u ${SERVICE_NAME} -f
+
+WebUI:
+  http://<server-ip>:${APP_PORT}
+
+EOF
+}
+
+install_command() {
   ensure_linux_and_node
-  prepare_app_dir
+  prepare_app_dir_for_install
   prepare_env
   install_and_build
   install_systemd_service
-  print_summary
+  print_install_summary
+}
+
+update_command() {
+  ensure_linux_and_node
+  prepare_app_dir_for_update
+  prepare_env
+  install_and_build
+  restart_service
+  print_update_summary
+}
+
+sync_command() {
+  ensure_linux_and_node
+  resolve_app_dir
+  cd "$APP_DIR"
+  if [ -f dist/server/scripts/sync-data.js ]; then
+    node dist/server/scripts/sync-data.js
+  else
+    npm run sync:data
+  fi
+}
+
+systemd_command() {
+  local action="$1"
+  [ "$SKIP_SYSTEMD" != "1" ] || fail "SKIP_SYSTEMD=1 is set."
+  need_cmd systemctl
+  case "$action" in
+    restart)
+      run_root systemctl restart "$SERVICE_NAME"
+      ;;
+    status)
+      systemctl status "$SERVICE_NAME"
+      ;;
+    logs)
+      journalctl -u "$SERVICE_NAME" -f
+      ;;
+  esac
+}
+
+main() {
+  case "$COMMAND" in
+    install|deploy)
+      install_command
+      ;;
+    update)
+      update_command
+      ;;
+    sync)
+      sync_command
+      ;;
+    restart|status|logs)
+      systemd_command "$COMMAND"
+      ;;
+    help|-h|--help)
+      usage
+      ;;
+    *)
+      usage
+      fail "Unknown command: $COMMAND"
+      ;;
+  esac
 }
 
 main "$@"

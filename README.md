@@ -41,18 +41,30 @@ ws://127.0.0.1:8787/onebot/v11/ws
 
 ```bash
 chmod +x scripts/deploy.sh
-sudo APP_DIR=/opt/myqqbot scripts/deploy.sh
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh install
 ```
 
 脚本会安装依赖、同步高校数据、构建 WebUI、创建 systemd 服务并启动。默认服务名是 `myqqbot`，默认端口是 `8787`。
 
+以后更新程序直接运行：
+
+```bash
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh update
+```
+
+如果已经在 `/opt/myqqbot` 目录内，也可以：
+
+```bash
+sudo ./scripts/deploy.sh update
+```
+
 常用参数：
 
 ```bash
-sudo SERVICE_NAME=myqqbot APP_DIR=/opt/myqqbot APP_PORT=8787 scripts/deploy.sh
-sudo NODE_BIN=/usr/local/bin/node APP_DIR=/opt/myqqbot scripts/deploy.sh
-sudo SKIP_DATA_SYNC=1 scripts/deploy.sh
-sudo SKIP_SYSTEMD=1 scripts/deploy.sh
+sudo SERVICE_NAME=myqqbot APP_DIR=/opt/myqqbot APP_PORT=8787 scripts/deploy.sh install
+sudo NODE_BIN=/usr/local/bin/node APP_DIR=/opt/myqqbot scripts/deploy.sh install
+sudo APP_DIR=/opt/myqqbot SKIP_DATA_SYNC=1 scripts/deploy.sh update
+sudo APP_DIR=/opt/myqqbot SKIP_SYSTEMD=1 scripts/deploy.sh update
 ```
 
 部署后编辑：
@@ -65,8 +77,9 @@ sudo systemctl restart myqqbot
 查看运行状态：
 
 ```bash
-systemctl status myqqbot
-journalctl -u myqqbot -f
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh status
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh logs
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh restart
 ```
 
 ## 模型配置
