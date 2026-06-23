@@ -53,6 +53,12 @@ sudo APP_DIR=/opt/myqqbot scripts/deploy.sh install
 sudo APP_DIR=/opt/myqqbot scripts/deploy.sh update
 ```
 
+`update` 默认只更新程序代码、依赖、构建产物并重启服务，不会重新同步 3000 多份高校数据。需要连数据一起同步时再显式开启：
+
+```bash
+sudo APP_DIR=/opt/myqqbot SYNC_DATA_ON_UPDATE=1 scripts/deploy.sh update
+```
+
 如果已经在 `/opt/myqqbot` 目录内，也可以：
 
 ```bash
@@ -66,6 +72,37 @@ sudo SERVICE_NAME=myqqbot APP_DIR=/opt/myqqbot APP_PORT=8787 scripts/deploy.sh i
 sudo NODE_BIN=/usr/local/bin/node APP_DIR=/opt/myqqbot scripts/deploy.sh install
 sudo APP_DIR=/opt/myqqbot SKIP_DATA_SYNC=1 scripts/deploy.sh update
 sudo APP_DIR=/opt/myqqbot SKIP_SYSTEMD=1 scripts/deploy.sh update
+```
+
+高校数据不会在普通 `update` 时重复拉取。手动同步：
+
+```bash
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync
+```
+
+同步脚本会检查 CollegesChat 数据 commit，如果没变化会直接跳过解析和入库。需要强制重建索引时：
+
+```bash
+sudo APP_DIR=/opt/myqqbot FORCE_DATA_SYNC=1 scripts/deploy.sh sync
+```
+
+如需定期更新高校数据，可启用 systemd 定时器，默认每天 `03:40` 附近执行一次：
+
+```bash
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh enable-sync-timer
+systemctl list-timers | grep myqqbot
+```
+
+修改时间：
+
+```bash
+sudo APP_DIR=/opt/myqqbot SYNC_TIMER_CALENDAR='04:30' scripts/deploy.sh enable-sync-timer
+```
+
+关闭定时同步：
+
+```bash
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh disable-sync-timer
 ```
 
 如果你的服务器已经生成过旧 `.env`，更新脚本会把默认 GitHub 数据源自动迁移到 `gh.lizmt.cn` 镜像。也可以手动确认：
@@ -119,4 +156,4 @@ npm.cmd run build
 
 ## 数据来源与提示
 
-高校资料来自 [CollegesChat/university-information](https://github.com/CollegesChat/university-information) 的问卷生成文档。机器人回复会提示“数据来自 CollegesChat 问卷，仅供参考”，不会把问卷内容包装成官方结论。
+高校资料来自 [CollegesChat/university-information](https://github.com/CollegesChat/university-information) 的问卷生成文档。机器人会优先引用问卷资料，也允许模型补充常见大学生活经验、公开常识和理性建议，让回答更完整。回复会提示“数据来自 CollegesChat 问卷，常识建议仅供参考”，不会把问卷内容包装成官方结论，也不会把常识补充伪装成该校确定事实。

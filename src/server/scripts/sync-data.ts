@@ -11,8 +11,12 @@ const sync = new DataSyncService(config, database, universities, (message) => {
 });
 
 try {
-  const result = await sync.sync();
-  console.log(`Synced ${result.totalUniversities}/${result.totalFiles} files at ${result.commitSha}`);
+  const result = await sync.sync({ force: process.env.FORCE_DATA_SYNC === "1" });
+  if (result.skipped) {
+    console.log(`Data already up to date at ${result.commitSha}`);
+  } else {
+    console.log(`Synced ${result.totalUniversities}/${result.totalFiles} files at ${result.commitSha}`);
+  }
 } finally {
   database.close();
 }

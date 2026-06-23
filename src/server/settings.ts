@@ -29,7 +29,7 @@ const DEFAULTS: Record<string, string> = {
   "llm.apiKey": process.env.LLM_API_KEY ?? "",
   "llm.model": process.env.LLM_MODEL ?? "gpt-5.5",
   "llm.temperature": process.env.LLM_TEMPERATURE ?? "0.2",
-  "llm.maxTokens": process.env.LLM_MAX_TOKENS ?? "900",
+  "llm.maxTokens": process.env.LLM_MAX_TOKENS ?? "1600",
   "llm.timeoutMs": process.env.LLM_TIMEOUT_MS ?? "45000",
   "nl.groupNaturalEnabled": "true",
   "nl.requireMentionInGroup": "false",
@@ -71,7 +71,7 @@ export class SettingsStore {
         apiKey: this.getString("llm.apiKey", ""),
         model: this.getString("llm.model", "gpt-5.5"),
         temperature: this.getNumber("llm.temperature", 0.2),
-        maxTokens: this.getNumber("llm.maxTokens", 900),
+        maxTokens: this.getNumber("llm.maxTokens", 1600),
         timeoutMs: this.getNumber("llm.timeoutMs", 45000)
       },
       naturalLanguage: {
@@ -125,12 +125,17 @@ export class SettingsStore {
       INSERT OR IGNORE INTO settings(key, value, updated_at)
       VALUES (?, ?, ?)
     `);
+    const upgradeStmt = this.database.db.prepare(`
+      UPDATE settings
+      SET value = ?, updated_at = ?
+      WHERE key = ? AND value = ?
+    `);
     const now = new Date().toISOString();
     this.database.transaction(() => {
       for (const [key, value] of Object.entries(DEFAULTS)) {
         stmt.run(key, value, now);
       }
+      upgradeStmt.run(DEFAULTS["llm.maxTokens"], now, "llm.maxTokens", "900");
     });
   }
 }
-

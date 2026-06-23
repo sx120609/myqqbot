@@ -12,6 +12,8 @@ SKIP_DATA_SYNC="${SKIP_DATA_SYNC:-0}"
 SKIP_SYSTEMD="${SKIP_SYSTEMD:-0}"
 PRUNE_DEV_DEPS="${PRUNE_DEV_DEPS:-1}"
 NODE_BIN="${NODE_BIN:-}"
+SYNC_DATA_ON_UPDATE="${SYNC_DATA_ON_UPDATE:-0}"
+SYNC_TIMER_CALENDAR="${SYNC_TIMER_CALENDAR:-03:40}"
 DEFAULT_DATA_REPO_URL="https://gh.lizmt.cn/CollegesChat/university-information.git"
 OLD_DATA_REPO_URL="https://github.com/CollegesChat/university-information.git"
 
@@ -44,6 +46,10 @@ Usage:
   scripts/deploy.sh status       Show the systemd service status.
   scripts/deploy.sh logs         Follow service logs.
   scripts/deploy.sh sync         Sync CollegesChat data in the deployed app directory.
+  scripts/deploy.sh enable-sync-timer
+                                  Enable daily CollegesChat data sync timer.
+  scripts/deploy.sh disable-sync-timer
+                                  Disable the data sync timer.
   scripts/deploy.sh help         Show this help.
 
 Common environment variables:
@@ -54,6 +60,8 @@ Common environment variables:
   APP_PORT=8787                  Port written to a newly created .env.
   NODE_BIN=/usr/local/bin/node   Node binary used by systemd.
   SKIP_DATA_SYNC=1               Skip data sync during install/update.
+  SYNC_DATA_ON_UPDATE=1          Also sync data during update. Default: 0.
+  SYNC_TIMER_CALENDAR=03:40      systemd OnCalendar value for data sync.
   SKIP_SYSTEMD=1                 Do not install/restart systemd service.
 
 Examples:
@@ -215,6 +223,20 @@ install_and_build() {
   fi
 }
 
+install_dependencies_and_build_only() {
+  cd "$APP_DIR"
+  log "Installing dependencies"
+  npm ci
+
+  log "Building server and WebUI"
+  npm run build
+
+  if [ "$PRUNE_DEV_DEPS" = "1" ]; then
+    log "Pruning development dependencies"
+    npm prune --omit=dev
+  fi
+}
+
 service_exists() {
   command -v systemctl >/dev/null 2>&1 && systemctl cat "$SERVICE_NAME" >/dev/null 2>&1
 }
@@ -286,6 +308,70 @@ EOF
   run_root systemctl restart "$SERVICE_NAME"
 }
 
+install_sync_timer() {
+  [ "$SKIP_SYSTEMD" != "1" ] || {
+    log "Skipping systemd timer installation"
+    return
+  }
+
+  need_cmd systemctl
+  prepare_runtime_user
+
+  local sync_service="${SERVICE_NAME}-data-sync.service"
+  local sync_timer="${SERVICE_NAME}-data-sync.timer"
+  local service_tmp
+  local timer_tmp
+  service_tmp="$(mktemp)"
+  timer_tmp="$(mktemp)"
+
+  cat >"$service_tmp" <<EOF
+[Unit]
+Description=Sync CollegesChat university data for ${SERVICE_NAME}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=${APP_DIR}
+Environment=NODE_ENV=production
+EnvironmentFile=${APP_DIR}/.env
+ExecStart=/usr/bin/env bash ${APP_DIR}/scripts/deploy.sh sync
+User=${RUN_USER}
+Group=${RUN_GROUP}
+EOF
+
+  cat >"$timer_tmp" <<EOF
+[Unit]
+Description=Daily CollegesChat university data sync for ${SERVICE_NAME}
+
+[Timer]
+OnCalendar=${SYNC_TIMER_CALENDAR}
+Persistent=true
+RandomizedDelaySec=20m
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  log "Installing systemd timer: $sync_timer"
+  run_root install -m 0644 "$service_tmp" "/etc/systemd/system/${sync_service}"
+  run_root install -m 0644 "$timer_tmp" "/etc/systemd/system/${sync_timer}"
+  rm -f "$service_tmp" "$timer_tmp"
+  run_root systemctl daemon-reload
+  run_root systemctl enable --now "$sync_timer"
+}
+
+disable_sync_timer() {
+  [ "$SKIP_SYSTEMD" != "1" ] || fail "SKIP_SYSTEMD=1 is set."
+  need_cmd systemctl
+  local sync_service="${SERVICE_NAME}-data-sync.service"
+  local sync_timer="${SERVICE_NAME}-data-sync.timer"
+  run_root systemctl disable --now "$sync_timer" 2>/dev/null || true
+  run_root rm -f "/etc/systemd/system/${sync_timer}" "/etc/systemd/system/${sync_service}"
+  run_root systemctl daemon-reload
+  log "Disabled sync timer: $sync_timer"
+}
+
 print_install_summary() {
   cat <<EOF
 
@@ -340,7 +426,12 @@ update_command() {
   ensure_linux_and_node
   prepare_app_dir_for_update
   prepare_env
-  install_and_build
+  if [ "$SYNC_DATA_ON_UPDATE" = "1" ]; then
+    install_and_build
+  else
+    log "Skipping data sync during program update. Run scripts/deploy.sh sync to update university data."
+    install_dependencies_and_build_only
+  fi
   restart_service
   print_update_summary
 }
@@ -386,6 +477,15 @@ main() {
       ;;
     restart|status|logs)
       systemd_command "$COMMAND"
+      ;;
+    enable-sync-timer)
+      ensure_linux_and_node
+      resolve_app_dir
+      prepare_env
+      install_sync_timer
+      ;;
+    disable-sync-timer)
+      disable_sync_timer
       ;;
     help|-h|--help)
       usage

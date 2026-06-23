@@ -11,6 +11,17 @@ const execFileAsync = promisify(execFile);
 
 export type SyncProgressReporter = (message: string) => void;
 
+export interface SyncResult {
+  commitSha: string;
+  totalFiles: number;
+  totalUniversities: number;
+  skipped?: boolean;
+}
+
+export interface SyncOptions {
+  force?: boolean;
+}
+
 export class DataSyncService {
   private readonly repoDir: string;
 
@@ -23,7 +34,7 @@ export class DataSyncService {
     this.repoDir = resolve(config.dataDir, "university-information");
   }
 
-  async sync(): Promise<{ commitSha: string; totalFiles: number; totalUniversities: number }> {
+  async sync(options: SyncOptions = {}): Promise<SyncResult> {
     const startedAt = new Date().toISOString();
     const syncInfo = this.database.db
       .prepare("INSERT INTO sync_runs(status, started_at) VALUES (?, ?)")
@@ -34,6 +45,33 @@ export class DataSyncService {
       this.report("Preparing CollegesChat data repository...");
       const commitSha = (await this.ensureRepo()).trim();
       this.report(`Using data commit ${commitSha.slice(0, 12)}.`);
+      const latestSuccessful = this.latestSuccessfulSync();
+      if (!options.force && latestSuccessful?.commitSha === commitSha && this.universities.countUniversities() > 0) {
+        this.report("Data commit unchanged; skipping parse/import. Set FORCE_DATA_SYNC=1 to rebuild anyway.");
+        this.database.db
+          .prepare(
+            `
+            UPDATE sync_runs
+            SET status = ?, finished_at = ?, commit_sha = ?, total_files = ?, total_universities = ?
+            WHERE id = ?
+          `
+          )
+          .run(
+            "skipped",
+            new Date().toISOString(),
+            commitSha,
+            latestSuccessful.totalFiles ?? 0,
+            latestSuccessful.totalUniversities ?? this.universities.countUniversities(),
+            syncId
+          );
+        return {
+          commitSha,
+          totalFiles: latestSuccessful.totalFiles ?? 0,
+          totalUniversities: latestSuccessful.totalUniversities ?? this.universities.countUniversities(),
+          skipped: true
+        };
+      }
+
       this.report(`Listing markdown files under ${this.config.dataSource.dataPath}...`);
       const files = await this.listMarkdownFiles(commitSha);
       this.report(`Found ${files.length} markdown files.`);
@@ -88,6 +126,20 @@ export class DataSyncService {
       `
       )
       .get();
+  }
+
+  private latestSuccessfulSync(): { commitSha: string | null; totalFiles: number | null; totalUniversities: number | null } | undefined {
+    return this.database.db
+      .prepare(
+        `
+        SELECT commit_sha AS commitSha, total_files AS totalFiles, total_universities AS totalUniversities
+        FROM sync_runs
+        WHERE status = 'success' AND commit_sha IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 1
+      `
+      )
+      .get() as { commitSha: string | null; totalFiles: number | null; totalUniversities: number | null } | undefined;
   }
 
   private async ensureRepo(): Promise<string> {
