@@ -6,6 +6,8 @@ import {
   Brain,
   Database,
   ListFilter,
+  Lock,
+  LogOut,
   MessageSquareText,
   PlugZap,
   RefreshCcw,
@@ -59,6 +61,11 @@ interface AliasRow {
   priority: number;
 }
 
+interface AuthStatus {
+  configured: boolean;
+  authenticated: boolean;
+}
+
 const NAV = [
   { id: "dashboard", label: "仪表盘", icon: Activity },
   { id: "model", label: "模型", icon: Brain },
@@ -79,13 +86,40 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || response.statusText);
+    let message = text || response.statusText;
+    try {
+      const parsed = JSON.parse(text) as { message?: string; error?: string };
+      message = parsed.message || parsed.error || message;
+    } catch {
+      // keep the raw text fallback
+    }
+    throw new Error(message);
   }
   return response.json() as Promise<T>;
 }
 
 function App() {
   const [page, setPage] = useState<Page>("dashboard");
+  const [auth, setAuth] = useState<AuthStatus | null>(null);
+
+  useEffect(() => {
+    void api<AuthStatus>("/api/auth/status")
+      .then(setAuth)
+      .catch(() => setAuth({ configured: false, authenticated: false }));
+  }, []);
+
+  if (!auth) {
+    return <div className="loading-screen">正在检查登录状态...</div>;
+  }
+
+  if (!auth.configured || !auth.authenticated) {
+    return <LoginPage auth={auth} onLoggedIn={() => setAuth({ configured: true, authenticated: true })} />;
+  }
+
+  const logout = async () => {
+    await api("/api/auth/logout", { method: "POST", body: "{}" });
+    setAuth({ configured: true, authenticated: false });
+  };
 
   return (
     <div className="app-shell">
@@ -108,6 +142,7 @@ function App() {
             );
           })}
         </nav>
+        <button className="logout-button" onClick={logout}><LogOut size={18} /><span>退出登录</span></button>
       </aside>
       <main className="content">
         {page === "dashboard" && <DashboardPage />}
@@ -119,6 +154,45 @@ function App() {
         {page === "logs" && <LogsPage />}
       </main>
     </div>
+  );
+}
+
+function LoginPage({ auth, onLoggedIn }: { auth: AuthStatus; onLoggedIn: () => void }) {
+  const [password, setPassword] = useState("");
+  const [status, setStatus] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const login = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setLoading(true);
+    setStatus("");
+    try {
+      await api("/api/auth/login", { method: "POST", body: JSON.stringify({ password }) });
+      onLoggedIn();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <main className="login-screen">
+      <form className="login-panel" onSubmit={login}>
+        <div className="brand-mark"><Lock size={22} /></div>
+        <h1>管理员登录</h1>
+        <p>输入部署时生成或在 .env 中配置的 ADMIN_PASSWORD。</p>
+        {!auth.configured ? (
+          <p className="login-warning">服务端还没有配置 ADMIN_PASSWORD。请先在 .env 中设置管理员密码并重启服务。</p>
+        ) : (
+          <>
+            <Input label="管理员密码" value={password} onChange={setPassword} type="password" />
+            <button className="primary" type="submit" disabled={loading || !password}>{loading ? "登录中..." : "登录"}</button>
+          </>
+        )}
+        {status && <p className="notice">{status}</p>}
+      </form>
+    </main>
   );
 }
 

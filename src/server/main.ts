@@ -14,6 +14,7 @@ import { LogStore } from "./services/log-store.js";
 import { MessageProcessor } from "./services/message-processor.js";
 import { NaturalLanguageService } from "./services/nlu.js";
 import { UniversityRepository } from "./services/university-repository.js";
+import { registerAdminAuth } from "./services/admin-auth.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -29,6 +30,7 @@ async function main(): Promise<void> {
 
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });
+  await registerAdminAuth(app, config);
   await onebot.register(app);
   await registerApi(app, { config, database, settings, universities, sync, llm, logs, processor, onebot });
 
@@ -56,4 +58,3 @@ main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
-

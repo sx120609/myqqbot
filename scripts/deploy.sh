@@ -17,6 +17,7 @@ SYNC_TIMER_CALENDAR="${SYNC_TIMER_CALENDAR:-03:40}"
 SKIP_CJK_FONT_INSTALL="${SKIP_CJK_FONT_INSTALL:-0}"
 DEFAULT_DATA_REPO_URL="https://gh.lizmt.cn/CollegesChat/university-information.git"
 OLD_DATA_REPO_URL="https://github.com/CollegesChat/university-information.git"
+GENERATED_ADMIN_PASSWORD=""
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -59,6 +60,7 @@ Common environment variables:
   BRANCH=main                    Git branch to deploy.
   REPO_URL=https://...           Required when cloning into a new APP_DIR and origin is unavailable.
   APP_PORT=8787                  Port written to a newly created .env.
+  ADMIN_PASSWORD=...             WebUI administrator password. Auto-generated when missing.
   NODE_BIN=/usr/local/bin/node   Node binary used by systemd.
   SKIP_DATA_SYNC=1               Skip data sync during install/update.
   SYNC_DATA_ON_UPDATE=1          Also sync data during update. Default: 0.
@@ -92,6 +94,16 @@ set_env_value() {
   else
     printf '%s=%s\n' "$key" "$value" >>"$file"
   fi
+}
+
+get_env_value() {
+  local file="$1"
+  local key="$2"
+  grep -m 1 "^${key}=" "$file" 2>/dev/null | cut -d= -f2- || true
+}
+
+random_secret() {
+  node -e "console.log(require('node:crypto').randomBytes(24).toString('base64url'))"
 }
 
 resolve_app_dir() {
@@ -219,6 +231,25 @@ prepare_env() {
     set_env_value .env APP_PORT "$APP_PORT"
   else
     log "Keeping existing .env"
+  fi
+
+  local admin_password
+  admin_password="$(get_env_value .env ADMIN_PASSWORD)"
+  if [ -z "$admin_password" ] || [ "$admin_password" = "change-me-now" ]; then
+    GENERATED_ADMIN_PASSWORD="$(random_secret)"
+    log "Generating ADMIN_PASSWORD for WebUI"
+    set_env_value .env ADMIN_PASSWORD "$GENERATED_ADMIN_PASSWORD"
+  fi
+
+  local admin_session_secret
+  admin_session_secret="$(get_env_value .env ADMIN_SESSION_SECRET)"
+  if [ -z "$admin_session_secret" ] || [ "$admin_session_secret" = "change-me-now" ]; then
+    log "Generating ADMIN_SESSION_SECRET for WebUI sessions"
+    set_env_value .env ADMIN_SESSION_SECRET "$(random_secret)"
+  fi
+
+  if ! grep -q '^ADMIN_SESSION_TTL_HOURS=' .env; then
+    set_env_value .env ADMIN_SESSION_TTL_HOURS "168"
   fi
 
   if ! grep -q '^ONEBOT_REPLY_AS_IMAGE=' .env; then
@@ -423,6 +454,13 @@ Service:
 WebUI:
   http://<server-ip>:${APP_PORT}
 
+Admin login:
+$(if [ -n "$GENERATED_ADMIN_PASSWORD" ]; then
+  printf '  password: %s\n' "$GENERATED_ADMIN_PASSWORD"
+else
+  printf '  password: see ADMIN_PASSWORD in %s/.env\n' "$APP_DIR"
+fi)
+
 NapCat reverse WebSocket:
   ws://<server-ip>:${APP_PORT}/onebot/v11/ws
 
@@ -448,6 +486,13 @@ Service:
 
 WebUI:
   http://<server-ip>:${APP_PORT}
+
+Admin login:
+$(if [ -n "$GENERATED_ADMIN_PASSWORD" ]; then
+  printf '  password: %s\n' "$GENERATED_ADMIN_PASSWORD"
+else
+  printf '  password: see ADMIN_PASSWORD in %s/.env\n' "$APP_DIR"
+fi)
 
 EOF
 }

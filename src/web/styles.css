@@ -39,6 +39,11 @@ button:hover {
   border-color: #8996a3;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
 button.primary {
   background: #246b68;
   border-color: #246b68;
@@ -56,10 +61,56 @@ button.icon {
   grid-template-columns: 240px minmax(0, 1fr);
 }
 
+.loading-screen,
+.login-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.loading-screen {
+  color: #536170;
+}
+
+.login-panel {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 26px;
+  border: 1px solid #d9e0e7;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 50px rgba(24, 33, 43, 0.08);
+}
+
+.login-panel h1 {
+  margin: 0;
+  font-size: 24px;
+  letter-spacing: 0;
+}
+
+.login-panel p {
+  margin: 0;
+  color: #5d6875;
+  line-height: 1.6;
+}
+
+.login-warning {
+  padding: 12px;
+  border: 1px solid #f0c36b;
+  border-radius: 6px;
+  background: #fff8e6;
+  color: #7a4d00 !important;
+}
+
 .sidebar {
   background: #18212b;
   color: #f5f7fb;
   padding: 18px 14px;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
 }
 
 .brand {
@@ -103,6 +154,20 @@ nav button {
 
 nav button.active,
 nav button:hover {
+  background: #263241;
+  color: #ffffff;
+}
+
+.logout-button {
+  justify-content: flex-start;
+  width: 100%;
+  margin-top: auto;
+  border: 0;
+  background: transparent;
+  color: #d5dde8;
+}
+
+.logout-button:hover {
   background: #263241;
   color: #ffffff;
 }

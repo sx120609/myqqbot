@@ -12,6 +12,12 @@ export interface AppConfig {
     port: number;
     publicBaseUrl: string;
   };
+  auth: {
+    adminPassword: string;
+    sessionSecret: string;
+    sessionTtlHours: number;
+    secureCookie: boolean;
+  };
   dataSource: {
     repoUrl: string;
     branch: string;
@@ -60,6 +66,12 @@ export function loadConfig(): AppConfig {
       host: readString("APP_HOST", "127.0.0.1"),
       port: readNumber("APP_PORT", 8787),
       publicBaseUrl: readString("PUBLIC_BASE_URL", "http://127.0.0.1:8787")
+    },
+    auth: {
+      adminPassword: readString("ADMIN_PASSWORD", ""),
+      sessionSecret: readString("ADMIN_SESSION_SECRET", readString("ADMIN_PASSWORD", "")),
+      sessionTtlHours: readNumber("ADMIN_SESSION_TTL_HOURS", 168),
+      secureCookie: readString("ADMIN_COOKIE_SECURE", "").toLowerCase() === "true" || readString("PUBLIC_BASE_URL", "").startsWith("https://")
     },
     dataSource: {
       repoUrl: readString("DATA_REPO_URL", DEFAULT_DATA_REPO_URL),
