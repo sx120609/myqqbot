@@ -103,6 +103,80 @@ describe("OneBotGateway", () => {
       params: { message_id: 789 }
     });
   });
+
+  it("automatically approves friend requests without setting a remark", async () => {
+    const processor = {
+      process: vi.fn()
+    } as unknown as MessageProcessor;
+    const gateway = new OneBotGateway(settings(), processor);
+    const sent: Array<{ action: string; params: Record<string, unknown>; echo: string }> = [];
+    const socket = fakeSocket(sent);
+
+    await callHandleMessage(
+      gateway,
+      socket,
+      JSON.stringify({
+        post_type: "request",
+        request_type: "friend",
+        user_id: 10001,
+        flag: "friend-request-flag",
+        comment: "你好"
+      })
+    );
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      action: "set_friend_add_request",
+      params: {
+        flag: "friend-request-flag",
+        approve: true
+      }
+    });
+    expect(sent[0].params).not.toHaveProperty("remark");
+    expect(processor.process).not.toHaveBeenCalled();
+  });
+
+  it("polls and approves doubtful friend requests", async () => {
+    const processor = {
+      process: vi.fn()
+    } as unknown as MessageProcessor;
+    const gateway = new OneBotGateway(settings(), processor);
+    const sent: Array<{ action: string; params: Record<string, unknown>; echo: string }> = [];
+    const socket = fakeSocket(sent);
+    addSocket(gateway, socket);
+
+    const task = callApproveDoubtFriendRequests(gateway);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      action: "get_doubt_friends_add_request",
+      params: { count: 20 }
+    });
+
+    await callHandleMessage(
+      gateway,
+      socket,
+      JSON.stringify({
+        status: "ok",
+        retcode: 0,
+        data: {
+          list: [{ flag: "doubt-1" }, { flag: "doubt-2" }]
+        },
+        echo: sent[0].echo
+      })
+    );
+    await task;
+
+    expect(sent).toHaveLength(3);
+    expect(sent[1]).toMatchObject({
+      action: "set_doubt_friends_add_request",
+      params: { flag: "doubt-1", approve: true }
+    });
+    expect(sent[2]).toMatchObject({
+      action: "set_doubt_friends_add_request",
+      params: { flag: "doubt-2", approve: true }
+    });
+  });
 });
 
 function settings(): SettingsStore {
@@ -135,4 +209,12 @@ function fakeSocket(sent: Array<{ action: string; params: Record<string, unknown
 
 function callHandleMessage(gateway: OneBotGateway, socket: WebSocket, raw: string): Promise<void> {
   return (gateway as unknown as { handleMessage: (socket: WebSocket, raw: string) => Promise<void> }).handleMessage(socket, raw);
+}
+
+function addSocket(gateway: OneBotGateway, socket: WebSocket): void {
+  (gateway as unknown as { sockets: Set<WebSocket> }).sockets.add(socket);
+}
+
+function callApproveDoubtFriendRequests(gateway: OneBotGateway): Promise<void> {
+  return (gateway as unknown as { approveDoubtFriendRequests: () => Promise<void> }).approveDoubtFriendRequests();
 }

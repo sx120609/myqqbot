@@ -223,4 +223,152 @@ describe("MessageProcessor", () => {
     expect(messages).toContain("南京航空航天大学");
     expect(messages).toContain("不要只解释图片梗本身");
   });
+
+  it("allows mentioned group messages when natural group trigger is disabled", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1600,
+          timeoutMs: 45000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: false,
+          requireMentionInGroup: true,
+          confidenceThreshold: 0.55,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5
+        }
+      })
+    } as SettingsStore;
+    const university = {
+      id: 3,
+      name: "南京师范大学",
+      slug: "nan-jing-shi-fan-da-xue",
+      file_path: "docs/universities/nan-jing-shi-fan-da-xue.md",
+      source_url: "https://example.com/njnu.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "alias",
+      score: 0.9
+    };
+    const nlu = {
+      analyze: vi.fn(() => ({
+        isUniversityQuery: true,
+        confidence: 0.9,
+        topicKey: "general",
+        topicLabel: "整体评价",
+        candidates: [university],
+        reason: "命中学校或高校生活关键词"
+      })),
+      buildRetrievalContext: vi.fn()
+    } as unknown as NaturalLanguageService;
+    const universities = {
+      getTopicQuestions: vi.fn(() => []),
+      getSchoolProfile: vi.fn(() => null)
+    } as unknown as UniversityRepository;
+    const llm = {
+      chat: vi.fn().mockResolvedValue("南师大整体不错。")
+    } as unknown as LlmClient;
+    const logs = {
+      message: vi.fn()
+    } as unknown as LogStore;
+    const processor = new MessageProcessor(settings, universities, nlu, llm, logs);
+
+    const result = await processor.process({
+      platform: "onebot",
+      text: "南师大你觉得怎么样",
+      messageType: "group",
+      userId: "u1",
+      groupId: "g1",
+      conversationKey: "group:g1:user:u1",
+      mentionedBot: true
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.reason).toBe("已回答");
+    expect(llm.chat).toHaveBeenCalledWith(expect.any(Array), "university-answer");
+  });
+
+  it("requires mention for every group message even when context exists", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1600,
+          timeoutMs: 45000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: true,
+          confidenceThreshold: 0.55,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 0
+        }
+      })
+    } as SettingsStore;
+    const university = {
+      id: 4,
+      name: "南京航空航天大学",
+      slug: "nan-jing-hang-kong-hang-tian-da-xue",
+      file_path: "docs/universities/nan-jing-hang-kong-hang-tian-da-xue.md",
+      source_url: "https://example.com/nuaa.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "alias",
+      score: 0.9
+    };
+    const nlu = {
+      analyze: vi.fn(() => ({
+        isUniversityQuery: true,
+        confidence: 0.9,
+        topicKey: "general",
+        topicLabel: "整体评价",
+        candidates: [university],
+        reason: "命中学校或高校生活关键词"
+      })),
+      buildRetrievalContext: vi.fn()
+    } as unknown as NaturalLanguageService;
+    const universities = {
+      getTopicQuestions: vi.fn(() => []),
+      getSchoolProfile: vi.fn(() => null)
+    } as unknown as UniversityRepository;
+    const llm = {
+      chat: vi.fn().mockResolvedValue("南航整体不错。")
+    } as unknown as LlmClient;
+    const logs = {
+      message: vi.fn()
+    } as unknown as LogStore;
+    const processor = new MessageProcessor(settings, universities, nlu, llm, logs);
+    const conversationKey = "group:g1:user:u1";
+
+    await processor.process({
+      platform: "onebot",
+      text: "南航怎么样",
+      messageType: "group",
+      userId: "u1",
+      groupId: "g1",
+      conversationKey,
+      mentionedBot: true
+    });
+    const result = await processor.process({
+      platform: "onebot",
+      text: "食堂呢",
+      messageType: "group",
+      userId: "u1",
+      groupId: "g1",
+      conversationKey,
+      mentionedBot: false
+    });
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toBe("群聊需要 @ 机器人");
+    expect(llm.chat).toHaveBeenCalledTimes(1);
+  });
 });

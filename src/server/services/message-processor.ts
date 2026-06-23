@@ -83,11 +83,11 @@ export class MessageProcessor {
     const greeting = isGreeting(input.text);
 
     if (input.messageType === "group") {
-      if (!runtime.naturalLanguage.groupNaturalEnabled) {
-        return this.finish(input, { handled: false, reason: "群聊自然触发已关闭", analysis });
-      }
-      if (runtime.naturalLanguage.requireMentionInGroup && !input.mentionedBot && !context) {
+      if (runtime.naturalLanguage.requireMentionInGroup && !input.mentionedBot) {
         return this.finish(input, { handled: false, reason: "群聊需要 @ 机器人", analysis });
+      }
+      if (!runtime.naturalLanguage.groupNaturalEnabled && !input.mentionedBot) {
+        return this.finish(input, { handled: false, reason: "群聊自然触发已关闭", analysis });
       }
     }
 

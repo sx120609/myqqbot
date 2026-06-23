@@ -8,9 +8,12 @@ import { markdownToPlainText, renderReplyImage } from "./services/reply-image-re
 interface OneBotEvent {
   post_type?: string;
   message_type?: "private" | "group";
+  request_type?: string;
   user_id?: number | string;
   group_id?: number | string;
   self_id?: number | string;
+  flag?: number | string;
+  comment?: string;
   raw_message?: string;
   message?: string | Array<{ type: string; data?: Record<string, string | number> }>;
 }
@@ -19,9 +22,11 @@ interface OneBotActionResponse {
   echo?: string;
   status?: string;
   retcode?: number;
-  data?: {
-    message_id?: number | string;
-  };
+  data?: unknown;
+}
+
+interface DoubtFriendRequest {
+  flag: number | string;
 }
 
 interface ExtractedContent {
@@ -43,6 +48,7 @@ type OutgoingMessage =
     }>;
 
 const ACTION_RESPONSE_TIMEOUT_MS = 5_000;
+const DOUBT_FRIEND_REQUEST_POLL_MS = 30_000;
 const GENERATING_NOTICE_TEXT = "正在生成回答中，请稍等。内容较长时可能需要更多时间。";
 
 export class OneBotGateway {
@@ -51,6 +57,8 @@ export class OneBotGateway {
   private lastEventAt: string | null = null;
   private selfId: string | null = null;
   private actionSeq = 0;
+  private doubtFriendRequestTimer: ReturnType<typeof setInterval> | null = null;
+  private checkingDoubtFriendRequests = false;
   private readonly pendingActions = new Map<
     string,
     {
@@ -74,15 +82,18 @@ export class OneBotGateway {
 
       this.sockets.add(socket);
       this.connectedAt = new Date().toISOString();
+      this.ensureDoubtFriendRequestPolling();
 
       socket.on("message", (raw: Buffer) => {
         void this.handleMessage(socket, raw.toString());
       });
       socket.on("close", () => {
         this.sockets.delete(socket);
+        this.stopDoubtFriendRequestPollingIfIdle();
       });
       socket.on("error", () => {
         this.sockets.delete(socket);
+        this.stopDoubtFriendRequestPollingIfIdle();
       });
     });
   }
@@ -114,6 +125,12 @@ export class OneBotGateway {
     const event = payload as OneBotEvent;
     if (event.self_id) this.selfId = String(event.self_id);
     this.lastEventAt = new Date().toISOString();
+
+    if (event.post_type === "request" && event.request_type === "friend") {
+      this.approveFriendRequest(socket, event);
+      return;
+    }
+
     if (event.post_type !== "message" || !event.message_type || !event.user_id) return;
 
     const content = extractContent(event);
@@ -183,9 +200,56 @@ export class OneBotGateway {
   ): Promise<void> {
     if (!generatingNotice) return;
     const response = await generatingNotice;
-    const messageId = response?.data?.message_id;
+    const data = response?.data;
+    const messageId = data && typeof data === "object" ? (data as { message_id?: number | string }).message_id : undefined;
     if (messageId == null) return;
     await this.sendAction(socket, "delete_msg", { message_id: messageId });
+  }
+
+  private approveFriendRequest(socket: WebSocket, event: OneBotEvent): void {
+    if (event.flag == null) {
+      console.warn("[onebot] Friend request has no flag, cannot approve automatically.");
+      return;
+    }
+    void this.sendAction(socket, "set_friend_add_request", {
+      flag: event.flag,
+      approve: true
+    }, "friend-request");
+  }
+
+  private ensureDoubtFriendRequestPolling(): void {
+    if (this.doubtFriendRequestTimer) return;
+    void this.approveDoubtFriendRequests();
+    this.doubtFriendRequestTimer = setInterval(() => {
+      void this.approveDoubtFriendRequests();
+    }, DOUBT_FRIEND_REQUEST_POLL_MS);
+  }
+
+  private stopDoubtFriendRequestPollingIfIdle(): void {
+    if (this.sockets.size || !this.doubtFriendRequestTimer) return;
+    clearInterval(this.doubtFriendRequestTimer);
+    this.doubtFriendRequestTimer = null;
+  }
+
+  private async approveDoubtFriendRequests(): Promise<void> {
+    if (this.checkingDoubtFriendRequests) return;
+    const socket = this.sockets.values().next().value as WebSocket | undefined;
+    if (!socket) return;
+
+    this.checkingDoubtFriendRequests = true;
+    try {
+      const response = await this.sendAction(socket, "get_doubt_friends_add_request", { count: 20 }, "doubt-friend-list", true);
+      for (const request of extractDoubtFriendRequests(response?.data)) {
+        await this.sendAction(socket, "set_doubt_friends_add_request", {
+          flag: request.flag,
+          approve: true
+        }, "doubt-friend-request");
+      }
+    } catch (error) {
+      console.warn("[onebot] Failed to approve doubtful friend requests automatically:", error);
+    } finally {
+      this.checkingDoubtFriendRequests = false;
+    }
   }
 
   private sendMessage(
@@ -253,9 +317,9 @@ export class OneBotGateway {
   private shouldSendGeneratingNotice(event: OneBotEvent, mentionedBot: boolean): boolean {
     if (event.message_type === "private") return true;
     const runtime = this.settings.runtime();
-    if (!runtime.naturalLanguage.groupNaturalEnabled) return false;
     if (runtime.naturalLanguage.requireMentionInGroup) return mentionedBot;
-    return true;
+    if (mentionedBot) return true;
+    return runtime.naturalLanguage.groupNaturalEnabled;
   }
 }
 
@@ -295,6 +359,25 @@ function isActionResponse(value: unknown): value is OneBotActionResponse {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
   return typeof record.echo === "string" && ("retcode" in record || "status" in record || "data" in record);
+}
+
+function extractDoubtFriendRequests(data: unknown): DoubtFriendRequest[] {
+  const record = data && typeof data === "object" ? (data as Record<string, unknown>) : null;
+  const items = Array.isArray(data)
+    ? data
+    : Array.isArray(record?.requests)
+      ? record.requests
+      : Array.isArray(record?.list)
+        ? record.list
+        : [];
+  return items
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const flag = (item as Record<string, unknown>).flag;
+      if (typeof flag !== "string" && typeof flag !== "number") return null;
+      return { flag };
+    })
+    .filter((item): item is DoubtFriendRequest => item !== null);
 }
 
 function splitMessage(text: string, size: number): string[] {
