@@ -17,18 +17,20 @@ import { SrgaoxiaoSyncService } from "./services/srgaoxiao-sync.js";
 import { UniversityRepository } from "./services/university-repository.js";
 import { registerAdminAuth } from "./services/admin-auth.js";
 import { AutoSyncScheduler } from "./services/auto-sync-scheduler.js";
+import { AnswerSourceStore } from "./services/answer-source-store.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const database = new AppDatabase(config.dbPath);
   const settings = new SettingsStore(database);
   const logs = new LogStore(database);
+  const answerSources = new AnswerSourceStore(database);
   const universities = new UniversityRepository(database);
   const sync = new DataSyncService(config, database, universities);
   const srgaoxiaoSync = new SrgaoxiaoSyncService(config, universities);
   const llm = new LlmClient(settings, logs);
   const nlu = new NaturalLanguageService(universities);
-  const processor = new MessageProcessor(settings, universities, nlu, llm, logs, srgaoxiaoSync);
+  const processor = new MessageProcessor(settings, universities, nlu, llm, logs, srgaoxiaoSync, answerSources);
   const onebot = new OneBotGateway(settings, processor);
   const autoSync = new AutoSyncScheduler(settings, sync, srgaoxiaoSync);
 
@@ -37,7 +39,7 @@ async function main(): Promise<void> {
   await registerAdminAuth(app, config, settings);
   await onebot.register(app);
   app.addHook("onClose", async () => autoSync.stop());
-  await registerApi(app, { config, database, settings, universities, sync, srgaoxiaoSync, autoSync, llm, logs, processor, onebot });
+  await registerApi(app, { config, database, settings, universities, sync, answerSources, srgaoxiaoSync, autoSync, llm, logs, processor, onebot });
 
   const webRoot = resolve(config.cwd, "dist/web");
   if (existsSync(webRoot)) {

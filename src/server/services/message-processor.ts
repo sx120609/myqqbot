@@ -2,6 +2,7 @@ import { topicLabel } from "../domain/topics.js";
 import type { SettingsStore } from "../settings.js";
 import type { LlmClient } from "./llm-client.js";
 import type { LogStore } from "./log-store.js";
+import type { AnswerSourceInput, AnswerSourceStore } from "./answer-source-store.js";
 import type { MessageAnalysis, NaturalLanguageService } from "./nlu.js";
 import type { SrgaoxiaoSyncService } from "./srgaoxiao-sync.js";
 import type { UniversityRepository } from "./university-repository.js";
@@ -29,6 +30,7 @@ export interface IncomingMessage {
 export interface ProcessedMessage {
   handled: boolean;
   reply?: string;
+  sourcePageUrl?: string;
   reason: string;
   analysis?: unknown;
 }
@@ -58,7 +60,8 @@ export class MessageProcessor {
     private readonly nlu: NaturalLanguageService,
     private readonly llm: LlmClient,
     private readonly logs: LogStore,
-    private readonly srgaoxiao?: SrgaoxiaoSyncService
+    private readonly srgaoxiao?: SrgaoxiaoSyncService,
+    private readonly answerSources?: AnswerSourceStore
   ) {}
 
   async process(input: IncomingMessage): Promise<ProcessedMessage> {
@@ -101,6 +104,19 @@ export class MessageProcessor {
 
       const schoolContext = this.buildImageSchoolContext(analysis, context, input.text);
       const reply = await this.answerImageWithLlm(input.text, input.images, analysis, schoolContext);
+      const sourcePageUrl = schoolContext
+        ? this.createAnswerSourcePage({
+            question: input.text.trim() || "[图片消息]",
+            universityId: schoolContext.universityId,
+            universityName: schoolContext.universityName,
+            topic: schoolContext.topic,
+            sourceUrl: schoolContext.sourceUrl,
+            contextText: schoolContext.contextText,
+            schoolProfileText: schoolContext.schoolProfileText,
+            srgaoxiaoReviewsText: null,
+            answerText: reply
+          })
+        : undefined;
       if (schoolContext) {
         const ttlMs = runtime.naturalLanguage.contextTtlMinutes * 60 * 1000;
         this.contexts.set(input.conversationKey, {
@@ -113,6 +129,7 @@ export class MessageProcessor {
         handled: true,
         reason: "图片理解",
         reply,
+        sourcePageUrl,
         analysis
       });
     }
@@ -193,6 +210,17 @@ export class MessageProcessor {
       srgaoxiaoReviewsText,
       sourceUrl: university.source_url
     });
+    const sourcePageUrl = this.createAnswerSourcePage({
+      question: input.text,
+      universityId: university.id,
+      universityName: university.name,
+      topic: analysis.topicLabel ?? topicLabel(topicKey),
+      sourceUrl: university.source_url,
+      contextText,
+      schoolProfileText: schoolProfile?.profileText ?? null,
+      srgaoxiaoReviewsText,
+      answerText: reply
+    });
 
     const ttlMs = runtime.naturalLanguage.contextTtlMinutes * 60 * 1000;
     this.contexts.set(input.conversationKey, {
@@ -201,7 +229,14 @@ export class MessageProcessor {
       expiresAt: now + ttlMs
     });
 
-    return this.finish(input, { handled: true, reason: "已回答", reply, analysis });
+    return this.finish(input, { handled: true, reason: "已回答", reply, sourcePageUrl, analysis });
+  }
+
+  private createAnswerSourcePage(input: AnswerSourceInput): string | undefined {
+    const baseUrl = getPublicBaseUrl(this.settings.runtime());
+    if (!this.answerSources || !baseUrl) return undefined;
+    const token = this.answerSources.create(input);
+    return `${baseUrl}/sources/${encodeURIComponent(token)}`;
   }
 
   private async answerWithLlm(input: {
@@ -413,6 +448,11 @@ function renderLogText(input: IncomingMessage): string {
   if (!imageCount) return input.text;
   const suffix = `[图片 x${imageCount}]`;
   return input.text.trim() ? `${input.text.trim()} ${suffix}` : suffix;
+}
+
+function getPublicBaseUrl(runtime: ReturnType<SettingsStore["runtime"]>): string {
+  const site = (runtime as typeof runtime & { site?: { publicBaseUrl?: string } }).site;
+  return (site?.publicBaseUrl ?? "").trim().replace(/\/+$/g, "");
 }
 
 function isImageUrl(value: string): boolean {

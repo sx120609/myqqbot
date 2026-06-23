@@ -38,6 +38,15 @@ describe("reply-image-renderer", () => {
     expect(markdownToPlainText("#### 食堂 共性是：\n---")).toBe("食堂 共性是：");
   });
 
+  it("renders a local QR code for the source page", () => {
+    const image = renderReplyImage("测试回复", {
+      sourcePageUrl: "https://example.com/sources/source-token"
+    });
+
+    expect(image.mimeType).toBe("image/png");
+    expect(image.bytes).toBeGreaterThan(2000);
+  });
+
   it("strips markdown syntax for plain-text fallback", () => {
     expect(markdownToPlainText("**你是什么模型**：后台配置为 `gpt-5.5`")).toBe("你是什么模型：后台配置为 gpt-5.5");
   });

@@ -140,6 +140,20 @@ export class AppDatabase {
         PRIMARY KEY (source, source_review_id)
       );
 
+      CREATE TABLE IF NOT EXISTS answer_sources (
+        token TEXT PRIMARY KEY,
+        question TEXT NOT NULL,
+        university_id INTEGER,
+        university_name TEXT,
+        topic TEXT,
+        source_url TEXT,
+        context_text TEXT NOT NULL,
+        school_profile_text TEXT,
+        srgaoxiao_reviews_text TEXT,
+        answer_text TEXT,
+        created_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_questions_university_topic ON questions(university_id, topic);
       CREATE INDEX IF NOT EXISTS idx_answers_question ON answers(question_id);
       CREATE INDEX IF NOT EXISTS idx_message_logs_created ON message_logs(created_at);
@@ -147,6 +161,7 @@ export class AppDatabase {
       CREATE INDEX IF NOT EXISTS idx_school_profiles_source ON school_profiles(source);
       CREATE INDEX IF NOT EXISTS idx_school_reviews_university_source ON school_reviews(university_id, source);
       CREATE INDEX IF NOT EXISTS idx_school_reviews_school_source ON school_reviews(source_school_id, source);
+      CREATE INDEX IF NOT EXISTS idx_answer_sources_created ON answer_sources(created_at);
     `);
 
     this.db.exec(`

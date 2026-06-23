@@ -1,4 +1,5 @@
 import { Resvg } from "@resvg/resvg-js";
+import QRCode from "qrcode";
 
 export interface RenderedReplyImage {
   mimeType: "image/png";
@@ -9,6 +10,7 @@ export interface RenderedReplyImage {
 export interface ReplyImageOptions {
   headerTitle?: string;
   headerBadge?: string;
+  sourcePageUrl?: string;
 }
 
 interface InlineSegment {
@@ -40,6 +42,12 @@ interface LineStyle {
   prefix?: string;
 }
 
+interface SourceQr {
+  url: string;
+  moduleCount: number;
+  darkModules: Array<[number, number]>;
+}
+
 const WIDTH = 900;
 const CARD_X = 22;
 const CONTENT_X = 58;
@@ -47,6 +55,8 @@ const CONTENT_WIDTH = WIDTH - CONTENT_X * 2;
 const HEADER_Y = 54;
 const BODY_TOP = 116;
 const BOTTOM = 52;
+const SOURCE_QR_SIZE = 132;
+const SOURCE_QR_BLOCK_HEIGHT = 184;
 const FONT_FAMILY = "Noto Sans CJK SC, Microsoft YaHei, PingFang SC, SimHei, Arial, sans-serif";
 
 export function renderReplyImage(markdown: string, options: ReplyImageOptions = {}): RenderedReplyImage {
@@ -54,8 +64,10 @@ export function renderReplyImage(markdown: string, options: ReplyImageOptions = 
   const lines = layoutMarkdown(clean || " ");
   const lastLine = lines.at(-1);
   const contentBottom = lastLine ? lastLine.y + (lastLine.kind === "rule" ? lastLine.lineHeight : 0) : BODY_TOP;
-  const height = Math.max(220, Math.ceil(contentBottom + BOTTOM));
-  const svg = renderSvg(lines, height, options);
+  const sourceQr = options.sourcePageUrl ? createSourceQr(options.sourcePageUrl) : null;
+  const sourceQrTop = sourceQr ? Math.ceil(contentBottom + 26) : null;
+  const height = Math.max(220, Math.ceil((sourceQrTop == null ? contentBottom : sourceQrTop + SOURCE_QR_BLOCK_HEIGHT) + BOTTOM));
+  const svg = renderSvg(lines, height, options, sourceQr, sourceQrTop);
   const png = new Resvg(svg, {
     fitTo: { mode: "original" },
     font: {
@@ -331,7 +343,13 @@ function estimateCharWidth(char: string, fontSize: number): number {
   return fontSize * 0.58;
 }
 
-function renderSvg(lines: VisualLine[], height: number, options: ReplyImageOptions): string {
+function renderSvg(
+  lines: VisualLine[],
+  height: number,
+  options: ReplyImageOptions,
+  sourceQr: SourceQr | null,
+  sourceQrTop: number | null
+): string {
   const lineSvg = lines
     .map((line) => {
       if (line.kind === "rule") {
@@ -360,6 +378,7 @@ function renderSvg(lines: VisualLine[], height: number, options: ReplyImageOptio
   const badgeX = headerRight - badgeWidth;
   const titleMaxWidth = Math.max(120, badgeX - titleX - headerGap);
   const headerTitle = fitText(rawHeaderTitle, 26, titleMaxWidth);
+  const sourceQrSvg = sourceQr && sourceQrTop != null ? renderSourceQr(sourceQr, sourceQrTop) : "";
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${height}" viewBox="0 0 ${WIDTH} ${height}">
   <rect width="100%" height="100%" fill="#f4f1ea"/>
@@ -369,7 +388,53 @@ function renderSvg(lines: VisualLine[], height: number, options: ReplyImageOptio
   <text x="${badgeX}" y="${HEADER_Y + 7}" font-family="${FONT_FAMILY}" font-size="20" font-weight="500" fill="#8a8177">${escapeXml(headerBadge)}</text>
   <line x1="${CONTENT_X}" y1="88" x2="${WIDTH - CONTENT_X}" y2="88" stroke="#eee6da" stroke-width="2"/>
   ${lineSvg}
+  ${sourceQrSvg}
 </svg>`;
+}
+
+function createSourceQr(url: string): SourceQr | null {
+  try {
+    const qr = QRCode.create(url, { errorCorrectionLevel: "M" });
+    const data = Array.from(qr.modules.data);
+    const darkModules: Array<[number, number]> = [];
+    for (let y = 0; y < qr.modules.size; y += 1) {
+      for (let x = 0; x < qr.modules.size; x += 1) {
+        if (data[y * qr.modules.size + x]) darkModules.push([x, y]);
+      }
+    }
+    return {
+      url,
+      moduleCount: qr.modules.size,
+      darkModules
+    };
+  } catch {
+    return null;
+  }
+}
+
+function renderSourceQr(sourceQr: SourceQr, top: number): string {
+  const qrX = CONTENT_X;
+  const qrY = top + 34;
+  const moduleSize = SOURCE_QR_SIZE / sourceQr.moduleCount;
+  const moduleRects = sourceQr.darkModules
+    .map(([x, y]) => {
+      const rectX = round(qrX + x * moduleSize);
+      const rectY = round(qrY + y * moduleSize);
+      const size = round(moduleSize + 0.05);
+      return `<rect x="${rectX}" y="${rectY}" width="${size}" height="${size}" fill="#111827"/>`;
+    })
+    .join("");
+  const textX = qrX + SOURCE_QR_SIZE + 28;
+
+  return `<g>
+  <line x1="${CONTENT_X}" y1="${top}" x2="${WIDTH - CONTENT_X}" y2="${top}" stroke="#eee6da" stroke-width="2"/>
+  <rect x="${qrX - 10}" y="${qrY - 10}" width="${SOURCE_QR_SIZE + 20}" height="${SOURCE_QR_SIZE + 20}" rx="10" fill="#ffffff" stroke="#e5ded3" stroke-width="2"/>
+  <rect x="${qrX}" y="${qrY}" width="${SOURCE_QR_SIZE}" height="${SOURCE_QR_SIZE}" fill="#ffffff"/>
+  ${moduleRects}
+  <text x="${textX}" y="${qrY + 34}" font-family="${FONT_FAMILY}" font-size="26" font-weight="800" fill="#182235">扫码查看本回答资料</text>
+  <text x="${textX}" y="${qrY + 72}" font-family="${FONT_FAMILY}" font-size="21" font-weight="500" fill="#5f6b7a">包含问卷片段、院校画像和评论摘要</text>
+  <text x="${textX}" y="${qrY + 108}" font-family="${FONT_FAMILY}" font-size="18" font-weight="500" fill="#8a8177">由服务器本地生成二维码</text>
+</g>`;
 }
 
 function fitText(text: string, fontSize: number, maxWidth: number): string {
@@ -385,6 +450,10 @@ function fitText(text: string, fontSize: number, maxWidth: number): string {
 
 function measureText(text: string, fontSize: number): number {
   return Array.from(text).reduce((sum, char) => sum + estimateCharWidth(char, fontSize), 0);
+}
+
+function round(value: number): number {
+  return Math.round(value * 1000) / 1000;
 }
 
 function normalizeMarkdown(markdown: string): string {

@@ -242,8 +242,19 @@ prepare_env() {
     cp .env.example .env
     set_env_value .env APP_HOST "0.0.0.0"
     set_env_value .env APP_PORT "$APP_PORT"
+    set_env_value .env PUBLIC_BASE_URL "http://127.0.0.1:${APP_PORT}"
   else
     log "Keeping existing .env"
+  fi
+
+  if ! grep -q '^PUBLIC_BASE_URL=' .env; then
+    log "Adding PUBLIC_BASE_URL to .env"
+    set_env_value .env PUBLIC_BASE_URL "http://127.0.0.1:${APP_PORT}"
+  fi
+
+  if ! grep -q '^SITE_FILING_NUMBER=' .env; then
+    log "Adding SITE_FILING_NUMBER to .env"
+    set_env_value .env SITE_FILING_NUMBER ""
   fi
 
   local admin_password

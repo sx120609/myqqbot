@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-type Page = "dashboard" | "model" | "natural" | "data" | "aliases" | "debug" | "logs" | "security";
+type Page = "dashboard" | "model" | "site" | "natural" | "data" | "aliases" | "debug" | "logs" | "security";
 
 interface Dashboard {
   onebot: {
@@ -43,6 +43,7 @@ interface Dashboard {
     error?: string;
   };
   onebotWsUrl: string;
+  publicBaseUrl: string;
 }
 
 interface University {
@@ -100,6 +101,7 @@ interface SyncSchedulerStatus {
 const NAV = [
   { id: "dashboard", label: "仪表盘", icon: Activity },
   { id: "model", label: "模型", icon: Brain },
+  { id: "site", label: "站点", icon: Settings },
   { id: "natural", label: "自然语言", icon: MessageSquareText },
   { id: "data", label: "高校数据", icon: Database },
   { id: "aliases", label: "别名", icon: ListFilter },
@@ -179,6 +181,7 @@ function App() {
       <main className="content">
         {page === "dashboard" && <DashboardPage />}
         {page === "model" && <ModelPage />}
+        {page === "site" && <SitePage />}
         {page === "natural" && <NaturalLanguagePage />}
         {page === "data" && <DataPage />}
         {page === "aliases" && <AliasesPage />}
@@ -263,6 +266,7 @@ function DashboardPage() {
       </div>
       <div className="section-grid">
         <Panel title="NapCat 连接" icon={<PlugZap size={18} />}>
+          <KeyValue label="站点地址" value={dashboard?.publicBaseUrl ?? "-"} />
           <KeyValue label="反向 WS" value={dashboard?.onebotWsUrl ?? "-"} />
           <KeyValue label="Bot QQ" value={dashboard?.onebot.selfId ?? "-"} />
           <KeyValue label="最近事件" value={formatTime(dashboard?.onebot.lastEventAt)} />
@@ -315,6 +319,39 @@ function ModelPage() {
         <div className="actions">
           <button className="primary" onClick={save}><Save size={16} />保存</button>
           <button onClick={test}><PlugZap size={16} />测试连接</button>
+          {status && <span className="status-text">{status}</span>}
+        </div>
+      </Panel>
+    </section>
+  );
+}
+
+function SitePage() {
+  const [settings, setSettings] = useState<Record<string, string | boolean>>({});
+  const [status, setStatus] = useState("");
+
+  useEffect(() => void api<Record<string, string | boolean>>("/api/settings").then(setSettings), []);
+  const update = (key: string, value: string) => setSettings((current) => ({ ...current, [key]: value }));
+  const save = async () => {
+    setStatus("保存中...");
+    await api("/api/settings", { method: "PUT", body: JSON.stringify(settings) });
+    setStatus("已保存");
+  };
+  const baseUrl = String(settings["site.publicBaseUrl"] ?? "").replace(/\/+$/g, "");
+
+  return (
+    <section>
+      <Header title="站点设置" subtitle="配置公开资料页域名和页面页脚备案信息。" />
+      <Panel title="公开访问" icon={<Settings size={18} />}>
+        <FormGrid>
+          <Input label="站点地址" value={String(settings["site.publicBaseUrl"] ?? "")} onChange={(v) => update("site.publicBaseUrl", v)} />
+          <Input label="备案号" value={String(settings["site.filingNumber"] ?? "")} onChange={(v) => update("site.filingNumber", v)} />
+        </FormGrid>
+        <div className="site-preview">
+          <KeyValue label="资料页格式" value={baseUrl ? `${baseUrl}/sources/随机编号` : "请先填写站点地址"} />
+        </div>
+        <div className="actions">
+          <button className="primary" onClick={save}><Save size={16} />保存</button>
           {status && <span className="status-text">{status}</span>}
         </div>
       </Panel>

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { MessageProcessor } from "./message-processor.js";
+import type { AnswerSourceStore } from "./answer-source-store.js";
 import type { LlmClient } from "./llm-client.js";
 import type { LogStore } from "./log-store.js";
 import type { NaturalLanguageService } from "./nlu.js";
@@ -370,5 +371,84 @@ describe("MessageProcessor", () => {
     expect(result.handled).toBe(false);
     expect(result.reason).toBe("群聊需要 @ 机器人");
     expect(llm.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates a public source page url for university answers", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        site: {
+          publicBaseUrl: "https://bot.example.com/",
+          filingNumber: "蜀ICP备00000000号"
+        },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1600,
+          timeoutMs: 45000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: false,
+          confidenceThreshold: 0.55,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5
+        }
+      })
+    } as SettingsStore;
+    const university = {
+      id: 5,
+      name: "南京师范大学",
+      slug: "nan-jing-shi-fan-da-xue",
+      file_path: "docs/universities/nan-jing-shi-fan-da-xue.md",
+      source_url: "https://example.com/njnu.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "alias",
+      score: 0.9
+    };
+    const nlu = {
+      analyze: vi.fn(() => ({
+        isUniversityQuery: true,
+        confidence: 0.9,
+        topicKey: "general",
+        topicLabel: "整体评价",
+        candidates: [university],
+        reason: "命中学校或高校生活关键词"
+      })),
+      buildRetrievalContext: vi.fn(() => "问卷资料片段")
+    } as unknown as NaturalLanguageService;
+    const universities = {
+      getTopicQuestions: vi.fn(() => [{ question: "南师大怎么样", answers: [] }]),
+      getSchoolProfile: vi.fn(() => null)
+    } as unknown as UniversityRepository;
+    const llm = {
+      chat: vi.fn().mockResolvedValue("南师大整体不错。\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。")
+    } as unknown as LlmClient;
+    const logs = {
+      message: vi.fn()
+    } as unknown as LogStore;
+    const answerSources = {
+      create: vi.fn(() => "source-token")
+    } as unknown as AnswerSourceStore;
+    const processor = new MessageProcessor(settings, universities, nlu, llm, logs, undefined, answerSources);
+
+    const result = await processor.process({
+      platform: "onebot",
+      text: "南师大怎么样",
+      messageType: "private",
+      userId: "u1",
+      conversationKey: "private:u1"
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.sourcePageUrl).toBe("https://bot.example.com/sources/source-token");
+    expect(answerSources.create).toHaveBeenCalledWith(expect.objectContaining({
+      question: "南师大怎么样",
+      universityName: "南京师范大学",
+      contextText: "问卷资料片段",
+      answerText: expect.stringContaining("南师大整体不错")
+    }));
   });
 });

@@ -8,6 +8,10 @@ export interface RuntimeSettings {
     replyImageTitle: string;
     replyImageBadge: string;
   };
+  site: {
+    publicBaseUrl: string;
+    filingNumber: string;
+  };
   llm: {
     baseUrl: string;
     apiKey: string;
@@ -39,6 +43,8 @@ const DEFAULTS: Record<string, string> = {
   "onebot.replyAsImage": process.env.ONEBOT_REPLY_AS_IMAGE ?? "true",
   "onebot.replyImageTitle": process.env.ONEBOT_REPLY_IMAGE_TITLE ?? "高校资料助手",
   "onebot.replyImageBadge": process.env.ONEBOT_REPLY_IMAGE_BADGE ?? "AI 生成回复",
+  "site.publicBaseUrl": process.env.PUBLIC_BASE_URL ?? "http://127.0.0.1:8787",
+  "site.filingNumber": process.env.SITE_FILING_NUMBER ?? "",
   "llm.baseUrl": process.env.LLM_BASE_URL ?? "https://your-sub2api.example.com/v1",
   "llm.apiKey": process.env.LLM_API_KEY ?? "",
   "llm.model": process.env.LLM_MODEL ?? "gpt-5.5",
@@ -90,6 +96,10 @@ export class SettingsStore {
         replyAsImage: this.getBoolean("onebot.replyAsImage", true),
         replyImageTitle: this.getString("onebot.replyImageTitle", "高校资料助手"),
         replyImageBadge: this.getString("onebot.replyImageBadge", "AI 生成回复")
+      },
+      site: {
+        publicBaseUrl: this.getString("site.publicBaseUrl", "http://127.0.0.1:8787"),
+        filingNumber: this.getString("site.filingNumber", "")
       },
       llm: {
         baseUrl: this.getString("llm.baseUrl", "https://your-sub2api.example.com/v1"),

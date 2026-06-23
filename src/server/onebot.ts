@@ -157,7 +157,7 @@ export class OneBotGateway {
       });
 
       if (result.handled && result.reply) {
-        await this.sendReply(socket, event, result.reply);
+        await this.sendReply(socket, event, result.reply, result.sourcePageUrl);
       }
     } catch (error) {
       console.error("[onebot] Failed to process message:", error);
@@ -166,13 +166,14 @@ export class OneBotGateway {
     }
   }
 
-  private async sendReply(socket: WebSocket, event: OneBotEvent, reply: string): Promise<void> {
+  private async sendReply(socket: WebSocket, event: OneBotEvent, reply: string, sourcePageUrl?: string): Promise<void> {
     const onebotSettings = this.settings.runtime().onebot;
     if (onebotSettings.replyAsImage) {
       try {
         const image = renderReplyImage(reply, {
           headerTitle: onebotSettings.replyImageTitle,
-          headerBadge: onebotSettings.replyImageBadge
+          headerBadge: onebotSettings.replyImageBadge,
+          sourcePageUrl
         });
         await this.sendMessage(socket, event, [
           {
@@ -188,7 +189,8 @@ export class OneBotGateway {
       }
     }
 
-    const chunks = splitMessage(markdownToPlainText(reply), 850);
+    const textReply = sourcePageUrl ? `${reply}\n\n本回答资料页：${sourcePageUrl}` : reply;
+    const chunks = splitMessage(markdownToPlainText(textReply), 850);
     for (const [index, message] of chunks.entries()) {
       await this.sendMessage(socket, event, message, `reply-${index}`);
     }
