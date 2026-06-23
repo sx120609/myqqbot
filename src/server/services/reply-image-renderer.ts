@@ -60,6 +60,8 @@ const CONTENT_WIDTH = WIDTH - CONTENT_X * 2;
 const HEADER_Y = 54;
 const BODY_TOP = 116;
 const BOTTOM = 52;
+const TEXT_WRAP_GUTTER = 72;
+const CLOSING_PUNCTUATION_OVERHANG = 6;
 const SOURCE_QR_SIZE = 124;
 const SOURCE_QR_PADDING = 6;
 const SOURCE_QR_BLOCK_HEIGHT = 176;
@@ -253,8 +255,9 @@ function addWrappedText(target: VisualLine[], text: string, style: LineStyle): v
   const prefix = finalStyle.prefix ? parseInline(finalStyle.prefix) : [];
   const prefixWidth = measureSegments(prefix, finalStyle.fontSize);
   const hangingIndent = finalStyle.hangingIndent ?? 0;
-  const firstWidth = CONTENT_WIDTH - (finalStyle.indent ?? 0) - prefixWidth;
-  const nextWidth = CONTENT_WIDTH - (finalStyle.indent ?? 0) - hangingIndent;
+  const availableWidth = CONTENT_WIDTH - TEXT_WRAP_GUTTER;
+  const firstWidth = Math.max(80, availableWidth - (finalStyle.indent ?? 0) - prefixWidth);
+  const nextWidth = Math.max(80, availableWidth - (finalStyle.indent ?? 0) - hangingIndent);
   const wrapped = wrapSegments(parseInline(sourceText), firstWidth, nextWidth, finalStyle.fontSize);
 
   wrapped.forEach((segments, index) => {
@@ -291,7 +294,7 @@ function wrapSegments(segments: InlineSegment[], firstWidth: number, nextWidth: 
     for (const char of Array.from(segment.text)) {
       const charWidth = estimateCharWidth(char, fontSize);
       if (width + charWidth > limit && current.length) {
-        if (isClosingPunctuation(char)) {
+        if (isClosingPunctuation(char) && width + charWidth <= limit + CLOSING_PUNCTUATION_OVERHANG) {
           pushSegmentChar(current, char, segment);
           width += charWidth;
           continue;
@@ -405,7 +408,7 @@ function renderSvg(
           return `<tspan font-weight="${weight}" fill="${fill}">${escapeXml(segment.text)}</tspan>`;
         })
         .join("");
-      return `<text x="${line.x}" y="${line.y}" font-family="${FONT_FAMILY}" font-size="${line.fontSize}" font-weight="${line.weight}" fill="${line.color}">${segments}</text>`;
+      return `<text x="${line.x}" y="${line.y}" font-family="${FONT_FAMILY}" font-size="${line.fontSize}" font-weight="${line.weight}" fill="${line.color}"${textLengthAttrs(line)}>${segments}</text>`;
     })
     .join("");
 
@@ -489,7 +492,7 @@ function renderSourceQr(sourceQr: SourceQr, footerNotice: string | null, top: nu
 }
 
 function renderFooterNotice(text: string, x: number, y: number, maxWidth: number, includeDivider = true): string {
-  const lines = wrapPlainText(text, 16, maxWidth).slice(0, 2);
+  const lines = wrapPlainText(text, 16, Math.max(80, maxWidth - TEXT_WRAP_GUTTER)).slice(0, 2);
   const lineSvg = lines
     .map((line, index) => {
       const lineY = y + 20 + index * 22;
@@ -500,6 +503,13 @@ function renderFooterNotice(text: string, x: number, y: number, maxWidth: number
   ${includeDivider ? `<line x1="${CONTENT_X}" y1="${y}" x2="${WIDTH - CONTENT_X}" y2="${y}" stroke="#eee6da" stroke-width="2"/>` : ""}
   ${lineSvg}
 </g>`;
+}
+
+function textLengthAttrs(line: VisualLine): string {
+  const maxWidth = Math.max(1, WIDTH - CONTENT_X - TEXT_WRAP_GUTTER - line.x);
+  const estimatedWidth = measureSegments(line.segments, line.fontSize);
+  if (estimatedWidth < maxWidth * 0.92) return "";
+  return ` textLength="${round(Math.min(estimatedWidth, maxWidth))}" lengthAdjust="spacingAndGlyphs"`;
 }
 
 function fitText(text: string, fontSize: number, maxWidth: number): string {
