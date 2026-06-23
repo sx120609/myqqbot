@@ -154,6 +154,122 @@ describe("MessageProcessor", () => {
     expect(String(vi.mocked(llm.chat).mock.calls[0][0][0].content)).toContain("院校定位");
   });
 
+  it("uses the LLM for explicit multi-school comparison instead of asking to disambiguate", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        site: {
+          publicBaseUrl: "https://bot.example.com",
+          filingNumber: ""
+        },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1600,
+          timeoutMs: 45000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: false,
+          confidenceThreshold: 0.55,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5
+        }
+      })
+    } as SettingsStore;
+    const pku = {
+      id: 1,
+      name: "北京大学",
+      slug: "bei-jing-da-xue",
+      file_path: "docs/universities/bei-jing-da-xue.md",
+      source_url: "https://example.com/pku.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "北京大学",
+      score: 0.75
+    };
+    const thu = {
+      id: 2,
+      name: "清华大学",
+      slug: "qing-hua-da-xue",
+      file_path: "docs/universities/qing-hua-da-xue.md",
+      source_url: "https://example.com/thu.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "清华大学",
+      score: 0.75
+    };
+    const nlu = {
+      analyze: vi.fn(() => ({
+        isUniversityQuery: true,
+        confidence: 0.85,
+        topicKey: null,
+        topicLabel: null,
+        candidates: [pku, thu],
+        reason: "命中学校或高校生活关键词"
+      })),
+      buildRetrievalContext: vi.fn((name: string) => `学校：${name}\n问卷片段`)
+    } as unknown as NaturalLanguageService;
+    const universities = {
+      getTopicQuestions: vi.fn((id: number) => [
+        {
+          id,
+          question: id === 1 ? "北京大学生活体验怎么样" : "清华大学生活体验怎么样",
+          topic: "general",
+          position: 1,
+          answers: []
+        }
+      ]),
+      getSchoolProfile: vi.fn((id: number) => ({
+        universityId: id,
+        source: "srgaoxiao",
+        sourceSchoolId: String(id),
+        sourceUrl: `https://srgaoxiao.cn/school/${id}`,
+        payloadJson: "{}",
+        profileText: id === 1 ? "北京大学画像资料" : "清华大学画像资料",
+        updatedAt: "2026-06-24T00:00:00.000Z"
+      }))
+    } as unknown as UniversityRepository;
+    const llm = {
+      chat: vi.fn().mockResolvedValue("如果按综合学术氛围二选一，要看专业方向。\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。")
+    } as unknown as LlmClient;
+    const logs = {
+      message: vi.fn()
+    } as unknown as LogStore;
+    const srgaoxiao = {
+      fetchLiveReviewContext: vi.fn((id: number) => Promise.resolve(id === 1 ? "北京大学评论资料" : "清华大学评论资料"))
+    } as unknown as SrgaoxiaoSyncService;
+    const answerSources = {
+      create: vi.fn(() => "comparison-source")
+    } as unknown as AnswerSourceStore;
+    const processor = new MessageProcessor(settings, universities, nlu, llm, logs, srgaoxiao, answerSources);
+
+    const result = await processor.process({
+      platform: "debug",
+      text: "北京大学和清华大学选哪个",
+      messageType: "private",
+      userId: "u1",
+      conversationKey: "private:u1"
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.reason).toBe("多校对比回答");
+    expect(result.reply).not.toContain("我找到了几个可能的学校");
+    expect(result.sourcePageUrl).toBe("https://bot.example.com/sources/comparison-source");
+    expect(llm.chat).toHaveBeenCalledWith(expect.any(Array), "university-comparison");
+    const prompt = JSON.stringify(vi.mocked(llm.chat).mock.calls[0][0]);
+    expect(prompt).toContain("北京大学画像资料");
+    expect(prompt).toContain("清华大学画像资料");
+    expect(prompt).toContain("北京大学评论资料");
+    expect(prompt).toContain("清华大学评论资料");
+    expect(answerSources.create).toHaveBeenCalledWith(expect.objectContaining({
+      universityId: null,
+      universityName: "北京大学 / 清华大学",
+      sourceUrl: null,
+      answerText: expect.stringContaining("如果按综合学术氛围二选一")
+    }));
+  });
+
   it("does not expose raw abort errors when the LLM times out", async () => {
     const settings = {
       runtime: () => ({

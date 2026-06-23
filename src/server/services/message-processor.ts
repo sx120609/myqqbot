@@ -50,6 +50,10 @@ interface ImageSchoolContext {
   schoolProfileText: string | null;
 }
 
+interface ComparisonSchoolContext extends ImageSchoolContext {
+  srgaoxiaoReviewsText: string | null;
+}
+
 export class MessageProcessor {
   private readonly contexts = new Map<string, ConversationContext>();
   private readonly cooldown = new Map<string, number>();
@@ -177,6 +181,43 @@ export class MessageProcessor {
       });
     }
 
+    const comparisonCandidates = selectComparisonCandidates(input.text, analysis.candidates);
+    if (comparisonCandidates.length > 1) {
+      const topicKey = analysis.topicKey ?? "general";
+      const topic = analysis.topicLabel ?? topicLabel(topicKey);
+      const schools = await this.buildComparisonSchoolContexts(comparisonCandidates, topicKey, topic, input.text);
+      const reply = await this.answerComparisonWithLlm({
+        userMessage: input.text,
+        topic,
+        schools
+      });
+      const sourcePageUrl = this.createAnswerSourcePage({
+        question: input.text,
+        universityId: null,
+        universityName: schools.map((school) => school.universityName).join(" / "),
+        topic,
+        sourceUrl: null,
+        contextText: schools
+          .map((school) => `## ${school.universityName}\nCollegesChat 资料来源：${school.sourceUrl}\n\n${school.contextText}`)
+          .join("\n\n---\n\n"),
+        schoolProfileText: schools
+          .map((school) => `## ${school.universityName}\n${school.schoolProfileText ?? "本地没有外部院校画像补充资料。"}`)
+          .join("\n\n---\n\n"),
+        srgaoxiaoReviewsText: schools
+          .map((school) => `## ${school.universityName}\n${school.srgaoxiaoReviewsText ?? "本次未调用实时评论，或没有可用评论资料。"}`)
+          .join("\n\n---\n\n"),
+        answerText: reply
+      });
+
+      return this.finish(input, {
+        handled: true,
+        reason: "多校对比回答",
+        reply,
+        sourcePageUrl,
+        analysis
+      });
+    }
+
     const similarTop = analysis.candidates.filter((item) => Math.abs(item.score - analysis.candidates[0].score) < 0.01);
     if (similarTop.length > 1) {
       const options = similarTop
@@ -284,6 +325,72 @@ export class MessageProcessor {
   ): Promise<string | null> {
     if (!this.srgaoxiao || !schoolProfileText) return null;
     return this.srgaoxiao.fetchLiveReviewContext(universityId, 6);
+  }
+
+  private async buildComparisonSchoolContexts(
+    candidates: MessageAnalysis["candidates"],
+    topicKey: string,
+    topic: string,
+    userMessage: string
+  ): Promise<ComparisonSchoolContext[]> {
+    const schools: ComparisonSchoolContext[] = [];
+    for (const university of candidates.slice(0, 3)) {
+      const questions = this.universities.getTopicQuestions(university.id, topicKey, userMessage, 4);
+      const contextText = questions.length
+        ? this.nlu.buildRetrievalContext(university.name, questions)
+        : `这次没有检索到 ${university.name} 在“${topic}”上的 CollegesChat 问卷片段。请如实说明资料缺口，可以结合公开常识、院校画像和理性推断比较，但不要把推断说成该校问卷事实。`;
+      const schoolProfile = this.universities.getSchoolProfile?.(university.id, "srgaoxiao");
+      const srgaoxiaoReviewsText = await this.maybeFetchSrgaoxiaoReviews(
+        university.id,
+        schoolProfile?.profileText ?? null
+      );
+      schools.push({
+        universityId: university.id,
+        universityName: university.name,
+        topic,
+        sourceUrl: university.source_url,
+        contextText,
+        schoolProfileText: schoolProfile?.profileText ?? null,
+        srgaoxiaoReviewsText
+      });
+    }
+    return schools;
+  }
+
+  private async answerComparisonWithLlm(input: {
+    userMessage: string;
+    topic: string;
+    schools: ComparisonSchoolContext[];
+  }): Promise<string> {
+    try {
+      const answer = await this.llm.chat(
+        [
+          {
+            role: "system",
+            content:
+              "你是专业但口语化的高校选择顾问。用户正在比较多所明确提到的学校，不要把它当成学校名歧义，也不要要求用户重新补学校名。" +
+              "回答时先给一个清晰结论：如果必须二选一，按什么前提推荐哪所；如果取决于专业、城市、升学/就业目标，要直接列出分叉条件。" +
+              "再分学校说明院校定位、优势方向、风险点和生活体验。院校定位优先参考外部院校画像补充资料，也可以补充公开常识和模型知识；只有有把握或资料明确给出时才写具体数字。" +
+              "生活体验事实必须来自对应学校的 CollegesChat 问卷或神人高校评论；如果某校缺资料，要说清楚资料缺口，不要把另一所学校的体验套过去。" +
+              "神人高校网评论只代表该站用户评论和当时体验，不是官方信息；请提炼共性、分歧和风险点，不要照抄。" +
+              "适合 QQ 阅读，可用 Markdown 标题、加粗和列表。结尾必须包含“院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。”"
+          },
+          {
+            role: "user",
+            content: `用户问题：${input.userMessage}\n比较主题：${input.topic}\n\n${input.schools
+              .map((school) => renderComparisonSchoolForPrompt(school))
+              .join("\n\n---\n\n")}`
+          }
+        ],
+        "university-comparison"
+      );
+      if (answer.includes("生活体验数据来自 CollegesChat 问卷")) return answer;
+      return `${answer}\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。`;
+    } catch (error) {
+      const message = normalizeLlmFailureMessage(error, this.settings.runtime().llm.timeoutMs);
+      const names = input.schools.map((school) => school.universityName).join("、");
+      return `我识别到了 ${names}，但调用模型做对比总结失败：${message}\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。`;
+    }
   }
 
   private async answerCasualWithLlm(
@@ -448,6 +555,78 @@ function renderLogText(input: IncomingMessage): string {
   if (!imageCount) return input.text;
   const suffix = `[图片 x${imageCount}]`;
   return input.text.trim() ? `${input.text.trim()} ${suffix}` : suffix;
+}
+
+function selectComparisonCandidates(
+  message: string,
+  candidates: MessageAnalysis["candidates"]
+): MessageAnalysis["candidates"] {
+  const seen = new Set<number>();
+  const withMentions = candidates
+    .map((candidate) => ({
+      candidate,
+      mention: findCandidateMention(message, candidate)
+    }))
+    .filter((item): item is { candidate: MessageAnalysis["candidates"][number]; mention: MentionRange } => item.mention !== null)
+    .filter((item) => {
+      if (seen.has(item.candidate.id)) return false;
+      seen.add(item.candidate.id);
+      return true;
+    })
+    .sort((a, b) => a.mention.start - b.mention.start);
+
+  if (withMentions.length < 2) return [];
+  if (!hasComparisonIntentBetweenMentions(message, withMentions.map((item) => item.mention))) return [];
+  return withMentions.map((item) => item.candidate).slice(0, 3);
+}
+
+interface MentionRange {
+  start: number;
+  end: number;
+}
+
+function findCandidateMention(
+  message: string,
+  candidate: MessageAnalysis["candidates"][number]
+): MentionRange | null {
+  const names = [candidate.matchedBy, candidate.name, candidate.slug]
+    .filter((name): name is string => Boolean(name))
+    .sort((a, b) => b.length - a.length);
+  let best: MentionRange | null = null;
+  const normalizedMessage = message.toLowerCase();
+
+  for (const name of names) {
+    const index = normalizedMessage.indexOf(name.toLowerCase());
+    if (index < 0) continue;
+    const range = { start: index, end: index + name.length };
+    if (!best || range.start < best.start || (range.start === best.start && range.end > best.end)) {
+      best = range;
+    }
+  }
+
+  return best;
+}
+
+function hasComparisonIntentBetweenMentions(message: string, mentions: MentionRange[]): boolean {
+  if (/(选哪个|选哪所|选哪一个|怎么选|推荐哪个|哪个更|哪所更|谁更|对比|比较|区别|差别|优劣|相比|比起来|值不值得|适合谁)/i.test(message)) {
+    return true;
+  }
+
+  for (let index = 0; index < mentions.length - 1; index += 1) {
+    const between = message.slice(mentions[index].end, mentions[index + 1].start);
+    if (/(和|跟|与|还是|或者|vs|VS|、|,|，|\/)/.test(between)) return true;
+  }
+  return false;
+}
+
+function renderComparisonSchoolForPrompt(school: ComparisonSchoolContext): string {
+  return [
+    `学校：${school.universityName}`,
+    `CollegesChat 资料来源：${school.sourceUrl}`,
+    `外部院校画像补充资料：\n${school.schoolProfileText ?? "本地没有外部院校画像补充资料。"}`,
+    `神人高校评论资料：\n${school.srgaoxiaoReviewsText ?? "本次未调用实时评论，或没有可用评论资料。"}`,
+    `可用问卷资料：\n${school.contextText}`
+  ].join("\n\n");
 }
 
 function normalizeLlmFailureMessage(error: unknown, timeoutMs: number): string {
