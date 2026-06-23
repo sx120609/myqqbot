@@ -156,4 +156,4 @@ npm.cmd run build
 
 ## 数据来源与提示
 
-高校资料来自 [CollegesChat/university-information](https://github.com/CollegesChat/university-information) 的问卷生成文档。机器人会优先引用问卷资料，也允许模型补充常见大学生活经验、公开常识和理性建议，让回答更完整。回复会提示“数据来自 CollegesChat 问卷，常识建议仅供参考”，不会把问卷内容包装成官方结论，也不会把常识补充伪装成该校确定事实。
+高校生活资料来自 [CollegesChat/university-information](https://github.com/CollegesChat/university-information) 的问卷生成文档。机器人会先用公开常识给出院校定位，例如城市、办学层次、行业特色、优势方向等，再优先引用问卷资料总结宿舍、食堂、校园网、管理等生活体验。回复会提示“院校画像为公开常识参考，生活体验数据来自 CollegesChat 问卷，常识建议仅供参考”，不会把问卷内容包装成官方结论，也不会把常识补充伪装成该校确定事实。

@@ -133,5 +133,77 @@ describe("MessageProcessor", () => {
     expect(result.reason).toBe("已回答");
     expect(llm.chat).toHaveBeenCalledWith(expect.any(Array), "university-answer");
     expect(JSON.stringify(vi.mocked(llm.chat).mock.calls[0][0])).toContain("这次没有检索到 中国药科大学");
+    expect(String(vi.mocked(llm.chat).mock.calls[0][0][0].content)).toContain("院校定位");
+  });
+
+  it("passes detected university context into image messages", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1600,
+          timeoutMs: 45000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: false,
+          confidenceThreshold: 0.55,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5
+        }
+      })
+    } as SettingsStore;
+    const university = {
+      id: 2,
+      name: "南京航空航天大学",
+      slug: "nan-jing-hang-kong-hang-tian-da-xue",
+      file_path: "docs/universities/nan-jing-hang-kong-hang-tian-da-xue.md",
+      source_url: "https://example.com/nuaa.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "alias",
+      score: 0.85
+    };
+    const nlu = {
+      analyze: vi.fn(() => ({
+        isUniversityQuery: true,
+        confidence: 0.85,
+        topicKey: "dining",
+        topicLabel: "食堂",
+        candidates: [university],
+        reason: "命中学校或高校生活关键词"
+      })),
+      buildRetrievalContext: vi.fn()
+    } as unknown as NaturalLanguageService;
+    const universities = {
+      getTopicQuestions: vi.fn(() => [])
+    } as unknown as UniversityRepository;
+    const llm = {
+      chat: vi.fn().mockResolvedValue("这张图可以放在南航食堂吐槽语境里看。")
+    } as unknown as LlmClient;
+    const logs = {
+      message: vi.fn()
+    } as unknown as LogStore;
+
+    const processor = new MessageProcessor(settings, universities, nlu, llm, logs);
+
+    const result = await processor.process({
+      platform: "debug",
+      text: "南航的同学这样说",
+      images: [{ url: "data:image/png;base64,AAAA" }],
+      messageType: "private",
+      userId: "u1",
+      conversationKey: "private:u1"
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.reason).toBe("图片理解");
+    expect(llm.chat).toHaveBeenCalledWith(expect.any(Array), "image-message");
+    const messages = JSON.stringify(vi.mocked(llm.chat).mock.calls[0][0]);
+    expect(messages).toContain("南京航空航天大学");
+    expect(messages).toContain("不要只解释图片梗本身");
   });
 });
