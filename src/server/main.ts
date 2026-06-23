@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   const srgaoxiaoSync = new SrgaoxiaoSyncService(config, universities);
   const llm = new LlmClient(settings, logs);
   const nlu = new NaturalLanguageService(universities);
-  const processor = new MessageProcessor(settings, universities, nlu, llm, logs);
+  const processor = new MessageProcessor(settings, universities, nlu, llm, logs, srgaoxiaoSync);
   const onebot = new OneBotGateway(settings, processor);
   const autoSync = new AutoSyncScheduler(settings, sync, srgaoxiaoSync);
 

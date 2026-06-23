@@ -447,7 +447,7 @@ function DataPage() {
   const syncSrgaoxiao = async () => {
     setStatus("神人高校画像同步中...");
     try {
-      const result = await api<{ saved: number; total: number; errors: unknown[] }>("/api/data/sync-srgaoxiao", {
+      const result = await api<{ saved: number; total: number; errors: unknown[]; mode: string }>("/api/data/sync-srgaoxiao", {
         method: "POST",
         body: JSON.stringify({
           query: query.trim(),
@@ -455,6 +455,25 @@ function DataPage() {
         })
       });
       setStatus(`神人高校画像同步完成：${result.saved}/${result.total}${result.errors.length ? `，失败 ${result.errors.length} 个` : ""}`);
+      await search();
+      if (selected) await open(selected.id);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const syncSrgaoxiaoFull = async () => {
+    setStatus("神人高校画像全量同步中，预计需要几十秒到数分钟...");
+    try {
+      const result = await api<{ saved: number; total: number; remoteTotal: number | null; skipped: number; reviewsRefreshed: number; reviewsSaved: number; errors: unknown[] }>("/api/data/sync-srgaoxiao", {
+        method: "POST",
+        body: JSON.stringify({
+          full: true,
+          pageSize: 100,
+          refreshReviews: "changed",
+          reviewMaxPages: Number(settings["sync.srgaoxiaoReviewMaxPages"] ?? "20") || 20
+        })
+      });
+      setStatus(`神人高校画像全量同步完成：保存 ${result.saved}/${result.total}，刷新评论 ${result.reviewsRefreshed} 所/${result.reviewsSaved} 条，未匹配 ${result.skipped}${result.errors.length ? `，失败 ${result.errors.length} 个` : ""}`);
       await search();
       if (selected) await open(selected.id);
     } catch (error) {
@@ -483,7 +502,7 @@ function DataPage() {
         <FormGrid>
           <Input label="主数据间隔小时" value={String(settings["sync.collegesIntervalHours"] ?? "24")} onChange={(v) => updateSetting("sync.collegesIntervalHours", v)} />
           <Input label="画像间隔小时" value={String(settings["sync.srgaoxiaoIntervalHours"] ?? "24")} onChange={(v) => updateSetting("sync.srgaoxiaoIntervalHours", v)} />
-          <Input label="画像每批学校数" value={String(settings["sync.srgaoxiaoLimit"] ?? "120")} onChange={(v) => updateSetting("sync.srgaoxiaoLimit", v)} />
+          <Input label="评论每校最多页数" value={String(settings["sync.srgaoxiaoReviewMaxPages"] ?? "20")} onChange={(v) => updateSetting("sync.srgaoxiaoReviewMaxPages", v)} />
         </FormGrid>
         <div className="scheduler-grid">
           <KeyValue label="主数据状态" value={scheduler?.jobs.colleges.running ? "运行中" : scheduler?.jobs.colleges.enabled ? "已启用" : "未启用"} />
@@ -506,6 +525,7 @@ function DataPage() {
         <button onClick={search}><Search size={16} />搜索</button>
         <button className="primary" onClick={sync}><RefreshCcw size={16} />同步</button>
         <button onClick={syncSrgaoxiao}><RefreshCcw size={16} />同步画像</button>
+        <button onClick={syncSrgaoxiaoFull}><RefreshCcw size={16} />全量画像</button>
       </div>
       {status && <p className="notice">{status}</p>}
       <div className="split">

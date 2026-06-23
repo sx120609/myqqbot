@@ -121,11 +121,32 @@ export class AppDatabase {
         PRIMARY KEY (university_id, source)
       );
 
+      CREATE TABLE IF NOT EXISTS school_reviews (
+        university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+        source TEXT NOT NULL,
+        source_school_id TEXT NOT NULL,
+        source_review_id TEXT NOT NULL,
+        source_url TEXT,
+        author_label TEXT,
+        campus_name TEXT,
+        is_verified INTEGER NOT NULL DEFAULT 0,
+        content TEXT NOT NULL,
+        rating_json TEXT,
+        like_count INTEGER NOT NULL DEFAULT 0,
+        reply_count INTEGER NOT NULL DEFAULT 0,
+        reviewed_at TEXT,
+        payload_json TEXT NOT NULL,
+        cached_at TEXT NOT NULL,
+        PRIMARY KEY (source, source_review_id)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_questions_university_topic ON questions(university_id, topic);
       CREATE INDEX IF NOT EXISTS idx_answers_question ON answers(question_id);
       CREATE INDEX IF NOT EXISTS idx_message_logs_created ON message_logs(created_at);
       CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(created_at);
       CREATE INDEX IF NOT EXISTS idx_school_profiles_source ON school_profiles(source);
+      CREATE INDEX IF NOT EXISTS idx_school_reviews_university_source ON school_reviews(university_id, source);
+      CREATE INDEX IF NOT EXISTS idx_school_reviews_school_source ON school_reviews(source_school_id, source);
     `);
 
     this.db.exec(`

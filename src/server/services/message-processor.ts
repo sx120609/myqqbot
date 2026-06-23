@@ -3,6 +3,7 @@ import type { SettingsStore } from "../settings.js";
 import type { LlmClient } from "./llm-client.js";
 import type { LogStore } from "./log-store.js";
 import type { MessageAnalysis, NaturalLanguageService } from "./nlu.js";
+import type { SrgaoxiaoSyncService } from "./srgaoxiao-sync.js";
 import type { UniversityRepository } from "./university-repository.js";
 
 export interface IncomingImage {
@@ -22,6 +23,7 @@ export interface IncomingMessage {
   groupId?: string;
   conversationKey: string;
   mentionedBot?: boolean;
+  progressNotice?: (text: string) => Promise<{ close: () => Promise<void> } | null>;
 }
 
 export interface ProcessedMessage {
@@ -55,7 +57,8 @@ export class MessageProcessor {
     private readonly universities: UniversityRepository,
     private readonly nlu: NaturalLanguageService,
     private readonly llm: LlmClient,
-    private readonly logs: LogStore
+    private readonly logs: LogStore,
+    private readonly srgaoxiao?: SrgaoxiaoSyncService
   ) {}
 
   async process(input: IncomingMessage): Promise<ProcessedMessage> {
@@ -177,12 +180,20 @@ export class MessageProcessor {
       ? this.nlu.buildRetrievalContext(university.name, questions)
       : `这次没有检索到 ${university.name} 在“${analysis.topicLabel ?? "这个方向"}”上的 CollegesChat 问卷片段。请先基于公开常识给出院校定位，再如实说明生活体验问卷资料缺口，然后可以结合常见大学生活经验、公开常识和理性推断给出建议，但不要把这些补充说成该校问卷事实。`;
     const schoolProfile = this.universities.getSchoolProfile?.(university.id, "srgaoxiao");
+    const srgaoxiaoReviewsText = await this.maybeFetchSrgaoxiaoReviews(
+      input,
+      university.id,
+      university.name,
+      analysis.topicLabel ?? topicLabel(topicKey),
+      schoolProfile?.profileText ?? null
+    );
     const reply = await this.answerWithLlm({
       userMessage: input.text,
       universityName: university.name,
       topic: analysis.topicLabel ?? topicLabel(topicKey),
       contextText,
       schoolProfileText: schoolProfile?.profileText ?? null,
+      srgaoxiaoReviewsText,
       sourceUrl: university.source_url
     });
 
@@ -202,6 +213,7 @@ export class MessageProcessor {
     topic: string;
     contextText: string;
     schoolProfileText: string | null;
+    srgaoxiaoReviewsText: string | null;
     sourceUrl: string;
   }): Promise<string> {
     try {
@@ -212,24 +224,68 @@ export class MessageProcessor {
             content:
               "你是专业但口语化的高校资料顾问。回答高校问题时，先给用户一个“院校定位”，再结合 CollegesChat 问卷资料讲生活体验，最后给适合人群、风险点或追问建议。" +
               "如果给出了“外部院校画像补充资料”，院校定位要优先参考它，包括所在城市/校区、办学层次、211/双一流/行业特色、优势学科、占地、建校年份、官网和综合评分等。神人高校网评分属于公开站点聚合评价，不是官方评价，必须用“参考”语气。" +
+              "如果给出了“神人高校评论资料”，它只代表该站用户评论和当时体验，不是官方信息；请提炼共性、分歧和风险点，不要大段照抄原评论。" +
               "院校定位也可以补充公开常识和模型知识，包括学校规模、优势方向或就业方向等。只有在很有把握或资料明确给出时才写占地面积、具体校区数量等数字；不确定就不要写具体数字，也不要硬编。" +
               "生活体验部分请优先基于用户给出的 CollegesChat 问卷资料回答；具体到该校的宿舍、管理、食堂、校园网、外卖、早晚自习等事实只能来自问卷资料。资料存在分歧时要明确说存在差异。" +
               "如果没有检索到相关问卷片段，要直接说明资料缺口，然后再用“一般来说”“通常建议”“如果按常见情况看”等表达给出公开常识或理性建议，不要把常识包装成该校确定事实。" +
               "用户问评价、能不能、适不适合、体验怎么样时，可以展开分析：先概括学校定位，再讲生活条件，再讲适合哪些学生和需要注意什么。回答要适合 QQ 阅读，可用 Markdown 标题、加粗和列表；简单问题简洁，复杂问题可以更详细。" +
-              "不要说这是官方信息。结尾必须包含“院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷，常识建议仅供参考。”"
+              "不要说这是官方信息。结尾必须包含“院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。”"
           },
           {
             role: "user",
-            content: `用户问题：${input.userMessage}\n学校：${input.universityName}\n主题：${input.topic}\nCollegesChat 资料来源：${input.sourceUrl}\n\n外部院校画像补充资料：\n${input.schoolProfileText ?? "本地没有外部院校画像补充资料。"}\n\n可用问卷资料：\n${input.contextText}`
+            content: `用户问题：${input.userMessage}\n学校：${input.universityName}\n主题：${input.topic}\nCollegesChat 资料来源：${input.sourceUrl}\n\n外部院校画像补充资料：\n${input.schoolProfileText ?? "本地没有外部院校画像补充资料。"}\n\n神人高校评论资料：\n${input.srgaoxiaoReviewsText ?? "本次未调用实时评论，或没有可用评论资料。"}\n\n可用问卷资料：\n${input.contextText}`
           }
         ],
         "university-answer"
       );
       if (answer.includes("生活体验数据来自 CollegesChat 问卷")) return answer;
-      return `${answer}\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷，常识建议仅供参考。`;
+      return `${answer}\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。`;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return `我检索到了 ${input.universityName} 的相关资料，但调用模型总结失败：${message}\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷，常识建议仅供参考。`;
+      return `我检索到了 ${input.universityName} 的相关资料，但调用模型总结失败：${message}\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。`;
+    }
+  }
+
+  private async maybeFetchSrgaoxiaoReviews(
+    input: IncomingMessage,
+    universityId: number,
+    universityName: string,
+    topic: string,
+    schoolProfileText: string | null
+  ): Promise<string | null> {
+    if (!this.srgaoxiao || !schoolProfileText) return null;
+    const shouldFetch = await this.shouldUseSrgaoxiaoReviews(input.text, universityName, topic);
+    if (!shouldFetch) return null;
+
+    const notice = await input.progressNotice?.("正在获取神人高校实时评论，请稍等。");
+    try {
+      return await this.srgaoxiao.fetchLiveReviewContext(universityId, 6);
+    } finally {
+      await notice?.close().catch(() => undefined);
+    }
+  }
+
+  private async shouldUseSrgaoxiaoReviews(userMessage: string, universityName: string, topic: string): Promise<boolean> {
+    try {
+      const answer = await this.llm.chat(
+        [
+          {
+            role: "system",
+            content:
+              "你只判断回答高校问题时是否需要读取神人高校网的学生评论。需要评论的情况：用户问评价、真实体验、口碑、宿舍/食堂/管理/就业/校风/吐槽/避雷/适不适合/值不值得等需要学生主观体验的问题。不要因为普通寒暄、模型询问、学校是否211/双一流、城市、官网、地址、建校时间等基础事实而读取评论。只返回 JSON：{\"need\":true或false,\"reason\":\"简短原因\"}。"
+          },
+          {
+            role: "user",
+            content: `学校：${universityName}\n主题：${topic}\n用户问题：${userMessage}`
+          }
+        ],
+        "srgaoxiao-review-decision"
+      );
+      const json = answer.match(/\{[\s\S]*\}/)?.[0] ?? answer;
+      const parsed = JSON.parse(json) as { need?: unknown };
+      return parsed.need === true || parsed.need === "true";
+    } catch {
+      return false;
     }
   }
 

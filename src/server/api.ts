@@ -66,10 +66,21 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
   });
 
   app.post("/api/data/sync-srgaoxiao", async (request) => {
-    const body = request.body as { query?: string; limit?: number };
+    const body = request.body as {
+      query?: string;
+      limit?: number;
+      full?: boolean;
+      pageSize?: number;
+      refreshReviews?: "none" | "changed" | "always";
+      reviewMaxPages?: number;
+    };
     const result = await deps.srgaoxiaoSync.sync({
       query: body.query,
-      limit: body.limit
+      limit: body.limit,
+      full: body.full,
+      pageSize: body.pageSize,
+      refreshReviews: body.refreshReviews,
+      reviewMaxPages: body.reviewMaxPages
     });
     return { ok: true, ...result };
   });

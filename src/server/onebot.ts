@@ -138,7 +138,8 @@ export class OneBotGateway {
         userId: String(event.user_id),
         groupId: event.group_id == null ? undefined : String(event.group_id),
         conversationKey,
-        mentionedBot
+        mentionedBot,
+        progressNotice: (text) => this.sendTransientNotice(socket, event, text)
       });
 
       clearTimeout(generatingTimer);
@@ -187,6 +188,21 @@ export class OneBotGateway {
     const messageId = response?.data?.message_id;
     if (messageId == null) return;
     await this.sendAction(socket, "delete_msg", { message_id: messageId });
+  }
+
+  private async sendTransientNotice(
+    socket: WebSocket,
+    event: OneBotEvent,
+    text: string
+  ): Promise<{ close: () => Promise<void> } | null> {
+    const response = await this.sendMessage(socket, event, text, "progress", true);
+    const messageId = response?.data?.message_id;
+    return {
+      close: async () => {
+        if (messageId == null) return;
+        await this.sendAction(socket, "delete_msg", { message_id: messageId });
+      }
+    };
   }
 
   private sendMessage(

@@ -81,8 +81,14 @@ export class AutoSyncScheduler {
       void this.run("colleges", () => this.dataSync.sync());
     }
     if (runtime.srgaoxiaoAutoEnabled && this.isDue("srgaoxiao", runtime.srgaoxiaoIntervalHours)) {
-      const limit = Math.max(1, Math.min(500, Math.floor(runtime.srgaoxiaoLimit)));
-      void this.run("srgaoxiao", () => this.srgaoxiaoSync.sync({ limit }));
+      const reviewMaxPages = Math.max(1, Math.min(100, Math.floor(runtime.srgaoxiaoReviewMaxPages)));
+      void this.run("srgaoxiao", () =>
+        this.srgaoxiaoSync.sync({
+          full: true,
+          refreshReviews: "changed",
+          reviewMaxPages
+        })
+      );
     }
   }
 

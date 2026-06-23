@@ -35,6 +35,38 @@ export interface SchoolProfileRow {
   updatedAt: string;
 }
 
+export interface SchoolReviewRow {
+  universityId: number;
+  source: string;
+  sourceSchoolId: string;
+  sourceReviewId: string;
+  sourceUrl: string | null;
+  authorLabel: string | null;
+  campusName: string | null;
+  isVerified: number;
+  content: string;
+  ratingJson: string | null;
+  likeCount: number;
+  replyCount: number;
+  reviewedAt: string | null;
+  payloadJson: string;
+  cachedAt: string;
+}
+
+export interface SchoolReviewInput {
+  sourceReviewId: string;
+  sourceUrl?: string | null;
+  authorLabel?: string | null;
+  campusName?: string | null;
+  isVerified?: boolean;
+  content: string;
+  ratingJson?: string | null;
+  likeCount?: number;
+  replyCount?: number;
+  reviewedAt?: string | null;
+  payloadJson: string;
+}
+
 export class UniversityRepository {
   constructor(private readonly database: AppDatabase) {}
 
@@ -119,6 +151,18 @@ export class UniversityRepository {
       .all(limit) as unknown as UniversityRow[];
   }
 
+  listAllUniversities(): UniversityRow[] {
+    return this.database.db
+      .prepare(
+        `
+        SELECT id, name, slug, file_path, source_url, updated_at
+        FROM universities
+        ORDER BY name
+      `
+      )
+      .all() as unknown as UniversityRow[];
+  }
+
   listUniversitiesForProfileSync(source: string, query = "", limit = 50): UniversityRow[] {
     const trimmed = query.trim();
     const normalized = `%${trimmed}%`;
@@ -147,6 +191,13 @@ export class UniversityRepository {
     const row = source
       ? (this.database.db.prepare("SELECT COUNT(*) AS count FROM school_profiles WHERE source = ?").get(source) as { count: number })
       : (this.database.db.prepare("SELECT COUNT(*) AS count FROM school_profiles").get() as { count: number });
+    return row.count;
+  }
+
+  countSchoolReviews(universityId: number, source = "srgaoxiao"): number {
+    const row = this.database.db
+      .prepare("SELECT COUNT(*) AS count FROM school_reviews WHERE university_id = ? AND source = ?")
+      .get(universityId, source) as { count: number };
     return row.count;
   }
 
@@ -205,6 +256,88 @@ export class UniversityRepository {
         input.profileText,
         new Date().toISOString()
       );
+  }
+
+  getSchoolReviews(universityId: number, source = "srgaoxiao", limit = 8): SchoolReviewRow[] {
+    return this.database.db
+      .prepare(
+        `
+        SELECT university_id AS universityId, source, source_school_id AS sourceSchoolId,
+          source_review_id AS sourceReviewId, source_url AS sourceUrl, author_label AS authorLabel,
+          campus_name AS campusName, is_verified AS isVerified, content, rating_json AS ratingJson,
+          like_count AS likeCount, reply_count AS replyCount, reviewed_at AS reviewedAt,
+          payload_json AS payloadJson, cached_at AS cachedAt
+        FROM school_reviews
+        WHERE university_id = ? AND source = ?
+        ORDER BY COALESCE(reviewed_at, '') DESC, source_review_id DESC
+        LIMIT ?
+      `
+      )
+      .all(universityId, source, limit) as unknown as SchoolReviewRow[];
+  }
+
+  replaceSchoolReviews(input: {
+    universityId: number;
+    source: string;
+    sourceSchoolId: string;
+    reviews: SchoolReviewInput[];
+  }): void {
+    this.database.transaction(() => {
+      this.database.db
+        .prepare("DELETE FROM school_reviews WHERE university_id = ? AND source = ? AND source_school_id = ?")
+        .run(input.universityId, input.source, input.sourceSchoolId);
+      this.upsertSchoolReviews(input);
+    });
+  }
+
+  upsertSchoolReviews(input: {
+    universityId: number;
+    source: string;
+    sourceSchoolId: string;
+    reviews: SchoolReviewInput[];
+  }): void {
+    const stmt = this.database.db.prepare(`
+      INSERT INTO school_reviews(
+        university_id, source, source_school_id, source_review_id, source_url,
+        author_label, campus_name, is_verified, content, rating_json,
+        like_count, reply_count, reviewed_at, payload_json, cached_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(source, source_review_id) DO UPDATE SET
+        university_id = excluded.university_id,
+        source_school_id = excluded.source_school_id,
+        source_url = excluded.source_url,
+        author_label = excluded.author_label,
+        campus_name = excluded.campus_name,
+        is_verified = excluded.is_verified,
+        content = excluded.content,
+        rating_json = excluded.rating_json,
+        like_count = excluded.like_count,
+        reply_count = excluded.reply_count,
+        reviewed_at = excluded.reviewed_at,
+        payload_json = excluded.payload_json,
+        cached_at = excluded.cached_at
+    `);
+    const cachedAt = new Date().toISOString();
+    for (const review of input.reviews) {
+      stmt.run(
+        input.universityId,
+        input.source,
+        input.sourceSchoolId,
+        review.sourceReviewId,
+        review.sourceUrl ?? null,
+        review.authorLabel ?? null,
+        review.campusName ?? null,
+        review.isVerified ? 1 : 0,
+        review.content,
+        review.ratingJson ?? null,
+        review.likeCount ?? 0,
+        review.replyCount ?? 0,
+        review.reviewedAt ?? null,
+        review.payloadJson,
+        cachedAt
+      );
+    }
   }
 
   getAliases(universityId?: number): Array<{ id: number; alias: string; universityId: number; universityName: string; priority: number }> {

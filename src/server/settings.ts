@@ -27,6 +27,7 @@ export interface RuntimeSettings {
     srgaoxiaoAutoEnabled: boolean;
     srgaoxiaoIntervalHours: number;
     srgaoxiaoLimit: number;
+    srgaoxiaoReviewMaxPages: number;
   };
 }
 
@@ -49,7 +50,8 @@ const DEFAULTS: Record<string, string> = {
   "sync.collegesIntervalHours": "24",
   "sync.srgaoxiaoAutoEnabled": "false",
   "sync.srgaoxiaoIntervalHours": "24",
-  "sync.srgaoxiaoLimit": "120"
+  "sync.srgaoxiaoLimit": "120",
+  "sync.srgaoxiaoReviewMaxPages": "20"
 };
 
 export class SettingsStore {
@@ -103,7 +105,8 @@ export class SettingsStore {
         collegesIntervalHours: this.getNumber("sync.collegesIntervalHours", 24),
         srgaoxiaoAutoEnabled: this.getBoolean("sync.srgaoxiaoAutoEnabled", false),
         srgaoxiaoIntervalHours: this.getNumber("sync.srgaoxiaoIntervalHours", 24),
-        srgaoxiaoLimit: this.getNumber("sync.srgaoxiaoLimit", 120)
+        srgaoxiaoLimit: this.getNumber("sync.srgaoxiaoLimit", 120),
+        srgaoxiaoReviewMaxPages: this.getNumber("sync.srgaoxiaoReviewMaxPages", 20)
       }
     };
   }

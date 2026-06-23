@@ -13,10 +13,14 @@ const sync = new SrgaoxiaoSyncService(config, universities, (message) => {
 try {
   const result = await sync.sync({
     query: process.env.SRGAOXIAO_SYNC_QUERY,
-    limit: Number(process.env.SRGAOXIAO_SYNC_LIMIT ?? "50")
+    limit: Number(process.env.SRGAOXIAO_SYNC_LIMIT ?? "50"),
+    full: process.env.SRGAOXIAO_SYNC_ALL === "1" || process.argv.includes("--all"),
+    pageSize: Number(process.env.SRGAOXIAO_PAGE_SIZE ?? "100"),
+    refreshReviews: (process.env.SRGAOXIAO_REFRESH_REVIEWS as "none" | "changed" | "always" | undefined) ?? "changed",
+    reviewMaxPages: Number(process.env.SRGAOXIAO_REVIEW_MAX_PAGES ?? "20")
   });
   console.log(
-    `Synced ${result.saved}/${result.total} srgaoxiao profiles from ${result.baseUrl}. Errors: ${result.errors.length}`
+    `Synced ${result.saved}/${result.total} srgaoxiao profiles from ${result.baseUrl} (${result.mode}). Reviews: ${result.reviewsSaved} in ${result.reviewsRefreshed} schools. Errors: ${result.errors.length}`
   );
   if (result.errors.length) {
     for (const error of result.errors.slice(0, 10)) {

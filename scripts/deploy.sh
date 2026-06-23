@@ -15,7 +15,7 @@ NODE_BIN="${NODE_BIN:-}"
 SYNC_DATA_ON_UPDATE="${SYNC_DATA_ON_UPDATE:-0}"
 SYNC_TIMER_CALENDAR="${SYNC_TIMER_CALENDAR:-03:40}"
 SRGAOXIAO_TIMER_CALENDAR="${SRGAOXIAO_TIMER_CALENDAR:-04:20}"
-SRGAOXIAO_TIMER_LIMIT="${SRGAOXIAO_TIMER_LIMIT:-120}"
+SRGAOXIAO_TIMER_REVIEW_MAX_PAGES="${SRGAOXIAO_TIMER_REVIEW_MAX_PAGES:-20}"
 SKIP_CJK_FONT_INSTALL="${SKIP_CJK_FONT_INSTALL:-0}"
 DEFAULT_DATA_REPO_URL="https://gh.lizmt.cn/CollegesChat/university-information.git"
 OLD_DATA_REPO_URL="https://github.com/CollegesChat/university-information.git"
@@ -52,6 +52,8 @@ Usage:
   scripts/deploy.sh sync         Sync CollegesChat data in the deployed app directory.
   scripts/deploy.sh sync-srgaoxiao
                                   Sync cached srgaoxiao school profiles.
+  scripts/deploy.sh sync-srgaoxiao-full
+                                  Sync all srgaoxiao school profiles once.
   scripts/deploy.sh enable-sync-timer
                                   Enable daily CollegesChat data sync timer.
   scripts/deploy.sh disable-sync-timer
@@ -74,7 +76,8 @@ Common environment variables:
   SYNC_DATA_ON_UPDATE=1          Also sync data during update. Default: 0.
   SYNC_TIMER_CALENDAR=03:40      systemd OnCalendar value for data sync.
   SRGAOXIAO_TIMER_CALENDAR=04:20 systemd OnCalendar value for srgaoxiao cache.
-  SRGAOXIAO_TIMER_LIMIT=120      Number of school profiles refreshed each run.
+  SRGAOXIAO_TIMER_REVIEW_MAX_PAGES=20
+                                  Max review pages refreshed per changed school.
   SKIP_CJK_FONT_INSTALL=1        Do not auto-install Noto CJK fonts for image replies.
   SKIP_SYSTEMD=1                 Do not install/restart systemd service.
 
@@ -289,6 +292,11 @@ prepare_env() {
     log "Adding SRGAOXIAO_DELAY_MS to .env"
     set_env_value .env SRGAOXIAO_DELAY_MS "1200"
   fi
+
+  if ! grep -q '^SRGAOXIAO_REVIEW_MAX_PAGES=' .env; then
+    log "Adding SRGAOXIAO_REVIEW_MAX_PAGES to .env"
+    set_env_value .env SRGAOXIAO_REVIEW_MAX_PAGES "20"
+  fi
 }
 
 install_and_build() {
@@ -488,7 +496,8 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=${APP_DIR}
 Environment=NODE_ENV=production
-Environment=SRGAOXIAO_SYNC_LIMIT=${SRGAOXIAO_TIMER_LIMIT}
+Environment=SRGAOXIAO_SYNC_ALL=1
+Environment=SRGAOXIAO_REVIEW_MAX_PAGES=${SRGAOXIAO_TIMER_REVIEW_MAX_PAGES}
 EnvironmentFile=${APP_DIR}/.env
 ExecStart=/usr/bin/env bash ${APP_DIR}/scripts/deploy.sh sync-srgaoxiao
 User=${RUN_USER}
@@ -629,6 +638,18 @@ sync_srgaoxiao_command() {
   fi
 }
 
+sync_srgaoxiao_full_command() {
+  ensure_linux_and_node
+  resolve_app_dir
+  cd "$APP_DIR"
+  export SRGAOXIAO_SYNC_ALL=1
+  if [ -f dist/server/scripts/sync-srgaoxiao.js ]; then
+    node dist/server/scripts/sync-srgaoxiao.js
+  else
+    npm run sync:srgaoxiao
+  fi
+}
+
 systemd_command() {
   local action="$1"
   [ "$SKIP_SYSTEMD" != "1" ] || fail "SKIP_SYSTEMD=1 is set."
@@ -659,6 +680,9 @@ main() {
       ;;
     sync-srgaoxiao)
       sync_srgaoxiao_command
+      ;;
+    sync-srgaoxiao-full)
+      sync_srgaoxiao_full_command
       ;;
     restart|status|logs)
       systemd_command "$COMMAND"
