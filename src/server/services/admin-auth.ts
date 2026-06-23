@@ -1,15 +1,24 @@
-import { createHmac, createHash, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { AppConfig } from "../config.js";
+import type { SettingsStore } from "../settings.js";
 
 const COOKIE_NAME = "myqqbot_admin";
+const PASSWORD_HASH_KEY = "auth.adminPasswordHash";
+const SCRYPT_KEY_LENGTH = 32;
+const MIN_PASSWORD_LENGTH = 8;
 
 interface LoginBody {
   password?: string;
 }
 
-export async function registerAdminAuth(app: FastifyInstance, config: AppConfig): Promise<void> {
-  const auth = new AdminAuth(config);
+interface ChangePasswordBody {
+  currentPassword?: string;
+  newPassword?: string;
+}
+
+export async function registerAdminAuth(app: FastifyInstance, config: AppConfig, settings: AuthSettings): Promise<void> {
+  const auth = new AdminAuth(config, settings);
 
   app.get("/api/auth/status", async (request) => ({
     configured: auth.configured,
@@ -37,6 +46,29 @@ export async function registerAdminAuth(app: FastifyInstance, config: AppConfig)
     return { ok: true };
   });
 
+  app.post("/api/auth/change-password", async (request, reply) => {
+    const body = request.body as ChangePasswordBody;
+    const result = auth.changePassword(body.currentPassword ?? "", body.newPassword ?? "");
+    if (result === "not_configured") {
+      return reply.code(503).send({
+        error: "admin_password_not_configured",
+        message: "ADMIN_PASSWORD is not configured."
+      });
+    }
+    if (result === "invalid_current_password") {
+      return reply.code(401).send({ error: "invalid_current_password", message: "当前密码不正确。" });
+    }
+    if (result === "weak_new_password") {
+      return reply.code(400).send({
+        error: "weak_new_password",
+        message: `新密码至少需要 ${MIN_PASSWORD_LENGTH} 位。`
+      });
+    }
+
+    setCookie(reply, auth.createSession(), config);
+    return { ok: true };
+  });
+
   app.addHook("preHandler", async (request, reply) => {
     const path = request.url.split("?")[0] ?? "/";
     if (!path.startsWith("/api/") || path === "/api/health" || path.startsWith("/api/auth/")) return;
@@ -52,22 +84,45 @@ export async function registerAdminAuth(app: FastifyInstance, config: AppConfig)
   });
 }
 
+type ChangePasswordResult = "ok" | "not_configured" | "invalid_current_password" | "weak_new_password";
+
+interface AuthSettings {
+  getString(key: string, fallback: string): string;
+  setInternal(key: string, value: string): void;
+}
+
 class AdminAuth {
-  readonly configured: boolean;
-  private readonly passwordHash: Buffer;
   private readonly secret: string;
   private readonly ttlMs: number;
 
-  constructor(private readonly config: AppConfig) {
-    this.configured = Boolean(config.auth.adminPassword);
-    this.passwordHash = hash(config.auth.adminPassword);
+  constructor(
+    private readonly config: AppConfig,
+    private readonly settings: AuthSettings
+  ) {
     this.secret = config.auth.sessionSecret || config.auth.adminPassword;
     this.ttlMs = Math.max(1, config.auth.sessionTtlHours) * 60 * 60 * 1000;
+    this.seedInitialPassword();
+  }
+
+  get configured(): boolean {
+    return Boolean(this.passwordHash);
+  }
+
+  private get passwordHash(): string {
+    return this.settings.getString(PASSWORD_HASH_KEY, "");
   }
 
   verifyPassword(password: string): boolean {
     if (!this.configured) return false;
-    return timingSafeEqual(hash(password), this.passwordHash);
+    return verifyPasswordHash(password, this.passwordHash);
+  }
+
+  changePassword(currentPassword: string, newPassword: string): ChangePasswordResult {
+    if (!this.configured) return "not_configured";
+    if (!this.verifyPassword(currentPassword)) return "invalid_current_password";
+    if (newPassword.length < MIN_PASSWORD_LENGTH) return "weak_new_password";
+    this.settings.setInternal(PASSWORD_HASH_KEY, hashPassword(newPassword));
+    return "ok";
   }
 
   createSession(): string {
@@ -89,7 +144,12 @@ class AdminAuth {
   }
 
   private sign(payload: string): string {
-    return createHmac("sha256", this.secret).update(payload).digest("base64url");
+    return createHmac("sha256", `${this.secret}:${this.passwordHash}`).update(payload).digest("base64url");
+  }
+
+  private seedInitialPassword(): void {
+    if (this.passwordHash || !this.config.auth.adminPassword) return;
+    this.settings.setInternal(PASSWORD_HASH_KEY, hashPassword(this.config.auth.adminPassword));
   }
 }
 
@@ -120,8 +180,17 @@ function parseCookie(cookieHeader: string): Record<string, string> {
   return cookies;
 }
 
-function hash(value: string): Buffer {
-  return createHash("sha256").update(value).digest();
+function hashPassword(value: string): string {
+  const salt = randomBytes(16).toString("base64url");
+  const hash = scryptSync(value, salt, SCRYPT_KEY_LENGTH).toString("base64url");
+  return `scrypt$${salt}$${hash}`;
+}
+
+function verifyPasswordHash(password: string, encoded: string): boolean {
+  const [algorithm, salt, expectedHash] = encoded.split("$");
+  if (algorithm !== "scrypt" || !salt || !expectedHash) return false;
+  const actualHash = scryptSync(password, salt, SCRYPT_KEY_LENGTH).toString("base64url");
+  return safeEqual(actualHash, expectedHash);
 }
 
 function safeEqual(left: string, right: string): boolean {

@@ -317,6 +317,10 @@ textarea {
   color: #536170;
 }
 
+.password-form {
+  max-width: 760px;
+}
+
 .searchbox {
   width: min(460px, 100%);
   display: flex;

@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-type Page = "dashboard" | "model" | "natural" | "data" | "aliases" | "debug" | "logs";
+type Page = "dashboard" | "model" | "natural" | "data" | "aliases" | "debug" | "logs" | "security";
 
 interface Dashboard {
   onebot: {
@@ -73,7 +73,8 @@ const NAV = [
   { id: "data", label: "高校数据", icon: Database },
   { id: "aliases", label: "别名", icon: ListFilter },
   { id: "debug", label: "调试", icon: Send },
-  { id: "logs", label: "日志", icon: Bot }
+  { id: "logs", label: "日志", icon: Bot },
+  { id: "security", label: "安全", icon: Lock }
 ] satisfies Array<{ id: Page; label: string; icon: typeof Activity }>;
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -152,6 +153,7 @@ function App() {
         {page === "aliases" && <AliasesPage />}
         {page === "debug" && <DebugPage />}
         {page === "logs" && <LogsPage />}
+        {page === "security" && <SecurityPage />}
       </main>
     </div>
   );
@@ -315,6 +317,64 @@ function NaturalLanguagePage() {
           <button className="primary" onClick={save}><Save size={16} />保存</button>
           {status && <span className="status-text">{status}</span>}
         </div>
+      </Panel>
+    </section>
+  );
+}
+
+function SecurityPage() {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [status, setStatus] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setStatus("");
+    if (newPassword.length < 8) {
+      setStatus("新密码至少需要 8 位。");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setStatus("两次输入的新密码不一致。");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await api("/api/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({ currentPassword, newPassword })
+      });
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setStatus("密码已修改。");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section>
+      <Header title="安全设置" subtitle="修改 WebUI 管理员密码，保护模型密钥、日志和同步操作。" />
+      <Panel title="管理员密码" icon={<Lock size={18} />}>
+        <form className="password-form" onSubmit={save}>
+          <FormGrid>
+            <Input label="当前密码" value={currentPassword} onChange={setCurrentPassword} type="password" />
+            <Input label="新密码" value={newPassword} onChange={setNewPassword} type="password" />
+            <Input label="确认新密码" value={confirmPassword} onChange={setConfirmPassword} type="password" />
+          </FormGrid>
+          <div className="actions">
+            <button className="primary" type="submit" disabled={saving || !currentPassword || !newPassword || !confirmPassword}>
+              <Save size={16} />{saving ? "保存中..." : "修改密码"}
+            </button>
+            {status && <span className="status-text">{status}</span>}
+          </div>
+        </form>
       </Panel>
     </section>
   );

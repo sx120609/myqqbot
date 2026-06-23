@@ -52,6 +52,7 @@ export class SettingsStore {
     }>;
     const values: Record<string, string | boolean> = {};
     for (const row of rows) {
+      if (row.key.startsWith("auth.")) continue;
       if (maskSecrets && row.key === "llm.apiKey") {
         values[row.key] = row.value ? "********" : "";
       } else {
@@ -108,6 +109,18 @@ export class SettingsStore {
       | { value: string }
       | undefined;
     return row?.value ?? fallback;
+  }
+
+  setInternal(key: string, value: string): void {
+    this.database.db
+      .prepare(
+        `
+        INSERT INTO settings(key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+      `
+      )
+      .run(key, value, new Date().toISOString());
   }
 
   private getNumber(key: string, fallback: number): number {

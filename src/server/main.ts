@@ -30,7 +30,7 @@ async function main(): Promise<void> {
 
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });
-  await registerAdminAuth(app, config);
+  await registerAdminAuth(app, config, settings);
   await onebot.register(app);
   await registerApi(app, { config, database, settings, universities, sync, llm, logs, processor, onebot });
 
