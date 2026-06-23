@@ -50,7 +50,7 @@ const DEFAULTS: Record<string, string> = {
   "llm.model": process.env.LLM_MODEL ?? "gpt-5.5",
   "llm.temperature": process.env.LLM_TEMPERATURE ?? "0.2",
   "llm.maxTokens": process.env.LLM_MAX_TOKENS ?? "1600",
-  "llm.timeoutMs": process.env.LLM_TIMEOUT_MS ?? "45000",
+  "llm.timeoutMs": process.env.LLM_TIMEOUT_MS ?? "120000",
   "nl.groupNaturalEnabled": "true",
   "nl.requireMentionInGroup": "false",
   "nl.confidenceThreshold": "0.55",
@@ -107,7 +107,7 @@ export class SettingsStore {
         model: this.getString("llm.model", "gpt-5.5"),
         temperature: this.getNumber("llm.temperature", 0.2),
         maxTokens: this.getNumber("llm.maxTokens", 1600),
-        timeoutMs: this.getNumber("llm.timeoutMs", 45000)
+        timeoutMs: this.getNumber("llm.timeoutMs", 120000)
       },
       naturalLanguage: {
         groupNaturalEnabled: this.getBoolean("nl.groupNaturalEnabled", true),
@@ -191,6 +191,7 @@ export class SettingsStore {
         stmt.run(key, value, now);
       }
       upgradeStmt.run("1600", now, "llm.maxTokens", "900");
+      upgradeStmt.run("120000", now, "llm.timeoutMs", "45000");
     });
   }
 }

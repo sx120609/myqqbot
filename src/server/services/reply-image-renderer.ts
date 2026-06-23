@@ -48,6 +48,11 @@ interface SourceQr {
   darkModules: Array<[number, number]>;
 }
 
+interface ReplyImageContent {
+  body: string;
+  footerNotice: string | null;
+}
+
 const WIDTH = 900;
 const CARD_X = 22;
 const CONTENT_X = 58;
@@ -55,19 +60,23 @@ const CONTENT_WIDTH = WIDTH - CONTENT_X * 2;
 const HEADER_Y = 54;
 const BODY_TOP = 116;
 const BOTTOM = 52;
-const SOURCE_QR_SIZE = 132;
-const SOURCE_QR_BLOCK_HEIGHT = 184;
+const SOURCE_QR_SIZE = 124;
+const SOURCE_QR_PADDING = 6;
+const SOURCE_QR_BLOCK_HEIGHT = 176;
+const FOOTER_NOTICE_BLOCK_HEIGHT = 72;
 const FONT_FAMILY = "Noto Sans CJK SC, Microsoft YaHei, PingFang SC, SimHei, Arial, sans-serif";
 
 export function renderReplyImage(markdown: string, options: ReplyImageOptions = {}): RenderedReplyImage {
-  const clean = normalizeMarkdown(markdown);
+  const content = splitReplyImageContent(markdown);
+  const clean = normalizeMarkdown(content.body);
   const lines = layoutMarkdown(clean || " ");
   const lastLine = lines.at(-1);
   const contentBottom = lastLine ? lastLine.y + (lastLine.kind === "rule" ? lastLine.lineHeight : 0) : BODY_TOP;
   const sourceQr = options.sourcePageUrl ? createSourceQr(options.sourcePageUrl) : null;
-  const sourceQrTop = sourceQr ? Math.ceil(contentBottom + 26) : null;
-  const height = Math.max(220, Math.ceil((sourceQrTop == null ? contentBottom : sourceQrTop + SOURCE_QR_BLOCK_HEIGHT) + BOTTOM));
-  const svg = renderSvg(lines, height, options, sourceQr, sourceQrTop);
+  const footerTop = sourceQr || content.footerNotice ? Math.ceil(contentBottom + 26) : null;
+  const footerBlockHeight = sourceQr ? SOURCE_QR_BLOCK_HEIGHT : content.footerNotice ? FOOTER_NOTICE_BLOCK_HEIGHT : 0;
+  const height = Math.max(220, Math.ceil((footerTop == null ? contentBottom : footerTop + footerBlockHeight) + BOTTOM));
+  const svg = renderSvg(lines, height, options, sourceQr, footerTop, content.footerNotice);
   const png = new Resvg(svg, {
     fitTo: { mode: "original" },
     font: {
@@ -172,6 +181,29 @@ function layoutMarkdown(markdown: string): VisualLine[] {
   return positionLines(visual);
 }
 
+function splitReplyImageContent(markdown: string): ReplyImageContent {
+  const clean = normalizeMarkdown(markdown);
+  const paragraphs = clean.split(/\n{2,}/);
+  const lastParagraph = paragraphs.at(-1)?.trim() ?? "";
+  const normalizedLast = lastParagraph.replace(/\s+/g, " ");
+  if (!isFooterNotice(normalizedLast)) {
+    return { body: clean, footerNotice: null };
+  }
+
+  paragraphs.pop();
+  return {
+    body: paragraphs.join("\n\n").trim(),
+    footerNotice: normalizedLast
+  };
+}
+
+function isFooterNotice(text: string): boolean {
+  return (
+    (text.includes("生活体验数据来自 CollegesChat 问卷") && text.includes("常识建议仅供参考")) ||
+    (text.includes("数据来自 CollegesChat 问卷") && text.includes("常识建议仅供参考"))
+  );
+}
+
 function bodyStyle(marginTop: number): LineStyle {
   return {
     fontSize: 28,
@@ -259,6 +291,11 @@ function wrapSegments(segments: InlineSegment[], firstWidth: number, nextWidth: 
     for (const char of Array.from(segment.text)) {
       const charWidth = estimateCharWidth(char, fontSize);
       if (width + charWidth > limit && current.length) {
+        if (isClosingPunctuation(char)) {
+          pushSegmentChar(current, char, segment);
+          width += charWidth;
+          continue;
+        }
         trimTrailingSpaces(current);
         lines.push(current);
         current = [];
@@ -343,12 +380,17 @@ function estimateCharWidth(char: string, fontSize: number): number {
   return fontSize * 0.58;
 }
 
+function isClosingPunctuation(char: string): boolean {
+  return /[，。！？；：、,.!?;:）)\]】》”’]/.test(char);
+}
+
 function renderSvg(
   lines: VisualLine[],
   height: number,
   options: ReplyImageOptions,
   sourceQr: SourceQr | null,
-  sourceQrTop: number | null
+  footerTop: number | null,
+  footerNotice: string | null
 ): string {
   const lineSvg = lines
     .map((line) => {
@@ -378,7 +420,7 @@ function renderSvg(
   const badgeX = headerRight - badgeWidth;
   const titleMaxWidth = Math.max(120, badgeX - titleX - headerGap);
   const headerTitle = fitText(rawHeaderTitle, 26, titleMaxWidth);
-  const sourceQrSvg = sourceQr && sourceQrTop != null ? renderSourceQr(sourceQr, sourceQrTop) : "";
+  const footerSvg = footerTop != null ? renderFooter(sourceQr, footerNotice, footerTop) : "";
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${height}" viewBox="0 0 ${WIDTH} ${height}">
   <rect width="100%" height="100%" fill="#f4f1ea"/>
@@ -388,7 +430,7 @@ function renderSvg(
   <text x="${badgeX}" y="${HEADER_Y + 7}" font-family="${FONT_FAMILY}" font-size="20" font-weight="500" fill="#8a8177">${escapeXml(headerBadge)}</text>
   <line x1="${CONTENT_X}" y1="88" x2="${WIDTH - CONTENT_X}" y2="88" stroke="#eee6da" stroke-width="2"/>
   ${lineSvg}
-  ${sourceQrSvg}
+  ${footerSvg}
 </svg>`;
 }
 
@@ -412,7 +454,13 @@ function createSourceQr(url: string): SourceQr | null {
   }
 }
 
-function renderSourceQr(sourceQr: SourceQr, top: number): string {
+function renderFooter(sourceQr: SourceQr | null, footerNotice: string | null, top: number): string {
+  if (sourceQr) return renderSourceQr(sourceQr, footerNotice, top);
+  if (footerNotice) return renderFooterNotice(footerNotice, CONTENT_X, top, CONTENT_WIDTH);
+  return "";
+}
+
+function renderSourceQr(sourceQr: SourceQr, footerNotice: string | null, top: number): string {
   const qrX = CONTENT_X;
   const qrY = top + 34;
   const moduleSize = SOURCE_QR_SIZE / sourceQr.moduleCount;
@@ -425,15 +473,32 @@ function renderSourceQr(sourceQr: SourceQr, top: number): string {
     })
     .join("");
   const textX = qrX + SOURCE_QR_SIZE + 28;
+  const noticeSvg = footerNotice
+    ? renderFooterNotice(footerNotice, textX, qrY + 86, WIDTH - CONTENT_X - textX, false)
+    : "";
 
   return `<g>
   <line x1="${CONTENT_X}" y1="${top}" x2="${WIDTH - CONTENT_X}" y2="${top}" stroke="#eee6da" stroke-width="2"/>
-  <rect x="${qrX - 10}" y="${qrY - 10}" width="${SOURCE_QR_SIZE + 20}" height="${SOURCE_QR_SIZE + 20}" rx="10" fill="#ffffff" stroke="#e5ded3" stroke-width="2"/>
+  <rect x="${qrX - SOURCE_QR_PADDING}" y="${qrY - SOURCE_QR_PADDING}" width="${SOURCE_QR_SIZE + SOURCE_QR_PADDING * 2}" height="${SOURCE_QR_SIZE + SOURCE_QR_PADDING * 2}" rx="8" fill="#ffffff" stroke="#e5ded3" stroke-width="2"/>
   <rect x="${qrX}" y="${qrY}" width="${SOURCE_QR_SIZE}" height="${SOURCE_QR_SIZE}" fill="#ffffff"/>
   ${moduleRects}
-  <text x="${textX}" y="${qrY + 34}" font-family="${FONT_FAMILY}" font-size="26" font-weight="800" fill="#182235">扫码查看本回答资料</text>
-  <text x="${textX}" y="${qrY + 72}" font-family="${FONT_FAMILY}" font-size="21" font-weight="500" fill="#5f6b7a">包含问卷片段、院校画像和评论摘要</text>
-  <text x="${textX}" y="${qrY + 108}" font-family="${FONT_FAMILY}" font-size="18" font-weight="500" fill="#8a8177">由服务器本地生成二维码</text>
+  <text x="${textX}" y="${qrY + 26}" font-family="${FONT_FAMILY}" font-size="26" font-weight="800" fill="#182235">扫码查看本回答资料</text>
+  <text x="${textX}" y="${qrY + 62}" font-family="${FONT_FAMILY}" font-size="21" font-weight="500" fill="#5f6b7a">包含问卷片段、院校画像和评论摘要</text>
+  ${noticeSvg}
+</g>`;
+}
+
+function renderFooterNotice(text: string, x: number, y: number, maxWidth: number, includeDivider = true): string {
+  const lines = wrapPlainText(text, 16, maxWidth).slice(0, 2);
+  const lineSvg = lines
+    .map((line, index) => {
+      const lineY = y + 20 + index * 22;
+      return `<text x="${x}" y="${lineY}" font-family="${FONT_FAMILY}" font-size="16" font-weight="500" fill="#8a8177">${escapeXml(line)}</text>`;
+    })
+    .join("");
+  return `<g>
+  ${includeDivider ? `<line x1="${CONTENT_X}" y1="${y}" x2="${WIDTH - CONTENT_X}" y2="${y}" stroke="#eee6da" stroke-width="2"/>` : ""}
+  ${lineSvg}
 </g>`;
 }
 
@@ -450,6 +515,21 @@ function fitText(text: string, fontSize: number, maxWidth: number): string {
 
 function measureText(text: string, fontSize: number): number {
   return Array.from(text).reduce((sum, char) => sum + estimateCharWidth(char, fontSize), 0);
+}
+
+function wrapPlainText(text: string, fontSize: number, maxWidth: number): string[] {
+  const lines: string[] = [];
+  let current = "";
+  for (const char of Array.from(text)) {
+    if (measureText(`${current}${char}`, fontSize) > maxWidth && current) {
+      lines.push(current);
+      current = char.trimStart();
+    } else {
+      current += char;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
 }
 
 function round(value: number): number {

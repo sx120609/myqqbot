@@ -273,7 +273,7 @@ export class MessageProcessor {
       if (answer.includes("生活体验数据来自 CollegesChat 问卷")) return answer;
       return `${answer}\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。`;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = normalizeLlmFailureMessage(error, this.settings.runtime().llm.timeoutMs);
       return `我检索到了 ${input.universityName} 的相关资料，但调用模型总结失败：${message}\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。`;
     }
   }
@@ -448,6 +448,18 @@ function renderLogText(input: IncomingMessage): string {
   if (!imageCount) return input.text;
   const suffix = `[图片 x${imageCount}]`;
   return input.text.trim() ? `${input.text.trim()} ${suffix}` : suffix;
+}
+
+function normalizeLlmFailureMessage(error: unknown, timeoutMs: number): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (/aborted|aborterror|timeout|timed out/i.test(raw)) {
+    const seconds = Math.max(1, Math.round(timeoutMs / 1000));
+    return `模型响应超时或连接被中断，已等待约 ${seconds} 秒。可以稍后重试，或在后台把“模型超时毫秒”继续调大。`;
+  }
+  if (/fetch failed|econnreset|etimedout|socket|network/i.test(raw)) {
+    return "模型接口网络连接失败，可以稍后重试，或检查 API 源站、反代和服务器网络。";
+  }
+  return raw || "未知错误";
 }
 
 function getPublicBaseUrl(runtime: ReturnType<SettingsStore["runtime"]>): string {

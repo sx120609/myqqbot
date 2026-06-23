@@ -154,6 +154,73 @@ describe("MessageProcessor", () => {
     expect(String(vi.mocked(llm.chat).mock.calls[0][0][0].content)).toContain("院校定位");
   });
 
+  it("does not expose raw abort errors when the LLM times out", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1600,
+          timeoutMs: 120000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: false,
+          confidenceThreshold: 0.55,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5
+        }
+      })
+    } as SettingsStore;
+    const university = {
+      id: 6,
+      name: "苏州大学",
+      slug: "su-zhou-da-xue",
+      file_path: "docs/universities/su-zhou-da-xue.md",
+      source_url: "https://example.com/suda.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "name",
+      score: 0.9
+    };
+    const nlu = {
+      analyze: vi.fn(() => ({
+        isUniversityQuery: true,
+        confidence: 0.9,
+        topicKey: "general",
+        topicLabel: "整体评价",
+        candidates: [university],
+        reason: "命中学校或高校生活关键词"
+      })),
+      buildRetrievalContext: vi.fn()
+    } as unknown as NaturalLanguageService;
+    const universities = {
+      getTopicQuestions: vi.fn(() => []),
+      getSchoolProfile: vi.fn(() => null)
+    } as unknown as UniversityRepository;
+    const llm = {
+      chat: vi.fn().mockRejectedValue(new Error("This operation was aborted"))
+    } as unknown as LlmClient;
+    const logs = {
+      message: vi.fn()
+    } as unknown as LogStore;
+    const processor = new MessageProcessor(settings, universities, nlu, llm, logs);
+
+    const result = await processor.process({
+      platform: "onebot",
+      text: "苏州大学怎么样",
+      messageType: "private",
+      userId: "u1",
+      conversationKey: "private:u1"
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.reply).toContain("模型响应超时或连接被中断");
+    expect(result.reply).not.toContain("This operation was aborted");
+  });
+
   it("passes detected university context into image messages", async () => {
     const settings = {
       runtime: () => ({

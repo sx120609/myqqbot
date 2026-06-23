@@ -73,7 +73,8 @@ export class LlmClient {
       });
       return content.trim();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const normalizedError = normalizeLlmClientError(error, runtime.timeoutMs);
+      const message = normalizedError.message;
       this.logs.llm({
         purpose,
         model: runtime.model,
@@ -81,7 +82,7 @@ export class LlmClient {
         error: message,
         latencyMs: Date.now() - started
       });
-      throw error;
+      throw normalizedError;
     } finally {
       clearTimeout(timer);
     }
@@ -96,6 +97,13 @@ export class LlmClient {
       "test"
     );
   }
+}
+
+function normalizeLlmClientError(error: unknown, timeoutMs: number): Error {
+  if (error instanceof Error && (error.name === "AbortError" || /aborted|aborterror/i.test(error.message))) {
+    return new Error(`模型响应超时或连接被中断，已等待约 ${Math.max(1, Math.round(timeoutMs / 1000))} 秒`);
+  }
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 function sanitizePayloadForLog<T>(payload: T): T {

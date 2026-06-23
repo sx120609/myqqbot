@@ -47,6 +47,18 @@ describe("reply-image-renderer", () => {
     expect(image.bytes).toBeGreaterThan(2000);
   });
 
+  it("moves the source disclaimer into the image footer", () => {
+    const image = renderReplyImage(
+      "测试回复\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。",
+      {
+        sourcePageUrl: "https://example.com/sources/source-token"
+      }
+    );
+
+    expect(image.mimeType).toBe("image/png");
+    expect(image.bytes).toBeGreaterThan(2000);
+  });
+
   it("strips markdown syntax for plain-text fallback", () => {
     expect(markdownToPlainText("**你是什么模型**：后台配置为 `gpt-5.5`")).toBe("你是什么模型：后台配置为 gpt-5.5");
   });

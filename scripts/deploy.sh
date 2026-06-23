@@ -296,6 +296,11 @@ prepare_env() {
     set_env_value .env LLM_MAX_TOKENS "1600"
   fi
 
+  if grep -q '^LLM_TIMEOUT_MS=45000$' .env; then
+    log "Updating old LLM_TIMEOUT_MS default from 45000 to 120000"
+    set_env_value .env LLM_TIMEOUT_MS "120000"
+  fi
+
   if ! grep -q '^DATA_REPO_URL=' .env; then
     log "Adding DATA_REPO_URL mirror to .env"
     set_env_value .env DATA_REPO_URL "$DEFAULT_DATA_REPO_URL"
