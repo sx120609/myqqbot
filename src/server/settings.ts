@@ -5,6 +5,8 @@ export interface RuntimeSettings {
     accessToken: string;
     replyEnabled: boolean;
     replyAsImage: boolean;
+    replyImageTitle: string;
+    replyImageBadge: string;
   };
   llm: {
     baseUrl: string;
@@ -35,6 +37,8 @@ const DEFAULTS: Record<string, string> = {
   "onebot.accessToken": process.env.ONEBOT_ACCESS_TOKEN ?? "",
   "onebot.replyEnabled": process.env.ONEBOT_REPLY_ENABLED ?? "true",
   "onebot.replyAsImage": process.env.ONEBOT_REPLY_AS_IMAGE ?? "true",
+  "onebot.replyImageTitle": process.env.ONEBOT_REPLY_IMAGE_TITLE ?? "高校资料助手",
+  "onebot.replyImageBadge": process.env.ONEBOT_REPLY_IMAGE_BADGE ?? "AI 生成回复",
   "llm.baseUrl": process.env.LLM_BASE_URL ?? "https://your-sub2api.example.com/v1",
   "llm.apiKey": process.env.LLM_API_KEY ?? "",
   "llm.model": process.env.LLM_MODEL ?? "gpt-5.5",
@@ -83,7 +87,9 @@ export class SettingsStore {
       onebot: {
         accessToken: this.getString("onebot.accessToken", ""),
         replyEnabled: this.getBoolean("onebot.replyEnabled", true),
-        replyAsImage: this.getBoolean("onebot.replyAsImage", true)
+        replyAsImage: this.getBoolean("onebot.replyAsImage", true),
+        replyImageTitle: this.getString("onebot.replyImageTitle", "高校资料助手"),
+        replyImageBadge: this.getString("onebot.replyImageBadge", "AI 生成回复")
       },
       llm: {
         baseUrl: this.getString("llm.baseUrl", "https://your-sub2api.example.com/v1"),

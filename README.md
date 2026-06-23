@@ -181,6 +181,13 @@ LLM_MODEL=gpt-5.5
 
 模型名不写死，只要你的源站兼容 `/v1/chat/completions` 即可。
 
+QQ 回复图片顶部文案可在 WebUI 的“自然语言设置”里修改，也可以通过 `.env` 设置：
+
+```env
+ONEBOT_REPLY_IMAGE_TITLE=高校资料助手
+ONEBOT_REPLY_IMAGE_BADGE=AI 生成回复
+```
+
 ## 开发
 
 ```powershell

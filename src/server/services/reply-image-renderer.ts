@@ -6,6 +6,11 @@ export interface RenderedReplyImage {
   bytes: number;
 }
 
+export interface ReplyImageOptions {
+  headerTitle?: string;
+  headerBadge?: string;
+}
+
 interface InlineSegment {
   text: string;
   bold?: boolean;
@@ -43,11 +48,11 @@ const BODY_TOP = 116;
 const BOTTOM = 52;
 const FONT_FAMILY = "Noto Sans CJK SC, Microsoft YaHei, PingFang SC, SimHei, Arial, sans-serif";
 
-export function renderReplyImage(markdown: string): RenderedReplyImage {
+export function renderReplyImage(markdown: string, options: ReplyImageOptions = {}): RenderedReplyImage {
   const clean = normalizeMarkdown(markdown);
   const lines = layoutMarkdown(clean || " ");
   const height = Math.max(220, Math.ceil((lines.at(-1)?.y ?? BODY_TOP) + BOTTOM));
-  const svg = renderSvg(lines, height);
+  const svg = renderSvg(lines, height, options);
   const png = new Resvg(svg, {
     fitTo: { mode: "original" },
     font: {
@@ -294,7 +299,7 @@ function estimateCharWidth(char: string, fontSize: number): number {
   return fontSize * 0.58;
 }
 
-function renderSvg(lines: VisualLine[], height: number): string {
+function renderSvg(lines: VisualLine[], height: number, options: ReplyImageOptions): string {
   const lineSvg = lines
     .map((line) => {
       const segments = line.segments
@@ -308,15 +313,35 @@ function renderSvg(lines: VisualLine[], height: number): string {
     })
     .join("");
 
+  const headerTitle = fitText(options.headerTitle || "高校资料助手", 26, WIDTH - 340);
+  const headerBadge = fitText(options.headerBadge || "AI 生成回复", 20, 210);
+  const badgeWidth = measureText(headerBadge, 20);
+  const badgeX = Math.max(CONTENT_X + 320, WIDTH - CONTENT_X - badgeWidth);
+
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${height}" viewBox="0 0 ${WIDTH} ${height}">
   <rect width="100%" height="100%" fill="#f4f1ea"/>
   <rect x="${CARD_X}" y="22" width="${WIDTH - CARD_X * 2}" height="${height - 44}" rx="26" fill="#fffdf9" stroke="#e5ded3" stroke-width="2"/>
   <circle cx="58" cy="${HEADER_Y}" r="14" fill="#16a34a"/>
-  <text x="84" y="${HEADER_Y + 9}" font-family="${FONT_FAMILY}" font-size="26" font-weight="800" fill="#182235">高校资料助手</text>
-  <text x="${WIDTH - 198}" y="${HEADER_Y + 7}" font-family="${FONT_FAMILY}" font-size="20" font-weight="500" fill="#8a8177">AI 生成回复</text>
+  <text x="84" y="${HEADER_Y + 9}" font-family="${FONT_FAMILY}" font-size="26" font-weight="800" fill="#182235">${escapeXml(headerTitle)}</text>
+  <text x="${badgeX}" y="${HEADER_Y + 7}" font-family="${FONT_FAMILY}" font-size="20" font-weight="500" fill="#8a8177">${escapeXml(headerBadge)}</text>
   <line x1="${CONTENT_X}" y1="88" x2="${WIDTH - CONTENT_X}" y2="88" stroke="#eee6da" stroke-width="2"/>
   ${lineSvg}
 </svg>`;
+}
+
+function fitText(text: string, fontSize: number, maxWidth: number): string {
+  const clean = text.trim() || " ";
+  if (measureText(clean, fontSize) <= maxWidth) return clean;
+  let result = "";
+  for (const char of Array.from(clean)) {
+    if (measureText(`${result}${char}...`, fontSize) > maxWidth) break;
+    result += char;
+  }
+  return `${result || clean.slice(0, 1)}...`;
+}
+
+function measureText(text: string, fontSize: number): number {
+  return Array.from(text).reduce((sum, char) => sum + estimateCharWidth(char, fontSize), 0);
 }
 
 function normalizeMarkdown(markdown: string): string {

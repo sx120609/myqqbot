@@ -181,10 +181,7 @@ export class MessageProcessor {
       : `这次没有检索到 ${university.name} 在“${analysis.topicLabel ?? "这个方向"}”上的 CollegesChat 问卷片段。请先基于公开常识给出院校定位，再如实说明生活体验问卷资料缺口，然后可以结合常见大学生活经验、公开常识和理性推断给出建议，但不要把这些补充说成该校问卷事实。`;
     const schoolProfile = this.universities.getSchoolProfile?.(university.id, "srgaoxiao");
     const srgaoxiaoReviewsText = await this.maybeFetchSrgaoxiaoReviews(
-      input,
       university.id,
-      university.name,
-      analysis.topicLabel ?? topicLabel(topicKey),
       schoolProfile?.profileText ?? null
     );
     const reply = await this.answerWithLlm({
@@ -247,46 +244,11 @@ export class MessageProcessor {
   }
 
   private async maybeFetchSrgaoxiaoReviews(
-    input: IncomingMessage,
     universityId: number,
-    universityName: string,
-    topic: string,
     schoolProfileText: string | null
   ): Promise<string | null> {
     if (!this.srgaoxiao || !schoolProfileText) return null;
-    const shouldFetch = await this.shouldUseSrgaoxiaoReviews(input.text, universityName, topic);
-    if (!shouldFetch) return null;
-
-    const notice = await input.progressNotice?.("正在获取神人高校实时评论，请稍等。");
-    try {
-      return await this.srgaoxiao.fetchLiveReviewContext(universityId, 6);
-    } finally {
-      await notice?.close().catch(() => undefined);
-    }
-  }
-
-  private async shouldUseSrgaoxiaoReviews(userMessage: string, universityName: string, topic: string): Promise<boolean> {
-    try {
-      const answer = await this.llm.chat(
-        [
-          {
-            role: "system",
-            content:
-              "你只判断回答高校问题时是否需要读取神人高校网的学生评论。需要评论的情况：用户问评价、真实体验、口碑、宿舍/食堂/管理/就业/校风/吐槽/避雷/适不适合/值不值得等需要学生主观体验的问题。不要因为普通寒暄、模型询问、学校是否211/双一流、城市、官网、地址、建校时间等基础事实而读取评论。只返回 JSON：{\"need\":true或false,\"reason\":\"简短原因\"}。"
-          },
-          {
-            role: "user",
-            content: `学校：${universityName}\n主题：${topic}\n用户问题：${userMessage}`
-          }
-        ],
-        "srgaoxiao-review-decision"
-      );
-      const json = answer.match(/\{[\s\S]*\}/)?.[0] ?? answer;
-      const parsed = JSON.parse(json) as { need?: unknown };
-      return parsed.need === true || parsed.need === "true";
-    } catch {
-      return false;
-    }
+    return this.srgaoxiao.fetchLiveReviewContext(universityId, 6);
   }
 
   private async answerCasualWithLlm(

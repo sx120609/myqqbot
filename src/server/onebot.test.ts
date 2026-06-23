@@ -9,7 +9,7 @@ describe("OneBotGateway", () => {
     vi.useRealTimers();
   });
 
-  it("sends a generating notice after 10s and deletes it after the final reply", async () => {
+  it("sends a generating notice immediately and deletes it after the final reply", async () => {
     vi.useFakeTimers();
     let finishProcessing!: (value: { handled: boolean; reply: string; reason: string }) => void;
     const processor = {
@@ -35,13 +35,9 @@ describe("OneBotGateway", () => {
       })
     );
 
-    await vi.advanceTimersByTimeAsync(9999);
-    expect(sent).toHaveLength(0);
-
-    await vi.advanceTimersByTimeAsync(1);
     expect(sent).toHaveLength(1);
     expect(sent[0].action).toBe("send_private_msg");
-    expect(sent[0].params.message).toBe("回复仍在生成中，请稍等。");
+    expect(sent[0].params.message).toBe("正在生成回答中，请稍等。内容较长时可能需要更多时间。");
 
     await callHandleMessage(
       gateway,
@@ -66,7 +62,7 @@ describe("OneBotGateway", () => {
     });
   });
 
-  it("does not send a generating notice for quick replies", async () => {
+  it("still sends and retracts the generating notice for quick replies", async () => {
     vi.useFakeTimers();
     const processor = {
       process: vi.fn().mockResolvedValue({ handled: true, reply: "很快的回复", reason: "ok" })
@@ -75,7 +71,7 @@ describe("OneBotGateway", () => {
     const sent: Array<{ action: string; params: Record<string, unknown>; echo: string }> = [];
     const socket = fakeSocket(sent);
 
-    await callHandleMessage(
+    const task = callHandleMessage(
       gateway,
       socket,
       JSON.stringify({
@@ -85,10 +81,27 @@ describe("OneBotGateway", () => {
         message: "你好"
       })
     );
-    await vi.advanceTimersByTimeAsync(10_000);
 
     expect(sent).toHaveLength(1);
-    expect(sent[0].params.message).toBe("很快的回复");
+    expect(sent[0].params.message).toBe("正在生成回答中，请稍等。内容较长时可能需要更多时间。");
+    await callHandleMessage(
+      gateway,
+      socket,
+      JSON.stringify({
+        status: "ok",
+        retcode: 0,
+        data: { message_id: 789 },
+        echo: sent[0].echo
+      })
+    );
+    await task;
+
+    expect(sent).toHaveLength(3);
+    expect(sent[1].params.message).toBe("很快的回复");
+    expect(sent[2]).toMatchObject({
+      action: "delete_msg",
+      params: { message_id: 789 }
+    });
   });
 });
 
@@ -99,6 +112,13 @@ function settings(): SettingsStore {
         accessToken: "",
         replyEnabled: true,
         replyAsImage: false
+      },
+      naturalLanguage: {
+        groupNaturalEnabled: true,
+        requireMentionInGroup: false,
+        confidenceThreshold: 0.55,
+        contextTtlMinutes: 10,
+        cooldownSeconds: 5
       }
     })
   } as SettingsStore;

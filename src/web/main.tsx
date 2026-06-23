@@ -344,6 +344,8 @@ function NaturalLanguagePage() {
           <Input label="置信度阈值" value={String(settings["nl.confidenceThreshold"] ?? "")} onChange={(v) => update("nl.confidenceThreshold", v)} />
           <Input label="上下文分钟" value={String(settings["nl.contextTtlMinutes"] ?? "")} onChange={(v) => update("nl.contextTtlMinutes", v)} />
           <Input label="单用户冷却秒" value={String(settings["nl.cooldownSeconds"] ?? "")} onChange={(v) => update("nl.cooldownSeconds", v)} />
+          <Input label="回复图片标题" value={String(settings["onebot.replyImageTitle"] ?? "高校资料助手")} onChange={(v) => update("onebot.replyImageTitle", v)} />
+          <Input label="回复图片角标" value={String(settings["onebot.replyImageBadge"] ?? "AI 生成回复")} onChange={(v) => update("onebot.replyImageBadge", v)} />
         </FormGrid>
         <div className="actions">
           <button className="primary" onClick={save}><Save size={16} />保存</button>

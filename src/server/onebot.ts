@@ -42,9 +42,8 @@ type OutgoingMessage =
       };
     }>;
 
-const GENERATING_NOTICE_DELAY_MS = 10_000;
 const ACTION_RESPONSE_TIMEOUT_MS = 5_000;
-const GENERATING_NOTICE_TEXT = "回复仍在生成中，请稍等。";
+const GENERATING_NOTICE_TEXT = "正在生成回答中，请稍等。内容较长时可能需要更多时间。";
 
 export class OneBotGateway {
   private sockets = new Set<WebSocket>();
@@ -124,10 +123,9 @@ export class OneBotGateway {
     const conversationKey =
       event.message_type === "group" ? `group:${event.group_id}:user:${event.user_id}` : `private:${event.user_id}`;
 
-    let generatingNotice: Promise<OneBotActionResponse | null> | null = null;
-    const generatingTimer = setTimeout(() => {
-      generatingNotice = this.sendMessage(socket, event, GENERATING_NOTICE_TEXT, "generating", true);
-    }, GENERATING_NOTICE_DELAY_MS);
+    const generatingNotice = this.shouldSendGeneratingNotice(event, mentionedBot)
+      ? this.sendMessage(socket, event, GENERATING_NOTICE_TEXT, "generating", true)
+      : null;
 
     try {
       const result = await this.processor.process({
@@ -138,27 +136,27 @@ export class OneBotGateway {
         userId: String(event.user_id),
         groupId: event.group_id == null ? undefined : String(event.group_id),
         conversationKey,
-        mentionedBot,
-        progressNotice: (text) => this.sendTransientNotice(socket, event, text)
+        mentionedBot
       });
 
-      clearTimeout(generatingTimer);
       if (result.handled && result.reply) {
         await this.sendReply(socket, event, result.reply);
       }
     } catch (error) {
-      clearTimeout(generatingTimer);
       console.error("[onebot] Failed to process message:", error);
     } finally {
-      clearTimeout(generatingTimer);
       await this.deleteGeneratingNotice(socket, generatingNotice);
     }
   }
 
   private async sendReply(socket: WebSocket, event: OneBotEvent, reply: string): Promise<void> {
-    if (this.settings.runtime().onebot.replyAsImage) {
+    const onebotSettings = this.settings.runtime().onebot;
+    if (onebotSettings.replyAsImage) {
       try {
-        const image = renderReplyImage(reply);
+        const image = renderReplyImage(reply, {
+          headerTitle: onebotSettings.replyImageTitle,
+          headerBadge: onebotSettings.replyImageBadge
+        });
         await this.sendMessage(socket, event, [
           {
             type: "image",
@@ -188,21 +186,6 @@ export class OneBotGateway {
     const messageId = response?.data?.message_id;
     if (messageId == null) return;
     await this.sendAction(socket, "delete_msg", { message_id: messageId });
-  }
-
-  private async sendTransientNotice(
-    socket: WebSocket,
-    event: OneBotEvent,
-    text: string
-  ): Promise<{ close: () => Promise<void> } | null> {
-    const response = await this.sendMessage(socket, event, text, "progress", true);
-    const messageId = response?.data?.message_id;
-    return {
-      close: async () => {
-        if (messageId == null) return;
-        await this.sendAction(socket, "delete_msg", { message_id: messageId });
-      }
-    };
   }
 
   private sendMessage(
@@ -265,6 +248,14 @@ export class OneBotGateway {
     const query = request.query as Record<string, string | undefined>;
     const authorization = request.headers.authorization ?? "";
     return query.access_token === token || authorization === `Bearer ${token}`;
+  }
+
+  private shouldSendGeneratingNotice(event: OneBotEvent, mentionedBot: boolean): boolean {
+    if (event.message_type === "private") return true;
+    const runtime = this.settings.runtime();
+    if (!runtime.naturalLanguage.groupNaturalEnabled) return false;
+    if (runtime.naturalLanguage.requireMentionInGroup) return mentionedBot;
+    return true;
   }
 }
 

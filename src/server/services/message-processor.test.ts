@@ -3,6 +3,7 @@ import { MessageProcessor } from "./message-processor.js";
 import type { LlmClient } from "./llm-client.js";
 import type { LogStore } from "./log-store.js";
 import type { NaturalLanguageService } from "./nlu.js";
+import type { SrgaoxiaoSyncService } from "./srgaoxiao-sync.js";
 import type { SettingsStore } from "../settings.js";
 import type { UniversityRepository } from "./university-repository.js";
 
@@ -127,8 +128,11 @@ describe("MessageProcessor", () => {
     const logs = {
       message: vi.fn()
     } as unknown as LogStore;
+    const srgaoxiao = {
+      fetchLiveReviewContext: vi.fn().mockResolvedValue("来源：神人高校网实时评论\n1. 宿舍四人寝，食堂一般。")
+    } as unknown as SrgaoxiaoSyncService;
 
-    const processor = new MessageProcessor(settings, universities, nlu, llm, logs);
+    const processor = new MessageProcessor(settings, universities, nlu, llm, logs, srgaoxiao);
 
     const result = await processor.process({
       platform: "debug",
@@ -144,6 +148,8 @@ describe("MessageProcessor", () => {
     expect(JSON.stringify(vi.mocked(llm.chat).mock.calls[0][0])).toContain("这次没有检索到 中国药科大学");
     expect(JSON.stringify(vi.mocked(llm.chat).mock.calls[0][0])).toContain("外部院校画像补充资料");
     expect(JSON.stringify(vi.mocked(llm.chat).mock.calls[0][0])).toContain("占地约 2100 亩");
+    expect(JSON.stringify(vi.mocked(llm.chat).mock.calls[0][0])).toContain("神人高校网实时评论");
+    expect(srgaoxiao.fetchLiveReviewContext).toHaveBeenCalledWith(1, 6);
     expect(String(vi.mocked(llm.chat).mock.calls[0][0][0].content)).toContain("院校定位");
   });
 

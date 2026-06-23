@@ -270,6 +270,16 @@ prepare_env() {
     set_env_value .env ONEBOT_REPLY_AS_IMAGE "true"
   fi
 
+  if ! grep -q '^ONEBOT_REPLY_IMAGE_TITLE=' .env; then
+    log "Adding ONEBOT_REPLY_IMAGE_TITLE to .env"
+    set_env_value .env ONEBOT_REPLY_IMAGE_TITLE "高校资料助手"
+  fi
+
+  if ! grep -q '^ONEBOT_REPLY_IMAGE_BADGE=' .env; then
+    log "Adding ONEBOT_REPLY_IMAGE_BADGE to .env"
+    set_env_value .env ONEBOT_REPLY_IMAGE_BADGE "AI 生成回复"
+  fi
+
   if grep -q '^LLM_MAX_TOKENS=900$' .env; then
     log "Updating old LLM_MAX_TOKENS default from 900 to 1600"
     set_env_value .env LLM_MAX_TOKENS "1600"
