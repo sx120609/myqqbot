@@ -14,6 +14,7 @@ PRUNE_DEV_DEPS="${PRUNE_DEV_DEPS:-1}"
 NODE_BIN="${NODE_BIN:-}"
 SYNC_DATA_ON_UPDATE="${SYNC_DATA_ON_UPDATE:-0}"
 SYNC_TIMER_CALENDAR="${SYNC_TIMER_CALENDAR:-03:40}"
+SKIP_CJK_FONT_INSTALL="${SKIP_CJK_FONT_INSTALL:-0}"
 DEFAULT_DATA_REPO_URL="https://gh.lizmt.cn/CollegesChat/university-information.git"
 OLD_DATA_REPO_URL="https://github.com/CollegesChat/university-information.git"
 
@@ -62,6 +63,7 @@ Common environment variables:
   SKIP_DATA_SYNC=1               Skip data sync during install/update.
   SYNC_DATA_ON_UPDATE=1          Also sync data during update. Default: 0.
   SYNC_TIMER_CALENDAR=03:40      systemd OnCalendar value for data sync.
+  SKIP_CJK_FONT_INSTALL=1        Do not auto-install Noto CJK fonts for image replies.
   SKIP_SYSTEMD=1                 Do not install/restart systemd service.
 
 Examples:
@@ -153,6 +155,33 @@ ensure_linux_and_node() {
   fi
 }
 
+ensure_cjk_fonts() {
+  if [ "$SKIP_CJK_FONT_INSTALL" = "1" ]; then
+    log "Skipping CJK font check"
+    return
+  fi
+
+  if command -v fc-match >/dev/null 2>&1; then
+    local matched_font
+    matched_font="$(fc-match 'Noto Sans CJK SC' 2>/dev/null || true)"
+    if printf '%s' "$matched_font" | grep -Eiq 'NotoSansCJK|Noto Sans CJK|Source Han Sans|WenQuanYi|Microsoft YaHei|SimHei'; then
+      log "CJK font available: $matched_font"
+      return
+    fi
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    log "Installing Noto CJK fonts for image replies"
+    run_root env DEBIAN_FRONTEND=noninteractive apt-get update
+    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y fontconfig fonts-noto-cjk
+    if command -v fc-cache >/dev/null 2>&1; then
+      run_root fc-cache -f >/dev/null 2>&1 || true
+    fi
+  else
+    log "CJK font was not detected. Install Noto Sans CJK or set ONEBOT_REPLY_AS_IMAGE=false if image text renders as squares."
+  fi
+}
+
 prepare_runtime_user() {
   if [ -z "$RUN_USER" ]; then
     if [ "$(id -u)" -eq 0 ]; then
@@ -190,6 +219,16 @@ prepare_env() {
     set_env_value .env APP_PORT "$APP_PORT"
   else
     log "Keeping existing .env"
+  fi
+
+  if ! grep -q '^ONEBOT_REPLY_AS_IMAGE=' .env; then
+    log "Enabling QQ image replies in .env"
+    set_env_value .env ONEBOT_REPLY_AS_IMAGE "true"
+  fi
+
+  if grep -q '^LLM_MAX_TOKENS=900$' .env; then
+    log "Updating old LLM_MAX_TOKENS default from 900 to 1600"
+    set_env_value .env LLM_MAX_TOKENS "1600"
   fi
 
   if ! grep -q '^DATA_REPO_URL=' .env; then
@@ -415,6 +454,7 @@ EOF
 
 install_command() {
   ensure_linux_and_node
+  ensure_cjk_fonts
   prepare_app_dir_for_install
   prepare_env
   install_and_build
@@ -424,6 +464,7 @@ install_command() {
 
 update_command() {
   ensure_linux_and_node
+  ensure_cjk_fonts
   prepare_app_dir_for_update
   prepare_env
   if [ "$SYNC_DATA_ON_UPDATE" = "1" ]; then

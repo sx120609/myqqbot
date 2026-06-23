@@ -3,6 +3,7 @@ import websocket from "@fastify/websocket";
 import type { WebSocket } from "ws";
 import type { SettingsStore } from "./settings.js";
 import type { MessageProcessor } from "./services/message-processor.js";
+import { markdownToPlainText, renderReplyImage } from "./services/reply-image-renderer.js";
 
 interface OneBotEvent {
   post_type?: string;
@@ -22,6 +23,15 @@ interface ExtractedContent {
     summary?: string;
   }>;
 }
+
+type OutgoingMessage =
+  | string
+  | Array<{
+      type: "image";
+      data: {
+        file: string;
+      };
+    }>;
 
 export class OneBotGateway {
   private sockets = new Set<WebSocket>();
@@ -99,26 +109,47 @@ export class OneBotGateway {
     });
 
     if (result.handled && result.reply) {
-      this.sendReply(socket, event, result.reply);
+      await this.sendReply(socket, event, result.reply);
     }
   }
 
-  private sendReply(socket: WebSocket, event: OneBotEvent, reply: string): void {
-    const chunks = splitMessage(reply, 850);
+  private async sendReply(socket: WebSocket, event: OneBotEvent, reply: string): Promise<void> {
+    if (this.settings.runtime().onebot.replyAsImage) {
+      try {
+        const image = renderReplyImage(reply);
+        this.sendMessage(socket, event, [
+          {
+            type: "image",
+            data: {
+              file: `base64://${image.dataBase64}`
+            }
+          }
+        ]);
+        return;
+      } catch (error) {
+        console.warn("[onebot] Failed to render reply image, falling back to text:", error);
+      }
+    }
+
+    const chunks = splitMessage(markdownToPlainText(reply), 850);
     chunks.forEach((message, index) => {
-      const action = event.message_type === "group" ? "send_group_msg" : "send_private_msg";
-      const params =
-        event.message_type === "group"
-          ? { group_id: event.group_id, message }
-          : { user_id: event.user_id, message };
-      socket.send(
-        JSON.stringify({
-          action,
-          params,
-          echo: `reply-${Date.now()}-${index}`
-        })
-      );
+      this.sendMessage(socket, event, message, index);
     });
+  }
+
+  private sendMessage(socket: WebSocket, event: OneBotEvent, message: OutgoingMessage, index = 0): void {
+    const action = event.message_type === "group" ? "send_group_msg" : "send_private_msg";
+    const params =
+      event.message_type === "group"
+        ? { group_id: event.group_id, message }
+        : { user_id: event.user_id, message };
+    socket.send(
+      JSON.stringify({
+        action,
+        params,
+        echo: `reply-${Date.now()}-${index}`
+      })
+    );
   }
 
   private authorized(request: FastifyRequest): boolean {

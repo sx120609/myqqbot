@@ -230,6 +230,7 @@ function NaturalLanguagePage() {
         <div className="toggle-row">
           <Switch label="群聊自然触发" checked={settings["nl.groupNaturalEnabled"] !== "false"} onChange={(v) => update("nl.groupNaturalEnabled", String(v))} />
           <Switch label="群聊必须 @ 机器人" checked={settings["nl.requireMentionInGroup"] === "true"} onChange={(v) => update("nl.requireMentionInGroup", String(v))} />
+          <Switch label="QQ 回复渲染为图片" checked={settings["onebot.replyAsImage"] !== "false"} onChange={(v) => update("onebot.replyAsImage", String(v))} />
         </div>
         <FormGrid>
           <Input label="置信度阈值" value={String(settings["nl.confidenceThreshold"] ?? "")} onChange={(v) => update("nl.confidenceThreshold", v)} />

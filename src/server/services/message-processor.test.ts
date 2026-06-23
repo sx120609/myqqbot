@@ -10,7 +10,7 @@ describe("MessageProcessor", () => {
   it("uses the LLM for private casual messages instead of the local low-confidence template", async () => {
     const settings = {
       runtime: () => ({
-        onebot: { accessToken: "", replyEnabled: true },
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
         llm: {
           baseUrl: "https://llm.example/v1",
           apiKey: "test-key",
@@ -70,7 +70,7 @@ describe("MessageProcessor", () => {
   it("uses the LLM with a data-gap note when no questionnaire snippets are retrieved", async () => {
     const settings = {
       runtime: () => ({
-        onebot: { accessToken: "", replyEnabled: true },
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
         llm: {
           baseUrl: "https://llm.example/v1",
           apiKey: "test-key",

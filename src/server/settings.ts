@@ -4,6 +4,7 @@ export interface RuntimeSettings {
   onebot: {
     accessToken: string;
     replyEnabled: boolean;
+    replyAsImage: boolean;
   };
   llm: {
     baseUrl: string;
@@ -25,6 +26,7 @@ export interface RuntimeSettings {
 const DEFAULTS: Record<string, string> = {
   "onebot.accessToken": process.env.ONEBOT_ACCESS_TOKEN ?? "",
   "onebot.replyEnabled": process.env.ONEBOT_REPLY_ENABLED ?? "true",
+  "onebot.replyAsImage": process.env.ONEBOT_REPLY_AS_IMAGE ?? "true",
   "llm.baseUrl": process.env.LLM_BASE_URL ?? "https://your-sub2api.example.com/v1",
   "llm.apiKey": process.env.LLM_API_KEY ?? "",
   "llm.model": process.env.LLM_MODEL ?? "gpt-5.5",
@@ -64,7 +66,8 @@ export class SettingsStore {
     return {
       onebot: {
         accessToken: this.getString("onebot.accessToken", ""),
-        replyEnabled: this.getBoolean("onebot.replyEnabled", true)
+        replyEnabled: this.getBoolean("onebot.replyEnabled", true),
+        replyAsImage: this.getBoolean("onebot.replyAsImage", true)
       },
       llm: {
         baseUrl: this.getString("llm.baseUrl", "https://your-sub2api.example.com/v1"),
@@ -135,7 +138,7 @@ export class SettingsStore {
       for (const [key, value] of Object.entries(DEFAULTS)) {
         stmt.run(key, value, now);
       }
-      upgradeStmt.run(DEFAULTS["llm.maxTokens"], now, "llm.maxTokens", "900");
+      upgradeStmt.run("1600", now, "llm.maxTokens", "900");
     });
   }
 }
