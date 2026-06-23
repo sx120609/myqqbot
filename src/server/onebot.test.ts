@@ -35,9 +35,26 @@ describe("OneBotGateway", () => {
       })
     );
 
-    expect(sent).toHaveLength(1);
+    expect(sent).toHaveLength(2);
     expect(sent[0].action).toBe("send_private_msg");
     expect(sent[0].params.message).toBe("正在生成回答中，请稍等。内容较长时可能需要更多时间。");
+    expect(sent[1]).toMatchObject({
+      action: "set_input_status",
+      params: {
+        user_id: 10001,
+        event_type: 1
+      }
+    });
+
+    vi.advanceTimersByTime(4_000);
+    expect(sent).toHaveLength(3);
+    expect(sent[2]).toMatchObject({
+      action: "set_input_status",
+      params: {
+        user_id: 10001,
+        event_type: 1
+      }
+    });
 
     await callHandleMessage(
       gateway,
@@ -53,13 +70,16 @@ describe("OneBotGateway", () => {
     finishProcessing({ handled: true, reply: "**最终回复**", reason: "ok" });
     await task;
 
-    expect(sent).toHaveLength(3);
-    expect(sent[1].action).toBe("send_private_msg");
-    expect(sent[1].params.message).toBe("最终回复");
-    expect(sent[2]).toMatchObject({
+    expect(sent).toHaveLength(5);
+    expect(sent[3].action).toBe("send_private_msg");
+    expect(sent[3].params.message).toBe("最终回复");
+    expect(sent[4]).toMatchObject({
       action: "delete_msg",
       params: { message_id: 456 }
     });
+
+    vi.advanceTimersByTime(4_000);
+    expect(sent).toHaveLength(5);
   });
 
   it("still sends and retracts the generating notice for quick replies", async () => {
@@ -82,8 +102,15 @@ describe("OneBotGateway", () => {
       })
     );
 
-    expect(sent).toHaveLength(1);
+    expect(sent).toHaveLength(2);
     expect(sent[0].params.message).toBe("正在生成回答中，请稍等。内容较长时可能需要更多时间。");
+    expect(sent[1]).toMatchObject({
+      action: "set_input_status",
+      params: {
+        user_id: 10001,
+        event_type: 1
+      }
+    });
     await callHandleMessage(
       gateway,
       socket,
@@ -96,9 +123,9 @@ describe("OneBotGateway", () => {
     );
     await task;
 
-    expect(sent).toHaveLength(3);
-    expect(sent[1].params.message).toBe("很快的回复");
-    expect(sent[2]).toMatchObject({
+    expect(sent).toHaveLength(4);
+    expect(sent[2].params.message).toBe("很快的回复");
+    expect(sent[3]).toMatchObject({
       action: "delete_msg",
       params: { message_id: 789 }
     });

@@ -49,6 +49,8 @@ type OutgoingMessage =
 
 const ACTION_RESPONSE_TIMEOUT_MS = 5_000;
 const DOUBT_FRIEND_REQUEST_POLL_MS = 30_000;
+const INPUT_STATUS_TYPING = 1;
+const INPUT_STATUS_REFRESH_MS = 4_000;
 const GENERATING_NOTICE_TEXT = "正在生成回答中，请稍等。内容较长时可能需要更多时间。";
 
 export class OneBotGateway {
@@ -143,6 +145,7 @@ export class OneBotGateway {
     const generatingNotice = this.shouldSendGeneratingNotice(event, mentionedBot)
       ? this.sendMessage(socket, event, GENERATING_NOTICE_TEXT, "generating", true)
       : null;
+    const inputStatus = this.startInputStatus(socket, event);
 
     try {
       const result = await this.processor.process({
@@ -162,6 +165,7 @@ export class OneBotGateway {
     } catch (error) {
       console.error("[onebot] Failed to process message:", error);
     } finally {
+      inputStatus?.stop();
       await this.deleteGeneratingNotice(socket, generatingNotice);
     }
   }
@@ -217,6 +221,26 @@ export class OneBotGateway {
       flag: event.flag,
       approve: true
     }, "friend-request");
+  }
+
+  private startInputStatus(socket: WebSocket, event: OneBotEvent): { stop: () => void } | null {
+    if (event.message_type !== "private" || event.user_id == null) return null;
+
+    const sendTyping = () => {
+      void this.sendAction(socket, "set_input_status", {
+        user_id: event.user_id,
+        event_type: INPUT_STATUS_TYPING
+      }, "input-status");
+    };
+
+    sendTyping();
+    const timer = setInterval(sendTyping, INPUT_STATUS_REFRESH_MS);
+    const unref = (timer as { unref?: () => void }).unref;
+    if (typeof unref === "function") unref.call(timer);
+
+    return {
+      stop: () => clearInterval(timer)
+    };
   }
 
   private ensureDoubtFriendRequestPolling(): void {
