@@ -9,6 +9,7 @@
 - 同步并解析 CollegesChat `generated` 分支的 `docs/universities/*.md`。
 - SQLite 本地索引，包含学校、问题、回答、问卷 ID 和来源链接。
 - OpenAI-compatible LLM 客户端，可配置 sub2api 源站、API Key 和模型名。
+- 支持 QQ 图片消息，会把图片传给支持视觉能力的模型进行回复。
 - WebUI 管理后台：仪表盘、模型配置、自然语言策略、数据同步、别名、调试台、日志。
 
 ## 快速开始

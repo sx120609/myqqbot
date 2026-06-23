@@ -5,9 +5,18 @@ import type { LogStore } from "./log-store.js";
 import type { NaturalLanguageService } from "./nlu.js";
 import type { UniversityRepository } from "./university-repository.js";
 
+export interface IncomingImage {
+  url?: string;
+  file?: string;
+  summary?: string;
+}
+
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
 export interface IncomingMessage {
   platform: "onebot" | "debug";
   text: string;
+  images?: IncomingImage[];
   messageType: "private" | "group";
   userId: string;
   groupId?: string;
@@ -47,7 +56,7 @@ export class MessageProcessor {
       conversationKey: input.conversationKey,
       userId: input.userId,
       groupId: input.groupId,
-      text: input.text
+      text: renderLogText(input)
     });
 
     const runtime = this.settings.runtime();
@@ -59,6 +68,7 @@ export class MessageProcessor {
     const context = this.getContext(input.conversationKey, now);
     const analysis = this.nlu.analyze(input.text, context?.universityId);
     const threshold = runtime.naturalLanguage.confidenceThreshold;
+    const greeting = isGreeting(input.text);
 
     if (input.messageType === "group") {
       if (!runtime.naturalLanguage.groupNaturalEnabled) {
@@ -69,8 +79,43 @@ export class MessageProcessor {
       }
     }
 
+    if (input.images?.length) {
+      const cooldownKey = `${input.conversationKey}:${input.userId}:image`;
+      const nextAllowed = this.cooldown.get(cooldownKey) ?? 0;
+      if (input.platform === "onebot" && now < nextAllowed) {
+        return this.finish(input, { handled: false, reason: "图片回复冷却中", analysis });
+      }
+      this.cooldown.set(cooldownKey, now + runtime.naturalLanguage.cooldownSeconds * 1000);
+
+      const reply = await this.answerImageWithLlm(input.text, input.images);
+      return this.finish(input, {
+        handled: true,
+        reason: "图片理解",
+        reply,
+        analysis
+      });
+    }
+
+    if (greeting) {
+      const reply = await this.answerGreetingWithLlm(input.text);
+      return this.finish(input, {
+        handled: true,
+        reason: "问候引导",
+        reply,
+        analysis
+      });
+    }
+
     if (!analysis.isUniversityQuery || analysis.confidence < threshold) {
-      return this.finish(input, { handled: false, reason: `置信度不足：${analysis.confidence.toFixed(2)}`, analysis });
+      if (shouldExplainLowConfidence(input, analysis, context)) {
+        return this.finish(input, {
+          handled: true,
+          reason: `置信度不足：${analysis.confidence.toFixed(2)}`,
+          reply: renderLowConfidenceReply(analysis, Boolean(context)),
+          analysis
+        });
+      }
+      return this.finish(input, { handled: false, reason: `未触发回复：${analysis.confidence.toFixed(2)}`, analysis });
     }
 
     const cooldownKey = `${input.conversationKey}:${input.userId}`;
@@ -167,6 +212,68 @@ export class MessageProcessor {
     }
   }
 
+  private async answerGreetingWithLlm(userMessage: string): Promise<string> {
+    try {
+      return await this.llm.chat(
+        [
+          {
+            role: "system",
+            content:
+              "你是一个 QQ 群/私聊里的高校生活资料助手。用户在打招呼或询问你能做什么。请用中文自然、简短、友好地回应，说明你可以查询高校宿舍、食堂、校园网、外卖、澡堂、早晚自习等生活资料。强调用户不用命令，直接自然提问即可。不要编造具体学校资料。回复控制在 120 字以内。"
+          },
+          {
+            role: "user",
+            content: userMessage
+          }
+        ],
+        "greeting"
+      );
+    } catch {
+      return renderGreetingReply();
+    }
+  }
+
+  private async answerImageWithLlm(userMessage: string, images: IncomingImage[]): Promise<string> {
+    const usableUrls = images.map((image) => image.url || image.file || "").filter(isImageUrl);
+    if (!usableUrls.length) {
+      return "我收到图片了，但这条图片消息里没有可传给模型的图片 URL。请确认 NapCat 的图片段包含 url，或者换一种图片发送方式。";
+    }
+
+    const text =
+      userMessage.trim() ||
+      "用户发送了一张图片。请先描述图片内容；如果图片和高校生活资料、学校环境、宿舍、食堂、校园网、通知截图等有关，请结合图片内容给出简短回应。不要编造看不见的信息。";
+    const imageUrls = await Promise.all(usableUrls.slice(0, 4).map((url) => prepareImageUrlForLlm(url)));
+
+    try {
+      return await this.llm.chat(
+        [
+          {
+            role: "system",
+            content:
+              "你是 QQ 里的高校生活资料助手。用户发送了图片，可能是学校相关截图、环境照片、通知、聊天截图或普通图片。请基于图片可见内容和用户文字简短回复。看不清或无法判断时要直接说明。不要编造图片中没有的信息。"
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text
+              },
+              ...imageUrls.map((url) => ({
+                type: "image_url" as const,
+                image_url: { url }
+              }))
+            ]
+          }
+        ],
+        "image-message"
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `我收到图片了，但调用模型识图失败：${message}`;
+    }
+  }
+
   private getContext(key: string, now: number): ConversationContext | null {
     const context = this.contexts.get(key);
     if (!context) return null;
@@ -193,3 +300,90 @@ export class MessageProcessor {
   }
 }
 
+function renderLogText(input: IncomingMessage): string {
+  const imageCount = input.images?.length ?? 0;
+  if (!imageCount) return input.text;
+  const suffix = `[图片 x${imageCount}]`;
+  return input.text.trim() ? `${input.text.trim()} ${suffix}` : suffix;
+}
+
+function isImageUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value) || /^data:image\//i.test(value);
+}
+
+async function prepareImageUrlForLlm(url: string): Promise<string> {
+  if (url.startsWith("data:image/")) return url;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) return url;
+
+    const contentLength = Number(response.headers.get("content-length") ?? "0");
+    if (contentLength > MAX_IMAGE_BYTES) return url;
+
+    const contentType = normalizeImageContentType(response.headers.get("content-type"), url);
+    if (!contentType) return url;
+
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.byteLength > MAX_IMAGE_BYTES) return url;
+    return `data:${contentType};base64,${bytes.toString("base64")}`;
+  } catch {
+    return url;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normalizeImageContentType(contentType: string | null, url: string): string | null {
+  const clean = contentType?.split(";")[0]?.trim().toLowerCase();
+  if (clean?.startsWith("image/")) return clean;
+  if (/\.png(?:$|[?#])/i.test(url)) return "image/png";
+  if (/\.jpe?g(?:$|[?#])/i.test(url)) return "image/jpeg";
+  if (/\.webp(?:$|[?#])/i.test(url)) return "image/webp";
+  if (/\.gif(?:$|[?#])/i.test(url)) return "image/gif";
+  return null;
+}
+
+function isGreeting(text: string): boolean {
+  const normalized = text
+    .trim()
+    .replace(/^[\s@]+/, "")
+    .replace(/[!！?？。~～,.，、\s]+$/g, "")
+    .toLowerCase();
+  return /^(你好|您好|hello|hi|嗨|哈喽|哈啰|在吗|在不在|有人吗|help|帮助|菜单)$/.test(normalized);
+}
+
+function shouldExplainLowConfidence(
+  input: IncomingMessage,
+  analysis: { isUniversityQuery: boolean },
+  context: ConversationContext | null
+): boolean {
+  if (input.messageType === "private") return true;
+  if (input.mentionedBot) return true;
+  if (context) return true;
+  return analysis.isUniversityQuery;
+}
+
+function renderGreetingReply(): string {
+  return [
+    "你好，我可以帮你查高校生活资料。",
+    "不用命令，直接像聊天一样问就行，例如：",
+    "安大宿舍怎么样",
+    "西电能点外卖吗",
+    "南航校园网咋样"
+  ].join("\n");
+}
+
+function renderLowConfidenceReply(analysis: { isUniversityQuery: boolean }, hasContext: boolean): string {
+  if (hasContext) {
+    return "我没太理解你想继续查哪个方面。可以直接说“宿舍”“食堂”“校园网”“外卖”“澡堂”等关键词。";
+  }
+
+  if (analysis.isUniversityQuery) {
+    return "我看起来像是在查高校资料，但没识别清楚学校或问题。可以说得更完整一点，例如“安徽大学宿舍怎么样”或“西电能点外卖吗”。";
+  }
+
+  return "我没识别出具体的高校资料问题。可以直接问“安徽大学宿舍怎么样”“西电校园网咋样”“南航能点外卖吗”。";
+}

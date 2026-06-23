@@ -14,6 +14,15 @@ interface OneBotEvent {
   message?: string | Array<{ type: string; data?: Record<string, string | number> }>;
 }
 
+interface ExtractedContent {
+  text: string;
+  images: Array<{
+    url?: string;
+    file?: string;
+    summary?: string;
+  }>;
+}
+
 export class OneBotGateway {
   private sockets = new Set<WebSocket>();
   private connectedAt: string | null = null;
@@ -71,8 +80,8 @@ export class OneBotGateway {
     this.lastEventAt = new Date().toISOString();
     if (event.post_type !== "message" || !event.message_type || !event.user_id) return;
 
-    const text = extractText(event);
-    if (!text.trim()) return;
+    const content = extractContent(event);
+    if (!content.text.trim() && content.images.length === 0) return;
 
     const mentionedBot = isMentioned(event, this.selfId);
     const conversationKey =
@@ -80,7 +89,8 @@ export class OneBotGateway {
 
     const result = await this.processor.process({
       platform: "onebot",
-      text,
+      text: content.text,
+      images: content.images,
       messageType: event.message_type,
       userId: String(event.user_id),
       groupId: event.group_id == null ? undefined : String(event.group_id),
@@ -120,15 +130,29 @@ export class OneBotGateway {
   }
 }
 
-function extractText(event: OneBotEvent): string {
-  if (event.raw_message) return event.raw_message.replace(/\[CQ:at,[^\]]+\]/g, "").trim();
-  if (typeof event.message === "string") return event.message.replace(/\[CQ:at,[^\]]+\]/g, "").trim();
-  if (!Array.isArray(event.message)) return "";
-  return event.message
-    .filter((segment) => segment.type === "text")
-    .map((segment) => String(segment.data?.text ?? ""))
-    .join("")
-    .trim();
+function extractContent(event: OneBotEvent): ExtractedContent {
+  if (Array.isArray(event.message)) {
+    return {
+      text: event.message
+        .filter((segment) => segment.type === "text")
+        .map((segment) => String(segment.data?.text ?? ""))
+        .join("")
+        .trim(),
+      images: event.message
+        .filter((segment) => segment.type === "image")
+        .map((segment) => ({
+          url: segment.data?.url == null ? undefined : String(segment.data.url),
+          file: segment.data?.file == null ? undefined : String(segment.data.file),
+          summary: segment.data?.summary == null ? undefined : String(segment.data.summary)
+        }))
+    };
+  }
+
+  const raw = typeof event.message === "string" ? event.message : event.raw_message ?? "";
+  return {
+    text: raw.replace(/\[CQ:at,[^\]]+\]/g, "").replace(/\[CQ:image,[^\]]+\]/g, "").trim(),
+    images: extractImagesFromCq(raw)
+  };
 }
 
 function isMentioned(event: OneBotEvent, selfId: string | null): boolean {
@@ -144,4 +168,33 @@ function splitMessage(text: string, size: number): string[] {
     chunks.push(text.slice(i, i + size));
   }
   return chunks.length ? chunks : [text];
+}
+
+function extractImagesFromCq(raw: string): ExtractedContent["images"] {
+  const images: ExtractedContent["images"] = [];
+  const pattern = /\[CQ:image,([^\]]+)\]/g;
+  for (const match of raw.matchAll(pattern)) {
+    const data = parseCqData(match[1]);
+    images.push({
+      url: data.url,
+      file: data.file,
+      summary: data.summary
+    });
+  }
+  return images;
+}
+
+function parseCqData(raw: string): Record<string, string> {
+  const data: Record<string, string> = {};
+  for (const part of raw.split(",")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    const key = part.slice(0, eq);
+    data[key] = decodeCqValue(part.slice(eq + 1));
+  }
+  return data;
+}
+
+function decodeCqValue(value: string): string {
+  return value.replace(/&#44;/g, ",").replace(/&#91;/g, "[").replace(/&#93;/g, "]").replace(/&amp;/g, "&");
 }

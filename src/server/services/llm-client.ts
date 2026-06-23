@@ -3,8 +3,20 @@ import type { LogStore } from "./log-store.js";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | ChatContentPart[];
 }
+
+export type ChatContentPart =
+  | {
+      type: "text";
+      text: string;
+    }
+  | {
+      type: "image_url";
+      image_url: {
+        url: string;
+      };
+    };
 
 export class LlmClient {
   constructor(
@@ -24,7 +36,7 @@ export class LlmClient {
 
     if (!runtime.apiKey) {
       const error = "LLM API Key 未配置";
-      this.logs.llm({ purpose, model: runtime.model, requestJson: payload, error, latencyMs: Date.now() - started });
+      this.logs.llm({ purpose, model: runtime.model, requestJson: sanitizePayloadForLog(payload), error, latencyMs: Date.now() - started });
       throw new Error(error);
     }
 
@@ -55,14 +67,20 @@ export class LlmClient {
       this.logs.llm({
         purpose,
         model: runtime.model,
-        requestJson: payload,
+        requestJson: sanitizePayloadForLog(payload),
         responseText: content,
         latencyMs: Date.now() - started
       });
       return content.trim();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logs.llm({ purpose, model: runtime.model, requestJson: payload, error: message, latencyMs: Date.now() - started });
+      this.logs.llm({
+        purpose,
+        model: runtime.model,
+        requestJson: sanitizePayloadForLog(payload),
+        error: message,
+        latencyMs: Date.now() - started
+      });
       throw error;
     } finally {
       clearTimeout(timer);
@@ -80,3 +98,14 @@ export class LlmClient {
   }
 }
 
+function sanitizePayloadForLog<T>(payload: T): T {
+  return JSON.parse(
+    JSON.stringify(payload, (_key, value: unknown) => {
+      if (typeof value === "string" && value.startsWith("data:image/")) {
+        const mime = value.slice(5, value.indexOf(";") === -1 ? 30 : value.indexOf(";"));
+        return `[image data omitted: ${mime}]`;
+      }
+      return value;
+    })
+  ) as T;
+}

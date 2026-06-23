@@ -88,11 +88,18 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
   });
 
   app.post("/api/debug/message", async (request) => {
-    const body = request.body as { text?: string; messageType?: "private" | "group"; userId?: string; groupId?: string };
-    if (!body.text) throw new Error("text is required");
+    const body = request.body as {
+      text?: string;
+      imageUrls?: string[];
+      messageType?: "private" | "group";
+      userId?: string;
+      groupId?: string;
+    };
+    if (!body.text && !body.imageUrls?.length) throw new Error("text or imageUrls is required");
     return deps.processor.process({
       platform: "debug",
-      text: body.text,
+      text: body.text ?? "",
+      images: body.imageUrls?.map((url) => ({ url })),
       messageType: body.messageType ?? "private",
       userId: body.userId ?? "debug-user",
       groupId: body.groupId,
@@ -113,4 +120,3 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
 
   app.get("/api/onebot/status", async () => deps.onebot.status());
 }
-
