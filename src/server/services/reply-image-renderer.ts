@@ -299,9 +299,11 @@ function wrapSegments(segments: InlineSegment[], firstWidth: number, nextWidth: 
           continue;
         }
         trimTrailingSpaces(current);
-        lines.push(current);
-        current = [];
-        width = 0;
+        const carried = popTrailingOpeningPunctuation(current);
+        trimTrailingSpaces(current);
+        if (current.length) lines.push(current);
+        current = carried;
+        width = measureSegments(current, fontSize);
         limit = nextWidth;
         if (char === " ") continue;
       }
@@ -351,6 +353,41 @@ function trimTrailingSpaces(segments: InlineSegment[]): void {
   }
 }
 
+function popTrailingOpeningPunctuation(segments: InlineSegment[]): InlineSegment[] {
+  const carried: InlineSegment[] = [];
+  while (segments.length) {
+    const char = peekLastChar(segments);
+    if (!char || !isOpeningPunctuation(char)) break;
+    const segment = popLastChar(segments);
+    if (!segment) break;
+    carried.unshift(segment);
+  }
+  return carried;
+}
+
+function peekLastChar(segments: InlineSegment[]): string | null {
+  const last = segments.at(-1);
+  if (!last) return null;
+  return Array.from(last.text).at(-1) ?? null;
+}
+
+function popLastChar(segments: InlineSegment[]): InlineSegment | null {
+  while (segments.length) {
+    const last = segments.at(-1);
+    if (!last) return null;
+    const chars = Array.from(last.text);
+    const char = chars.pop();
+    if (!char) {
+      segments.pop();
+      continue;
+    }
+    last.text = chars.join("");
+    if (!last.text) segments.pop();
+    return { text: char, bold: last.bold, code: last.code };
+  }
+  return null;
+}
+
 function measureSegments(segments: InlineSegment[], fontSize: number): number {
   return segments.reduce((total, segment) => {
     return total + Array.from(segment.text).reduce((sum, char) => sum + estimateCharWidth(char, fontSize), 0);
@@ -384,6 +421,10 @@ function estimateCharWidth(char: string, fontSize: number): number {
 
 function isClosingPunctuation(char: string): boolean {
   return /[，。！？；：、,.!?;:）)\]】》”’]/.test(char);
+}
+
+function isOpeningPunctuation(char: string): boolean {
+  return /[（(\[【《“‘]/.test(char);
 }
 
 function renderSvg(
