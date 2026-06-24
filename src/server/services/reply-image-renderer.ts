@@ -60,8 +60,7 @@ const CONTENT_WIDTH = WIDTH - CONTENT_X * 2;
 const HEADER_Y = 54;
 const BODY_TOP = 116;
 const BOTTOM = 52;
-const TEXT_WRAP_GUTTER = 42;
-const CLOSING_PUNCTUATION_OVERHANG = 6;
+const TEXT_WRAP_GUTTER = 28;
 const SOURCE_QR_SIZE = 124;
 const SOURCE_QR_PADDING = 6;
 const SOURCE_QR_BLOCK_HEIGHT = 176;
@@ -294,7 +293,7 @@ function wrapSegments(segments: InlineSegment[], firstWidth: number, nextWidth: 
     for (const char of Array.from(segment.text)) {
       const charWidth = estimateCharWidth(char, fontSize);
       if (width + charWidth > limit && current.length) {
-        if (isClosingPunctuation(char) && width + charWidth <= limit + CLOSING_PUNCTUATION_OVERHANG) {
+        if (isClosingPunctuation(char)) {
           pushSegmentChar(current, char, segment);
           width += charWidth;
           continue;
