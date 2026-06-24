@@ -107,6 +107,10 @@ export function markdownToPlainText(markdown: string): string {
     .trim();
 }
 
+export function __wrapInlineTextForTest(text: string, width: number, fontSize = 28): string[] {
+  return wrapSegments(parseInline(text), width, width, fontSize).map(segmentsToText);
+}
+
 function layoutMarkdown(markdown: string): VisualLine[] {
   const lines = markdown.split("\n");
   const visual: VisualLine[] = [];
@@ -293,7 +297,7 @@ function wrapSegments(segments: InlineSegment[], firstWidth: number, nextWidth: 
     for (const char of Array.from(segment.text)) {
       const charWidth = estimateCharWidth(char, fontSize);
       if (width + charWidth > limit && current.length) {
-        if (isClosingPunctuation(char)) {
+        if (shouldKeepOverflowCharWithCurrentLine(char, current)) {
           pushSegmentChar(current, char, segment);
           width += charWidth;
           continue;
@@ -357,7 +361,7 @@ function popTrailingOpeningPunctuation(segments: InlineSegment[]): InlineSegment
   const carried: InlineSegment[] = [];
   while (segments.length) {
     const char = peekLastChar(segments);
-    if (!char || !isOpeningPunctuation(char)) break;
+    if (!char || !isLineEndOpeningPunctuation(segments, char)) break;
     const segment = popLastChar(segments);
     if (!segment) break;
     carried.unshift(segment);
@@ -369,6 +373,11 @@ function peekLastChar(segments: InlineSegment[]): string | null {
   const last = segments.at(-1);
   if (!last) return null;
   return Array.from(last.text).at(-1) ?? null;
+}
+
+function peekCharBeforeLast(segments: InlineSegment[]): string | null {
+  const chars = Array.from(segmentsToText(segments));
+  return chars.length >= 2 ? chars[chars.length - 2] : null;
 }
 
 function popLastChar(segments: InlineSegment[]): InlineSegment | null {
@@ -392,6 +401,10 @@ function measureSegments(segments: InlineSegment[], fontSize: number): number {
   return segments.reduce((total, segment) => {
     return total + Array.from(segment.text).reduce((sum, char) => sum + estimateCharWidth(char, fontSize), 0);
   }, 0);
+}
+
+function segmentsToText(segments: InlineSegment[]): string {
+  return segments.map((segment) => segment.text).join("");
 }
 
 function estimateCharWidth(char: string, fontSize: number): number {
@@ -420,11 +433,32 @@ function estimateCharWidth(char: string, fontSize: number): number {
 }
 
 function isClosingPunctuation(char: string): boolean {
-  return /[，。！？；：、,.!?;:）)\]】》”’]/.test(char);
+  return /[，。！？；：、,.!?;:%％‰℃°）)\]］｝}】〕〗〙〛〉》」』”’…—–－·/／]/.test(char);
 }
 
 function isOpeningPunctuation(char: string): boolean {
-  return /[（(\[【《“‘]/.test(char);
+  return /[（(\[［｛{【〔〖〘〚〈《「『“‘]/.test(char);
+}
+
+function shouldKeepOverflowCharWithCurrentLine(char: string, current: InlineSegment[]): boolean {
+  if (isClosingPunctuation(char)) return true;
+  if (!isAmbiguousQuote(char)) return false;
+  const previous = peekLastChar(current);
+  return !isOpeningQuotePreviousChar(previous);
+}
+
+function isLineEndOpeningPunctuation(segments: InlineSegment[], char: string): boolean {
+  if (isOpeningPunctuation(char)) return true;
+  if (!isAmbiguousQuote(char)) return false;
+  return isOpeningQuotePreviousChar(peekCharBeforeLast(segments));
+}
+
+function isAmbiguousQuote(char: string): boolean {
+  return char === "\"" || char === "'";
+}
+
+function isOpeningQuotePreviousChar(char: string | null): boolean {
+  return char == null || /\s/.test(char) || isOpeningPunctuation(char) || /[：:，,。！？；;]/.test(char);
 }
 
 function renderSvg(
@@ -568,18 +602,7 @@ function measureText(text: string, fontSize: number): number {
 }
 
 function wrapPlainText(text: string, fontSize: number, maxWidth: number): string[] {
-  const lines: string[] = [];
-  let current = "";
-  for (const char of Array.from(text)) {
-    if (measureText(`${current}${char}`, fontSize) > maxWidth && current) {
-      lines.push(current);
-      current = char.trimStart();
-    } else {
-      current += char;
-    }
-  }
-  if (current) lines.push(current);
-  return lines;
+  return wrapSegments([{ text }], maxWidth, maxWidth, fontSize).map(segmentsToText);
 }
 
 function round(value: number): number {

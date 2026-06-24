@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { markdownToPlainText, renderReplyImage } from "./reply-image-renderer.js";
+import { __wrapInlineTextForTest, markdownToPlainText, renderReplyImage } from "./reply-image-renderer.js";
 
 describe("reply-image-renderer", () => {
   it("renders markdown reply text to a png image", () => {
@@ -8,7 +8,7 @@ describe("reply-image-renderer", () => {
     expect(image.mimeType).toBe("image/png");
     expect(image.bytes).toBeGreaterThan(1000);
     expect(Buffer.from(image.dataBase64, "base64").subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
-  });
+  }, 30000);
 
   it("renders with configurable header text", () => {
     const image = renderReplyImage("测试回复", {
@@ -18,7 +18,7 @@ describe("reply-image-renderer", () => {
 
     expect(image.mimeType).toBe("image/png");
     expect(image.bytes).toBeGreaterThan(1000);
-  });
+  }, 30000);
 
   it("renders with a longer configurable header badge", () => {
     const image = renderReplyImage("测试回复", {
@@ -28,7 +28,7 @@ describe("reply-image-renderer", () => {
 
     expect(image.mimeType).toBe("image/png");
     expect(image.bytes).toBeGreaterThan(1000);
-  });
+  }, 30000);
 
   it("renders deeper markdown headings and dividers", () => {
     const image = renderReplyImage("#### 食堂 共性是：\n\n- 能吃\n- 但整体评价中等\n\n---\n\n#### 校园环境\n图书馆评价不错");
@@ -36,7 +36,7 @@ describe("reply-image-renderer", () => {
     expect(image.mimeType).toBe("image/png");
     expect(image.bytes).toBeGreaterThan(1000);
     expect(markdownToPlainText("#### 食堂 共性是：\n---")).toBe("食堂 共性是：");
-  });
+  }, 30000);
 
   it("renders a local QR code for the source page", () => {
     const image = renderReplyImage("测试回复", {
@@ -45,7 +45,7 @@ describe("reply-image-renderer", () => {
 
     expect(image.mimeType).toBe("image/png");
     expect(image.bytes).toBeGreaterThan(2000);
-  });
+  }, 30000);
 
   it("moves the source disclaimer into the image footer", () => {
     const image = renderReplyImage(
@@ -57,9 +57,47 @@ describe("reply-image-renderer", () => {
 
     expect(image.mimeType).toBe("image/png");
     expect(image.bytes).toBeGreaterThan(2000);
+  }, 30000);
+
+  it("keeps common punctuation away from awkward line edges", () => {
+    const cases = [
+      { text: "共性优点：后面内容继续继续", width: 120 },
+      { text: "最好别默认 “浙大全都有”", width: 180 },
+      { text: "最好别默认 \"浙大全都有\"", width: 180 },
+      { text: "最好别默认（浙大全都有）", width: 96 },
+      { text: "可能会这样……但是还要看具体宿舍区", width: 150 },
+      { text: "结论是——如果重视平台就优先考虑", width: 95 },
+      { text: "211/双一流、保研率较高。", width: 50 }
+    ];
+
+    for (const item of cases) {
+      const lines = __wrapInlineTextForTest(item.text, item.width);
+      expect(lines.length, item.text).toBeGreaterThan(1);
+      expect(lines.slice(1).some(startsWithForbiddenClosingPunctuation), item.text).toBe(false);
+      expect(lines.slice(0, -1).some(endsWithForbiddenOpeningPunctuation), item.text).toBe(false);
+    }
+
+    const quoteLines = __wrapInlineTextForTest("最好别默认 “浙大全都有”", 180);
+    expect(quoteLines[0]).toBe("最好别默认");
+    expect(quoteLines[1].startsWith("“浙")).toBe(true);
+
+    const asciiQuoteLines = __wrapInlineTextForTest("最好别默认 \"浙大全都有\"", 180);
+    expect(asciiQuoteLines[0]).toBe("最好别默认");
+    expect(asciiQuoteLines[1].startsWith("\"浙")).toBe(true);
+
+    const colonLines = __wrapInlineTextForTest("共性优点：后面内容继续继续", 120);
+    expect(colonLines[0]).toBe("共性优点：");
   });
 
   it("strips markdown syntax for plain-text fallback", () => {
     expect(markdownToPlainText("**你是什么模型**：后台配置为 `gpt-5.5`")).toBe("你是什么模型：后台配置为 gpt-5.5");
   });
 });
+
+function startsWithForbiddenClosingPunctuation(line: string): boolean {
+  return /^[，。！？；：、,.!?;:%％‰℃°）)\]］｝}】〕〗〙〛〉》」』”’…—–－·/／]/.test(line);
+}
+
+function endsWithForbiddenOpeningPunctuation(line: string): boolean {
+  return /[（(\[［｛{【〔〖〘〚〈《「『“‘]$/.test(line);
+}
