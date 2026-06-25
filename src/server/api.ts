@@ -3,9 +3,11 @@ import type { AppConfig } from "./config.js";
 import type { AppDatabase } from "./db.js";
 import type { OneBotGateway } from "./onebot.js";
 import type { SettingsStore } from "./settings.js";
+import type { AdmissionRepository } from "./services/admission-repository.js";
 import type { AutoSyncScheduler } from "./services/auto-sync-scheduler.js";
 import type { AnswerSourceRecord, AnswerSourceStore } from "./services/answer-source-store.js";
 import type { DataSyncService } from "./services/data-sync.js";
+import type { GaokaoCnAdapter } from "./services/gaokao-cn-adapter.js";
 import type { LlmClient } from "./services/llm-client.js";
 import type { LogStore } from "./services/log-store.js";
 import type { MessageProcessor } from "./services/message-processor.js";
@@ -17,9 +19,11 @@ export interface ApiDeps {
   database: AppDatabase;
   settings: SettingsStore;
   universities: UniversityRepository;
+  admissions: AdmissionRepository;
   sync: DataSyncService;
   answerSources: AnswerSourceStore;
   srgaoxiaoSync: SrgaoxiaoSyncService;
+  gaokaoCn: GaokaoCnAdapter;
   autoSync: AutoSyncScheduler;
   llm: LlmClient;
   logs: LogStore;
@@ -46,6 +50,7 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       totals: {
         universities: deps.universities.countUniversities(),
         srgaoxiaoProfiles: deps.universities.countSchoolProfiles("srgaoxiao"),
+        admissionMappings: deps.admissions.countMappings(),
         messages: messageCount.count,
         llmCalls: llmCount.count
       },
@@ -93,6 +98,148 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       reviewMaxPages: body.reviewMaxPages
     });
     return { ok: true, ...result };
+  });
+
+  app.post("/api/data/sync-gaokao-cn", async (request) => {
+    const body = request.body as {
+      query?: string;
+      limit?: number;
+      offset?: number;
+      universityId?: number;
+      provinces?: string[] | string;
+      subjectTypes?: string[] | string;
+      scoreYears?: number[] | string;
+      planYears?: number[] | string;
+      includePlans?: boolean;
+      includeScores?: boolean;
+      includeSpecialScores?: boolean;
+      eligibleOnly?: boolean;
+    };
+    const result = await deps.gaokaoCn.sync({
+      query: body.query,
+      limit: body.limit,
+      offset: body.offset,
+      universityId: body.universityId,
+      provinces: parseStringList(body.provinces),
+      subjectTypes: parseStringList(body.subjectTypes),
+      scoreYears: parseNumberList(body.scoreYears),
+      planYears: parseNumberList(body.planYears),
+      includePlans: body.includePlans,
+      includeScores: body.includeScores,
+      includeSpecialScores: body.includeSpecialScores,
+      eligibleOnly: body.eligibleOnly
+    });
+    return { ok: true, ...result };
+  });
+
+  app.get("/api/admissions/mappings", async (request) => {
+    const query = request.query as { query?: string; limit?: string };
+    return deps.admissions.listMappings(query.query ?? "", Number(query.limit ?? 80));
+  });
+
+  app.get("/api/admissions/coverage", async () => deps.admissions.coverageStats());
+
+  app.get("/api/admissions/unmapped", async (request) => {
+    const query = request.query as { query?: string; limit?: string };
+    return deps.admissions.listUnmappedUniversities(query.query ?? "", Number(query.limit ?? 50));
+  });
+
+  app.get("/api/admissions/mapping-issues", async (request) => {
+    const query = request.query as { query?: string; limit?: string };
+    return deps.admissions.listMappingIssues(query.query ?? "", Number(query.limit ?? 50));
+  });
+
+  app.get("/api/admissions/source-schools", async (request) => {
+    const query = request.query as { query?: string; universityId?: string; limit?: string };
+    const keyword = query.query?.trim();
+    if (!keyword) return [];
+    const rows = await deps.gaokaoCn.searchSchools(keyword, query.universityId ? Number(query.universityId) : undefined);
+    return rows.slice(0, Math.max(1, Math.min(30, Number(query.limit ?? 10))));
+  });
+
+  app.put("/api/admissions/mappings/:universityId", async (request) => {
+    const params = request.params as { universityId: string };
+    const body = request.body as { sourceSchoolId?: string; sourceSchoolName?: string; sourceUrl?: string };
+    const university = deps.universities.getUniversity(Number(params.universityId));
+    if (!university) throw new Error("university not found");
+    if (!body.sourceSchoolId) throw new Error("sourceSchoolId is required");
+    deps.admissions.upsertMapping({
+      universityId: university.id,
+      sourceSchoolId: body.sourceSchoolId,
+      sourceSchoolName: body.sourceSchoolName || university.name,
+      matchedName: body.sourceSchoolName || university.name,
+      matchStatus: "manual",
+      confidence: 1,
+      sourceUrl: body.sourceUrl || `https://www.gaokao.cn/school/${encodeURIComponent(body.sourceSchoolId)}`,
+      payloadJson: JSON.stringify({ manual: true, sourceSchoolId: body.sourceSchoolId, sourceSchoolName: body.sourceSchoolName || university.name })
+    });
+    return { ok: true };
+  });
+
+  app.get("/api/admissions/query", async (request) => {
+    const query = request.query as {
+      universityId?: string;
+      province?: string;
+      subject?: string;
+      years?: string;
+      batch?: string;
+      scoreType?: string;
+      major?: string;
+      limit?: string;
+    };
+    const scoreType: "school" | "major" | undefined =
+      query.scoreType === "school" || query.scoreType === "major" ? query.scoreType : undefined;
+    const input = {
+      universityId: query.universityId ? Number(query.universityId) : undefined,
+      provinceName: query.province,
+      subjectType: query.subject,
+      subjectTypes: parseStringList(query.subject),
+      years: parseNumberList(query.years),
+      batch: query.batch,
+      scoreType,
+      majorName: query.major,
+      limit: Number(query.limit ?? 80)
+    };
+    return {
+      plans: deps.admissions.queryPlans(input),
+      scores: deps.admissions.queryScores(input)
+    };
+  });
+
+  app.get("/api/admissions/jobs", async (request) => {
+    const query = request.query as { limit?: string; status?: string; jobType?: string };
+    return deps.admissions.recentJobs({
+      limit: Number(query.limit ?? 30),
+      status: query.status,
+      jobType: query.jobType
+    });
+  });
+
+  app.get("/api/admissions/jobs/failed", async (request) => {
+    const query = request.query as { limit?: string };
+    return deps.admissions.recentFailedJobs(Number(query.limit ?? 10));
+  });
+
+  app.get("/api/admissions/sources", async (request) => {
+    const query = request.query as {
+      universityId?: string;
+      sourceKind?: string;
+      status?: string;
+      limit?: string;
+    };
+    return deps.admissions.listSources({
+      universityId: query.universityId ? Number(query.universityId) : undefined,
+      sourceKind: query.sourceKind,
+      status: query.status,
+      limit: Number(query.limit ?? 20)
+    });
+  });
+
+  app.get("/api/admissions/sources/:id", async (request, reply) => {
+    const params = request.params as { id: string };
+    const source = deps.admissions.getSource(Number(params.id));
+    if (!source) return reply.code(404).send({ error: "source not found" });
+    return source;
   });
 
   app.get("/api/universities", async (request) => {
@@ -160,13 +307,16 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
   app.get("/api/onebot/status", async () => deps.onebot.status());
 }
 
-function renderAnswerSourcePage(record: AnswerSourceRecord, filingNumber: string): string {
+export function renderAnswerSourcePage(record: AnswerSourceRecord, filingNumber: string): string {
   const title = record.universityName ? `${record.universityName} 资料来源` : "回答资料来源";
-  const sections = [
-    renderSection("CollegesChat 问卷资料", record.contextText),
-    renderSection("外部院校画像补充资料", record.schoolProfileText || "本回答未使用外部院校画像补充资料。"),
-    renderSection("神人高校评论资料", record.srgaoxiaoReviewsText || "本回答未使用神人高校评论资料。")
-  ].join("");
+  const isAdmission = record.topic === "招生数据";
+  const sections = isAdmission
+    ? renderAdmissionSourceSections(record.contextText)
+    : [
+        renderSection("CollegesChat 问卷资料", record.contextText),
+        renderSection("外部院校画像补充资料", record.schoolProfileText || "本回答未使用外部院校画像补充资料。"),
+        renderSection("神人高校评论资料", record.srgaoxiaoReviewsText || "本回答未使用神人高校评论资料。")
+      ].join("");
   const sourceLink = record.sourceUrl
     ? `<a href="${escapeAttribute(record.sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(record.sourceUrl)}</a>`
     : "-";
@@ -190,6 +340,37 @@ function renderAnswerSourcePage(record: AnswerSourceRecord, filingNumber: string
         ${sections}
       </main>`
   });
+}
+
+function renderAdmissionSourceSections(contextText: string): string {
+  const sections = splitAdmissionContext(contextText);
+  if (!sections.length) return renderSection("掌上高考招生数据", contextText);
+  return sections.map((section) => renderSection(section.title, section.content)).join("");
+}
+
+function splitAdmissionContext(contextText: string): Array<{ title: string; content: string }> {
+  const markers = [
+    { pattern: /^招生计划：\s*$/u, title: "招生计划" },
+    { pattern: /^分数趋势摘要：\s*$/u, title: "分数趋势摘要" },
+    { pattern: /^录取分数\/位次：\s*$/u, title: "录取分数与最低位次" },
+    { pattern: /^资料页追溯：\s*$/u, title: "资料页追溯" },
+    { pattern: /^来源：/u, title: "来源提醒" }
+  ];
+  const sections: Array<{ title: string; lines: string[] }> = [{ title: "查询条件与同步状态", lines: [] }];
+  for (const line of contextText.split(/\r?\n/u)) {
+    const marker = markers.find((item) => item.pattern.test(line.trim()));
+    if (marker) {
+      sections.push({
+        title: marker.title,
+        lines: marker.title === "来源提醒" ? [line] : []
+      });
+      continue;
+    }
+    sections[sections.length - 1].lines.push(line);
+  }
+  return sections
+    .map((section) => ({ title: section.title, content: section.lines.join("\n").trim() }))
+    .filter((section) => section.content);
 }
 
 function renderNotFoundPage(filingNumber: string): string {
@@ -255,6 +436,23 @@ function renderPublicHtml(input: { title: string; body: string; filingNumber: st
 
 function normalizeBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/g, "");
+}
+
+function parseStringList(value: string[] | string | undefined): string[] | undefined {
+  if (Array.isArray(value)) return value.map((item) => item.trim()).filter(Boolean);
+  if (!value) return undefined;
+  return value
+    .split(/[,，\s]+/u)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseNumberList(value: number[] | string | undefined): number[] | undefined {
+  if (Array.isArray(value)) return value.map((item) => Number(item)).filter((item) => Number.isFinite(item));
+  if (!value) return undefined;
+  return parseStringList(value)
+    ?.map((item) => Number(item))
+    .filter((item) => Number.isFinite(item));
 }
 
 function formatDateTime(value: string): string {

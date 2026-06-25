@@ -29,7 +29,7 @@ describe("parseUniversityMarkdown", () => {
     expect(parsed?.name).toBe("安徽大学");
     expect(parsed?.slug).toBe("an-hui-da-xue");
     expect(parsed?.questions).toHaveLength(2);
-    expect(parsed?.questions[0].topic).toBe("dorm");
+    expect(parsed?.questions[0].topic).toBe("general");
     expect(parsed?.questions[0].answers[0]).toMatchObject({
       sourceId: "A17312",
       respondent: "匿名",
@@ -38,4 +38,3 @@ describe("parseUniversityMarkdown", () => {
     });
   });
 });
-

@@ -12,7 +12,8 @@
     "start": "node dist/server/main.js",
     "test": "vitest run",
     "sync:data": "tsx src/server/scripts/sync-data.ts",
-    "sync:srgaoxiao": "tsx src/server/scripts/sync-srgaoxiao.ts"
+    "sync:srgaoxiao": "tsx src/server/scripts/sync-srgaoxiao.ts",
+    "sync:gaokao-cn": "tsx src/server/scripts/sync-gaokao-cn.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.1",

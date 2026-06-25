@@ -19,7 +19,17 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-type Page = "dashboard" | "model" | "site" | "natural" | "data" | "aliases" | "debug" | "logs" | "security";
+type Page = "dashboard" | "model" | "site" | "natural" | "data" | "admissions" | "aliases" | "debug" | "logs" | "security";
+
+const ADMISSION_CURRENT_YEAR = new Date().getFullYear();
+const ADMISSION_CURRENT_MONTH = new Date().getMonth() + 1;
+const DEFAULT_ADMISSION_PLAN_YEARS = String(ADMISSION_CURRENT_YEAR);
+const DEFAULT_ADMISSION_SCORE_YEARS = (ADMISSION_CURRENT_MONTH >= 7 && ADMISSION_CURRENT_MONTH <= 10
+  ? [ADMISSION_CURRENT_YEAR, ADMISSION_CURRENT_YEAR - 1, ADMISSION_CURRENT_YEAR - 2, ADMISSION_CURRENT_YEAR - 3]
+  : [ADMISSION_CURRENT_YEAR - 1, ADMISSION_CURRENT_YEAR - 2, ADMISSION_CURRENT_YEAR - 3]).join(",");
+const DEFAULT_ADMISSION_QUERY_YEARS = [ADMISSION_CURRENT_YEAR, ADMISSION_CURRENT_YEAR - 1, ADMISSION_CURRENT_YEAR - 2, ADMISSION_CURRENT_YEAR - 3].join(",");
+const DEFAULT_ADMISSION_PLAN_INTERVAL_HOURS = ADMISSION_CURRENT_MONTH >= 5 && ADMISSION_CURRENT_MONTH <= 8 ? "24" : "168";
+const DEFAULT_ADMISSION_SCORE_INTERVAL_HOURS = ADMISSION_CURRENT_MONTH >= 7 && ADMISSION_CURRENT_MONTH <= 10 ? "24" : "720";
 
 interface Dashboard {
   onebot: {
@@ -32,6 +42,7 @@ interface Dashboard {
   totals: {
     universities: number;
     srgaoxiaoProfiles: number;
+    admissionMappings: number;
     messages: number;
     llmCalls: number;
   };
@@ -85,6 +96,8 @@ interface SyncSchedulerStatus {
       lastFinishedAt: string | null;
       lastError: string | null;
       nextRunAt: string | null;
+      cursorOffset?: number | null;
+      lastResult?: GaokaoSchedulerResult | null;
     };
     srgaoxiao: {
       enabled: boolean;
@@ -94,8 +107,208 @@ interface SyncSchedulerStatus {
       lastFinishedAt: string | null;
       lastError: string | null;
       nextRunAt: string | null;
+      cursorOffset?: number | null;
+      lastResult?: GaokaoSchedulerResult | null;
+    };
+    gaokaoCnPlan: {
+      enabled: boolean;
+      intervalHours: number;
+      running: boolean;
+      lastStartedAt: string | null;
+      lastFinishedAt: string | null;
+      lastError: string | null;
+      nextRunAt: string | null;
+      cursorOffset?: number | null;
+      lastResult?: GaokaoSchedulerResult | null;
+    };
+    gaokaoCnScore: {
+      enabled: boolean;
+      intervalHours: number;
+      running: boolean;
+      lastStartedAt: string | null;
+      lastFinishedAt: string | null;
+      lastError: string | null;
+      nextRunAt: string | null;
+      cursorOffset?: number | null;
+      lastResult?: GaokaoSchedulerResult | null;
     };
   };
+}
+
+interface GaokaoSchedulerResult {
+  ok: boolean;
+  total: number;
+  candidateTotal: number;
+  offset: number;
+  nextOffset: number;
+  mapped: number;
+  planRows: number;
+  schoolScoreRows: number;
+  majorScoreRows: number;
+  sourceRows: number;
+  skipped: number;
+  errorCount: number;
+  savedAt: string;
+}
+
+interface AdmissionMapping {
+  universityId: number;
+  universityName?: string;
+  sourceSchoolId: string;
+  sourceSchoolName: string;
+  matchStatus: string;
+  confidence: number;
+  sourceUrl: string | null;
+  updatedAt: string;
+}
+
+interface AdmissionPlan {
+  id: number;
+  universityName: string;
+  sourceSchoolId: string;
+  year: number;
+  provinceName: string;
+  subjectType: string | null;
+  batch: string | null;
+  planGroup: string | null;
+  majorName: string | null;
+  planCount: number | null;
+  schoolPlanCount: number | null;
+  majorCount: number | null;
+  tuition: string | null;
+  duration: string | null;
+  campus: string | null;
+  selectionRequirements: string | null;
+  sourceUrl: string | null;
+  sourceRecordId: string | null;
+  fetchedAt: string;
+}
+
+interface AdmissionScore {
+  id: number;
+  scoreType: "school" | "major";
+  universityName: string;
+  sourceSchoolId: string;
+  year: number;
+  provinceName: string;
+  subjectType: string | null;
+  batch: string | null;
+  planGroup: string | null;
+  majorName: string | null;
+  minScore: number | null;
+  minRank: number | null;
+  avgScore: number | null;
+  avgRank: number | null;
+  maxScore: number | null;
+  planCount: number | null;
+  controlScore: number | null;
+  diffScore: number | null;
+  selectionRequirements: string | null;
+  sourceUrl: string | null;
+  sourceRecordId: string | null;
+  fetchedAt: string;
+}
+
+interface AdmissionCoverageYear {
+  year: number;
+  rowCount: number;
+  universityCount: number;
+  provinceCount: number;
+}
+
+interface AdmissionCoverage {
+  totalUniversities: number;
+  attemptedUniversities: number;
+  mappedUniversities: number;
+  unmappedUniversities: number;
+  pendingUniversities: number;
+  unmatchedUniversities: number;
+  ambiguousUniversities: number;
+  mappingIssueUniversities: number;
+  planUniversities: number;
+  scoreUniversities: number;
+  planRows: number;
+  scoreRows: number;
+  schoolScoreRows: number;
+  majorScoreRows: number;
+  sourceRows: number;
+  failedJobs: number;
+  latestPlanFetchedAt: string | null;
+  latestScoreFetchedAt: string | null;
+  latestSourceFetchedAt: string | null;
+  planYears: AdmissionCoverageYear[];
+  scoreYears: AdmissionCoverageYear[];
+}
+
+interface AdmissionUnmappedUniversity {
+  id: number;
+  name: string;
+  slug: string;
+  updatedAt: string;
+}
+
+interface AdmissionMappingIssue {
+  universityId: number;
+  universityName: string;
+  slug: string;
+  matchStatus: "unmatched" | "ambiguous";
+  sourceSchoolId: string;
+  sourceSchoolName: string;
+  updatedAt: string;
+}
+
+interface AdmissionSourceSnapshot {
+  id: number;
+  source: string;
+  sourceKind: string;
+  universityId: number | null;
+  universityName: string | null;
+  sourceSchoolId: string | null;
+  sourceUrl: string;
+  requestJson: string;
+  responseJson: string | null;
+  status: string;
+  error: string | null;
+  fetchedAt: string;
+}
+
+interface AdmissionSyncJob {
+  id: number;
+  source: string;
+  jobType: string;
+  status: string;
+  startedAt: string;
+  finishedAt: string | null;
+  targetJson: string;
+  resultJson: string | null;
+  error: string | null;
+}
+
+interface AdmissionSyncResult {
+  total?: number;
+  candidateTotal?: number;
+  offset?: number;
+  nextOffset?: number;
+  mapped?: number;
+  planRows?: number;
+  schoolScoreRows?: number;
+  majorScoreRows?: number;
+  sourceRows?: number;
+  skipped?: number;
+  errors?: Array<{ university?: string; message?: string }>;
+}
+
+interface GaokaoSchoolCandidate {
+  school_id: number | string;
+  name: string;
+  province_name?: string | null;
+  city_name?: string | null;
+  level_name?: string | null;
+  type_name?: string | null;
+  nature_name?: string | null;
+  f211?: number | string | null;
+  f985?: number | string | null;
+  dual_class_name?: string | null;
 }
 
 const NAV = [
@@ -104,6 +317,7 @@ const NAV = [
   { id: "site", label: "站点", icon: Settings },
   { id: "natural", label: "自然语言", icon: MessageSquareText },
   { id: "data", label: "高校数据", icon: Database },
+  { id: "admissions", label: "招生数据", icon: Database },
   { id: "aliases", label: "别名", icon: ListFilter },
   { id: "debug", label: "调试", icon: Send },
   { id: "logs", label: "日志", icon: Bot },
@@ -184,6 +398,7 @@ function App() {
         {page === "site" && <SitePage />}
         {page === "natural" && <NaturalLanguagePage />}
         {page === "data" && <DataPage />}
+        {page === "admissions" && <AdmissionsPage />}
         {page === "aliases" && <AliasesPage />}
         {page === "debug" && <DebugPage />}
         {page === "logs" && <LogsPage />}
@@ -261,6 +476,7 @@ function DashboardPage() {
         <Metric label="NapCat" value={dashboard?.onebot.connected ? "已连接" : "未连接"} tone={dashboard?.onebot.connected ? "good" : "warn"} />
         <Metric label="高校数据" value={String(dashboard?.totals.universities ?? 0)} />
         <Metric label="神人画像" value={String(dashboard?.totals.srgaoxiaoProfiles ?? 0)} />
+        <Metric label="招生映射" value={String(dashboard?.totals.admissionMappings ?? 0)} />
         <Metric label="消息日志" value={String(dashboard?.totals.messages ?? 0)} />
         <Metric label="LLM 调用" value={String(dashboard?.totals.llmCalls ?? 0)} />
       </div>
@@ -370,7 +586,7 @@ function NaturalLanguagePage() {
   };
   return (
     <section>
-      <Header title="自然语言设置" subtitle="控制群聊触发强度、上下文和冷却，减少误触发。" />
+      <Header title="自然语言设置" subtitle="控制群聊是否需要 @、上下文和冷却；消息入口由大模型判断。" />
       <Panel title="触发策略" icon={<MessageSquareText size={18} />}>
         <div className="toggle-row">
           <Switch label="群聊自然触发" checked={settings["nl.groupNaturalEnabled"] !== "false"} onChange={(v) => update("nl.groupNaturalEnabled", String(v))} />
@@ -378,7 +594,6 @@ function NaturalLanguagePage() {
           <Switch label="QQ 回复渲染为图片" checked={settings["onebot.replyAsImage"] !== "false"} onChange={(v) => update("onebot.replyAsImage", String(v))} />
         </div>
         <FormGrid>
-          <Input label="置信度阈值" value={String(settings["nl.confidenceThreshold"] ?? "")} onChange={(v) => update("nl.confidenceThreshold", v)} />
           <Input label="上下文分钟" value={String(settings["nl.contextTtlMinutes"] ?? "")} onChange={(v) => update("nl.contextTtlMinutes", v)} />
           <Input label="单用户冷却秒" value={String(settings["nl.cooldownSeconds"] ?? "")} onChange={(v) => update("nl.cooldownSeconds", v)} />
           <Input label="回复图片标题" value={String(settings["onebot.replyImageTitle"] ?? "高校资料助手")} onChange={(v) => update("onebot.replyImageTitle", v)} />
@@ -598,6 +813,654 @@ function DataPage() {
   );
 }
 
+function AdmissionsPage() {
+  const [settings, setSettings] = useState<Record<string, string | boolean>>({});
+  const [scheduler, setScheduler] = useState<SyncSchedulerStatus | null>(null);
+  const [universities, setUniversities] = useState<University[]>([]);
+  const [coverage, setCoverage] = useState<AdmissionCoverage | null>(null);
+  const [unmapped, setUnmapped] = useState<AdmissionUnmappedUniversity[]>([]);
+  const [mappingIssues, setMappingIssues] = useState<AdmissionMappingIssue[]>([]);
+  const [mappings, setMappings] = useState<AdmissionMapping[]>([]);
+  const [jobs, setJobs] = useState<AdmissionSyncJob[]>([]);
+  const [failedJobs, setFailedJobs] = useState<AdmissionSyncJob[]>([]);
+  const [status, setStatus] = useState("");
+  const [jobStatus, setJobStatus] = useState("");
+  const [jobType, setJobType] = useState("");
+  const [schoolQuery, setSchoolQuery] = useState("");
+  const [syncLimit, setSyncLimit] = useState("5");
+  const [syncOffset, setSyncOffset] = useState("0");
+  const [manualProvince, setManualProvince] = useState("");
+  const [manualSubjectTypes, setManualSubjectTypes] = useState("");
+  const [manualIncludePlans, setManualIncludePlans] = useState(true);
+  const [manualIncludeScores, setManualIncludeScores] = useState(true);
+  const [manualIncludeSpecialScores, setManualIncludeSpecialScores] = useState(true);
+  const [queryUniversityId, setQueryUniversityId] = useState("");
+  const [queryProvince, setQueryProvince] = useState("江苏");
+  const [querySubject, setQuerySubject] = useState("");
+  const [queryYears, setQueryYears] = useState(DEFAULT_ADMISSION_QUERY_YEARS);
+  const [queryBatch, setQueryBatch] = useState("");
+  const [queryScoreType, setQueryScoreType] = useState("");
+  const [queryMajor, setQueryMajor] = useState("");
+  const [plans, setPlans] = useState<AdmissionPlan[]>([]);
+  const [scores, setScores] = useState<AdmissionScore[]>([]);
+  const [sources, setSources] = useState<AdmissionSourceSnapshot[]>([]);
+  const [sourceUniversityId, setSourceUniversityId] = useState("");
+  const [sourceKind, setSourceKind] = useState("");
+  const [sourceStatus, setSourceStatus] = useState("");
+  const [sourceSnapshot, setSourceSnapshot] = useState<AdmissionSourceSnapshot | null>(null);
+  const [manualUniversityId, setManualUniversityId] = useState("");
+  const [manualSchoolId, setManualSchoolId] = useState("");
+  const [manualSchoolName, setManualSchoolName] = useState("");
+  const [sourceSchoolQuery, setSourceSchoolQuery] = useState("");
+  const [sourceSchoolCandidates, setSourceSchoolCandidates] = useState<GaokaoSchoolCandidate[]>([]);
+
+  const buildSourceQuery = (overrides: Partial<{ universityId: string; sourceKind: string; status: string; limit: string }> = {}) => {
+    const params = new URLSearchParams({ limit: overrides.limit ?? "20" });
+    const universityId = overrides.universityId ?? sourceUniversityId;
+    const kind = overrides.sourceKind ?? sourceKind;
+    const statusValue = overrides.status ?? sourceStatus;
+    if (universityId) params.set("universityId", universityId);
+    if (kind) params.set("sourceKind", kind);
+    if (statusValue) params.set("status", statusValue);
+    return params;
+  };
+
+  const loadSourceRows = async (overrides: Partial<{ universityId: string; sourceKind: string; status: string; limit: string }> = {}) => {
+    const rows = await api<AdmissionSourceSnapshot[]>(`/api/admissions/sources?${buildSourceQuery(overrides).toString()}`);
+    setSources(rows);
+    return rows;
+  };
+
+  const buildJobsQuery = (overrides: Partial<{ status: string; jobType: string; limit: string }> = {}) => {
+    const params = new URLSearchParams({ limit: overrides.limit ?? "30" });
+    const statusValue = overrides.status ?? jobStatus;
+    const jobTypeValue = overrides.jobType ?? jobType;
+    if (statusValue) params.set("status", statusValue);
+    if (jobTypeValue) params.set("jobType", jobTypeValue);
+    return params;
+  };
+
+  const load = async () => {
+    const [settingsData, schedulerData, coverageData, unmappedData, issueData, mappingData, jobData, failedJobData, sourceData, universityData] = await Promise.all([
+      api<Record<string, string | boolean>>("/api/settings"),
+      api<SyncSchedulerStatus>("/api/sync-scheduler"),
+      api<AdmissionCoverage>("/api/admissions/coverage"),
+      api<AdmissionUnmappedUniversity[]>(`/api/admissions/unmapped?query=${encodeURIComponent(schoolQuery)}&limit=30`),
+      api<AdmissionMappingIssue[]>(`/api/admissions/mapping-issues?query=${encodeURIComponent(schoolQuery)}&limit=30`),
+      api<AdmissionMapping[]>(`/api/admissions/mappings?query=${encodeURIComponent(schoolQuery)}&limit=80`),
+      api<AdmissionSyncJob[]>(`/api/admissions/jobs?${buildJobsQuery().toString()}`),
+      api<AdmissionSyncJob[]>("/api/admissions/jobs/failed?limit=10"),
+      api<AdmissionSourceSnapshot[]>(`/api/admissions/sources?${buildSourceQuery().toString()}`),
+      api<University[]>(`/api/universities?query=${encodeURIComponent(schoolQuery)}&limit=120`)
+    ]);
+    setSettings(settingsData);
+    setScheduler(schedulerData);
+    setCoverage(coverageData);
+    setUnmapped(unmappedData);
+    setMappingIssues(issueData);
+    setMappings(mappingData);
+    setJobs(jobData);
+    setFailedJobs(failedJobData);
+    setSources(sourceData);
+    setUniversities(universityData);
+  };
+
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => void load(), 15000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const updateSetting = (key: string, value: string | boolean) => setSettings((current) => ({ ...current, [key]: value }));
+
+  const saveSettings = async () => {
+    setStatus("保存招生同步设置中...");
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify(settings) });
+      await load();
+      setStatus("招生同步设置已保存");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const syncGaokao = async (singleUniversityId?: number) => {
+    setStatus("掌上高考同步中，学校和省份较多时会需要一会儿...");
+    try {
+      const result = await api<{ mapped: number; total: number; candidateTotal: number; offset: number; nextOffset: number; planRows: number; schoolScoreRows: number; majorScoreRows: number; errors: unknown[] }>("/api/data/sync-gaokao-cn", {
+        method: "POST",
+        body: JSON.stringify({
+          query: singleUniversityId ? undefined : schoolQuery,
+          universityId: singleUniversityId,
+          limit: Number(syncLimit) || Number(settings["sync.gaokaoCnLimit"] ?? "5") || 5,
+          offset: singleUniversityId ? 0 : Number(syncOffset) || 0,
+          provinces: manualProvince || String(settings["sync.gaokaoCnProvinces"] ?? ""),
+          subjectTypes: manualSubjectTypes || String(settings["sync.gaokaoCnSubjectTypes"] ?? ""),
+          scoreYears: String(settings["sync.gaokaoCnScoreYears"] ?? ""),
+          planYears: String(settings["sync.gaokaoCnPlanYears"] ?? ""),
+          includePlans: manualIncludePlans,
+          includeScores: manualIncludeScores,
+          includeSpecialScores: manualIncludeScores && manualIncludeSpecialScores,
+          eligibleOnly: settings["sync.gaokaoCnEligibleOnly"] !== "false"
+        })
+      });
+      setStatus(`同步完成：本批 ${result.total}/${result.candidateTotal || result.total} 所，offset ${result.offset} → ${result.nextOffset}，映射 ${result.mapped}，计划 ${result.planRows}，院校线 ${result.schoolScoreRows}，专业线 ${result.majorScoreRows}${result.errors.length ? `，失败 ${result.errors.length} 个，已保留当前 offset 便于重试` : ""}`);
+      if (!singleUniversityId && !result.errors.length) setSyncOffset(String(result.nextOffset));
+      await load();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const runQuery = async () => {
+    setStatus("查询招生数据...");
+    try {
+      const params = new URLSearchParams();
+      if (queryUniversityId) params.set("universityId", queryUniversityId);
+      if (queryProvince) params.set("province", queryProvince);
+      if (querySubject) params.set("subject", querySubject);
+      if (queryYears) params.set("years", queryYears);
+      if (queryBatch) params.set("batch", queryBatch);
+      if (queryScoreType) params.set("scoreType", queryScoreType);
+      if (queryMajor) params.set("major", queryMajor);
+      params.set("limit", "120");
+      const result = await api<{ plans: AdmissionPlan[]; scores: AdmissionScore[] }>(`/api/admissions/query?${params.toString()}`);
+      setPlans(result.plans);
+      setScores(result.scores);
+      if (queryUniversityId) setSourceUniversityId(queryUniversityId);
+      await loadSourceRows({ universityId: queryUniversityId || sourceUniversityId });
+      setStatus(`查询完成：计划 ${result.plans.length} 条，分数 ${result.scores.length} 条`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const refreshSources = async () => {
+    setStatus("筛选来源快照中...");
+    try {
+      const rows = await loadSourceRows();
+      setStatus(`来源快照已更新：${rows.length} 条`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const refreshJobs = async () => {
+    setStatus("筛选同步日志中...");
+    try {
+      const rows = await api<AdmissionSyncJob[]>(`/api/admissions/jobs?${buildJobsQuery().toString()}`);
+      setJobs(rows);
+      setStatus(`同步日志已更新：${rows.length} 条`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const saveManualMapping = async () => {
+    if (!manualUniversityId || !manualSchoolId) return;
+    setStatus("保存学校映射中...");
+    try {
+      await api(`/api/admissions/mappings/${manualUniversityId}`, {
+        method: "PUT",
+        body: JSON.stringify({ sourceSchoolId: manualSchoolId, sourceSchoolName: manualSchoolName })
+      });
+      setManualSchoolId("");
+      setManualSchoolName("");
+      await load();
+      setStatus("学校映射已保存");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const searchSourceSchools = async () => {
+    const query = sourceSchoolQuery.trim() || manualSchoolName.trim();
+    if (!query) {
+      setStatus("先输入要搜索的学校名");
+      return;
+    }
+    setStatus("搜索掌上高考学校中...");
+    try {
+      const params = new URLSearchParams({ query, limit: "12" });
+      if (manualUniversityId) params.set("universityId", manualUniversityId);
+      const rows = await api<GaokaoSchoolCandidate[]>(`/api/admissions/source-schools?${params.toString()}`);
+      setSourceSchoolCandidates(rows);
+      setStatus(rows.length ? `找到 ${rows.length} 个掌上高考候选` : "没有找到掌上高考候选");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const useSourceSchoolCandidate = (row: GaokaoSchoolCandidate) => {
+    setManualSchoolId(String(row.school_id));
+    setManualSchoolName(row.name);
+    setStatus(`已填入 ${row.name} (${row.school_id})`);
+  };
+
+  const openSourceSnapshot = async (id: string | null) => {
+    if (!id) return;
+    setStatus(`读取来源快照 #${id}...`);
+    try {
+      const snapshot = await api<AdmissionSourceSnapshot>(`/api/admissions/sources/${encodeURIComponent(id)}`);
+      setSourceSnapshot(snapshot);
+      setStatus(`已读取来源快照 #${id}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  return (
+    <section>
+      <Header title="招生数据" subtitle="使用掌上高考补充分省招生计划、历年分数线和最低位次。" />
+      <Panel title="覆盖进度" icon={<Activity size={18} />}>
+        <div className="metrics">
+          <Metric label="有效映射" value={coverageRatio(coverage?.mappedUniversities, coverage?.totalUniversities)} tone={coverage?.unmappedUniversities ? "warn" : "good"} />
+          <Metric label="待尝试" value={String(coverage?.pendingUniversities ?? 0)} tone={coverage?.pendingUniversities ? "warn" : "good"} />
+          <Metric label="匹配问题" value={`${coverage?.mappingIssueUniversities ?? 0} / 未匹配 ${coverage?.unmatchedUniversities ?? 0} / 歧义 ${coverage?.ambiguousUniversities ?? 0}`} tone={coverage?.mappingIssueUniversities ? "warn" : "good"} />
+          <Metric label="计划覆盖" value={coverageRatio(coverage?.planUniversities, coverage?.totalUniversities)} />
+          <Metric label="分数覆盖" value={coverageRatio(coverage?.scoreUniversities, coverage?.totalUniversities)} />
+          <Metric label="计划行" value={String(coverage?.planRows ?? 0)} />
+          <Metric label="分数行" value={`${coverage?.scoreRows ?? 0} / 专业线 ${coverage?.majorScoreRows ?? 0}`} />
+          <Metric label="来源快照" value={String(coverage?.sourceRows ?? 0)} />
+          <Metric label="失败任务" value={String(coverage?.failedJobs ?? 0)} tone={coverage?.failedJobs ? "warn" : "good"} />
+        </div>
+        <div className="scheduler-grid">
+          <KeyValue label="最近计划" value={formatTime(coverage?.latestPlanFetchedAt)} />
+          <KeyValue label="最近分数" value={formatTime(coverage?.latestScoreFetchedAt)} />
+          <KeyValue label="最近来源" value={formatTime(coverage?.latestSourceFetchedAt)} />
+          <KeyValue label="计划年份覆盖" value={formatCoverageYears(coverage?.planYears)} />
+          <KeyValue label="分数年份覆盖" value={formatCoverageYears(coverage?.scoreYears)} />
+        </div>
+        <div className="split">
+          <div className="table-wrap compact-table">
+            <table>
+              <thead><tr><th>待尝试学校</th><th>slug</th><th>资料时间</th><th></th></tr></thead>
+              <tbody>
+                {unmapped.map((school) => (
+                  <tr key={school.id}>
+                    <td>{school.name}</td>
+                    <td>{school.slug}</td>
+                    <td>{formatTime(school.updatedAt)}</td>
+                    <td><button onClick={() => { setManualUniversityId(String(school.id)); setManualSchoolName(school.name); setSourceSchoolQuery(school.name); }}><Save size={14} />修正</button></td>
+                  </tr>
+                ))}
+                {!unmapped.length && <tr><td colSpan={4}>暂无待尝试学校。</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <div className="table-wrap compact-table">
+            <table>
+              <thead><tr><th>匹配问题</th><th>状态</th><th>候选名</th><th>更新时间</th><th></th></tr></thead>
+              <tbody>
+                {mappingIssues.map((row) => (
+                  <tr key={row.universityId}>
+                    <td>{row.universityName}</td>
+                    <td>{row.matchStatus === "ambiguous" ? "歧义" : "未匹配"}</td>
+                    <td>{row.sourceSchoolName}</td>
+                    <td>{formatTime(row.updatedAt)}</td>
+                    <td><button onClick={() => { setManualUniversityId(String(row.universityId)); setManualSchoolName(row.universityName); setSourceSchoolQuery(row.universityName); }}><Save size={14} />修正</button></td>
+                  </tr>
+                ))}
+                {!mappingIssues.length && <tr><td colSpan={5}>暂无匹配问题。</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {failedJobs.length > 0 && <AdmissionJobsTable jobs={failedJobs} emptyText="暂无失败任务。" />}
+      </Panel>
+      <Panel title="定期同步" icon={<RefreshCcw size={18} />}>
+        <div className="toggle-row">
+          <Switch label="定期同步掌上高考" checked={settings["sync.gaokaoCnAutoEnabled"] === "true"} onChange={(v) => updateSetting("sync.gaokaoCnAutoEnabled", String(v))} />
+          <Switch label="仅同步中文院校候选" checked={settings["sync.gaokaoCnEligibleOnly"] !== "false"} onChange={(v) => updateSetting("sync.gaokaoCnEligibleOnly", String(v))} />
+        </div>
+        <FormGrid>
+          <Input label="计划间隔小时" value={String(settings["sync.gaokaoCnPlanIntervalHours"] ?? DEFAULT_ADMISSION_PLAN_INTERVAL_HOURS)} onChange={(v) => updateSetting("sync.gaokaoCnPlanIntervalHours", v)} />
+          <Input label="分数间隔小时" value={String(settings["sync.gaokaoCnScoreIntervalHours"] ?? DEFAULT_ADMISSION_SCORE_INTERVAL_HOURS)} onChange={(v) => updateSetting("sync.gaokaoCnScoreIntervalHours", v)} />
+          <Input label="每次学校数" value={String(settings["sync.gaokaoCnLimit"] ?? "10")} onChange={(v) => updateSetting("sync.gaokaoCnLimit", v)} />
+          <Input label="学校范围" value={String(settings["sync.gaokaoCnQuery"] ?? "")} onChange={(v) => updateSetting("sync.gaokaoCnQuery", v)} />
+          <Input label="省份范围" value={String(settings["sync.gaokaoCnProvinces"] ?? "")} onChange={(v) => updateSetting("sync.gaokaoCnProvinces", v)} hint="留空同步全国省份；填省名可限制范围。" />
+          <Input label="科类范围" value={String(settings["sync.gaokaoCnSubjectTypes"] ?? "")} onChange={(v) => updateSetting("sync.gaokaoCnSubjectTypes", v)} hint="留空按省份和年份自动选择：综合改革、物理/历史或理科/文科。" />
+          <Input label="分数年份" value={String(settings["sync.gaokaoCnScoreYears"] ?? DEFAULT_ADMISSION_SCORE_YEARS)} onChange={(v) => updateSetting("sync.gaokaoCnScoreYears", v)} />
+          <Input label="计划年份" value={String(settings["sync.gaokaoCnPlanYears"] ?? DEFAULT_ADMISSION_PLAN_YEARS)} onChange={(v) => updateSetting("sync.gaokaoCnPlanYears", v)} />
+          <Input label="失败重试次数" value={String(settings["sync.gaokaoCnRetryLimit"] ?? "1")} onChange={(v) => updateSetting("sync.gaokaoCnRetryLimit", v)} />
+        </FormGrid>
+        <div className="scheduler-grid">
+          <KeyValue label="计划状态" value={scheduler?.jobs.gaokaoCnPlan.running ? "运行中" : scheduler?.jobs.gaokaoCnPlan.enabled ? "已启用" : "未启用"} />
+          <KeyValue label="计划下次" value={formatScheduleTime(scheduler?.jobs.gaokaoCnPlan.nextRunAt)} />
+          <KeyValue label="分数状态" value={scheduler?.jobs.gaokaoCnScore.running ? "运行中" : scheduler?.jobs.gaokaoCnScore.enabled ? "已启用" : "未启用"} />
+          <KeyValue label="分数下次" value={formatScheduleTime(scheduler?.jobs.gaokaoCnScore.nextRunAt)} />
+          <KeyValue label="计划最近" value={formatTime(scheduler?.jobs.gaokaoCnPlan.lastFinishedAt)} />
+          <KeyValue label="分数最近" value={formatTime(scheduler?.jobs.gaokaoCnScore.lastFinishedAt)} />
+          <KeyValue label="计划下一批 offset" value={String(scheduler?.jobs.gaokaoCnPlan.cursorOffset ?? 0)} />
+          <KeyValue label="分数下一批 offset" value={String(scheduler?.jobs.gaokaoCnScore.cursorOffset ?? 0)} />
+          <KeyValue label="计划错误" value={scheduler?.jobs.gaokaoCnPlan.lastError ?? "-"} />
+          <KeyValue label="分数错误" value={scheduler?.jobs.gaokaoCnScore.lastError ?? "-"} />
+          <KeyValue label="计划最近批次" value={formatGaokaoLastResult(scheduler?.jobs.gaokaoCnPlan.lastResult)} />
+          <KeyValue label="分数最近批次" value={formatGaokaoLastResult(scheduler?.jobs.gaokaoCnScore.lastResult)} />
+        </div>
+        <div className="actions">
+          <button className="primary" onClick={saveSettings}><Save size={16} />保存设置</button>
+        </div>
+      </Panel>
+
+      <Panel title="手动同步" icon={<RefreshCcw size={18} />}>
+        <FormGrid>
+          <Input label="学校搜索" value={schoolQuery} onChange={setSchoolQuery} />
+          <Input label="只同步省份" value={manualProvince} onChange={setManualProvince} hint="留空使用定期设置；定期省份为空时同步全国。" />
+          <Input label="只同步科类" value={manualSubjectTypes} onChange={setManualSubjectTypes} hint="留空按省份和年份自动选择。" />
+          <Input label="同步学校数" value={syncLimit} onChange={setSyncLimit} />
+          <Input label="起始 offset" value={syncOffset} onChange={setSyncOffset} />
+        </FormGrid>
+        <div className="toggle-row">
+          <Switch label="同步招生计划" checked={manualIncludePlans} onChange={setManualIncludePlans} />
+          <Switch label="同步院校线" checked={manualIncludeScores} onChange={setManualIncludeScores} />
+          <Switch label="同步专业线" checked={manualIncludeScores && manualIncludeSpecialScores} onChange={setManualIncludeSpecialScores} />
+        </div>
+        <div className="actions">
+          <button onClick={() => void load()}><Search size={16} />刷新列表</button>
+          <button className="primary" onClick={() => void syncGaokao()}><RefreshCcw size={16} />按当前设置同步</button>
+        </div>
+        {status && <p className="notice">{status}</p>}
+      </Panel>
+
+      <div className="split">
+        <Panel title="学校映射" icon={<Database size={18} />}>
+          <div className="table-wrap compact-table">
+            <table>
+              <thead><tr><th>本地学校</th><th>掌上高考</th><th>ID</th><th>状态</th><th></th></tr></thead>
+              <tbody>
+                {mappings.map((row) => (
+                  <tr key={row.universityId}>
+                    <td>{row.universityName}</td>
+                    <td>{row.sourceSchoolName}</td>
+                    <td>{row.sourceSchoolId}</td>
+                    <td>{row.matchStatus}</td>
+                    <td><button onClick={() => void syncGaokao(row.universityId)}><RefreshCcw size={14} />同步</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+        <Panel title="手动修正映射" icon={<Save size={18} />}>
+          <label className="field">
+            <span>本地学校</span>
+            <select
+              value={manualUniversityId}
+              onChange={(event) => {
+                const value = event.target.value;
+                setManualUniversityId(value);
+                const school = universities.find((item) => String(item.id) === value);
+                if (school) {
+                  setManualSchoolName(school.name);
+                  setSourceSchoolQuery(school.name);
+                }
+              }}
+            >
+              <option value="">选择学校</option>
+              {universities.map((school) => <option key={school.id} value={school.id}>{school.name}</option>)}
+            </select>
+          </label>
+          <FormGrid>
+            <Input label="掌上高考搜索" value={sourceSchoolQuery} onChange={setSourceSchoolQuery} />
+            <Input label="掌上高考 school_id" value={manualSchoolId} onChange={setManualSchoolId} />
+            <Input label="掌上高考学校名" value={manualSchoolName} onChange={setManualSchoolName} />
+          </FormGrid>
+          <div className="actions">
+            <button onClick={searchSourceSchools}><Search size={16} />搜索掌上高考</button>
+            <button className="primary" onClick={saveManualMapping}><Save size={16} />保存映射</button>
+          </div>
+          {sourceSchoolCandidates.length > 0 && (
+            <div className="table-wrap compact-table">
+              <table>
+                <thead><tr><th>ID</th><th>学校</th><th>地区</th><th>层次/类型</th><th></th></tr></thead>
+                <tbody>
+                  {sourceSchoolCandidates.map((row) => (
+                    <tr key={String(row.school_id)}>
+                      <td>{row.school_id}</td>
+                      <td>{row.name}</td>
+                      <td>{[row.province_name, row.city_name].filter(Boolean).join(" ") || "-"}</td>
+                      <td>{[row.level_name, row.type_name, row.nature_name, row.f985 ? "985" : null, row.f211 ? "211" : null, row.dual_class_name].filter(Boolean).join(" / ") || "-"}</td>
+                      <td><button onClick={() => useSourceSchoolCandidate(row)}><Save size={14} />使用</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
+      </div>
+
+      <Panel title="招生数据查询" icon={<Search size={18} />}>
+        <FormGrid>
+          <label className="field">
+            <span>学校</span>
+            <select value={queryUniversityId} onChange={(event) => setQueryUniversityId(event.target.value)}>
+              <option value="">全部学校</option>
+              {universities.map((school) => <option key={school.id} value={school.id}>{school.name}</option>)}
+            </select>
+          </label>
+          <Input label="省份" value={queryProvince} onChange={setQueryProvince} />
+          <Input label="科类" value={querySubject} onChange={setQuerySubject} />
+          <Input label="年份" value={queryYears} onChange={setQueryYears} />
+          <Input label="批次" value={queryBatch} onChange={setQueryBatch} />
+          <label className="field">
+            <span>分数类型</span>
+            <select value={queryScoreType} onChange={(event) => setQueryScoreType(event.target.value)}>
+              <option value="">全部类型</option>
+              <option value="school">院校线</option>
+              <option value="major">专业线</option>
+            </select>
+          </label>
+          <Input label="专业" value={queryMajor} onChange={setQueryMajor} />
+        </FormGrid>
+        <div className="actions"><button className="primary" onClick={runQuery}><Search size={16} />查询</button></div>
+      </Panel>
+
+      <div className="logs-grid">
+        <Panel title="招生计划" icon={<Database size={18} />}>
+          <div className="table-wrap compact-table">
+            <table>
+              <thead><tr><th>学校</th><th>年份</th><th>省份</th><th>科类</th><th>批次/组</th><th>专业</th><th>计划</th><th>学费</th><th>学制</th><th>校区</th><th>选科</th><th>来源</th><th>抓取时间</th></tr></thead>
+              <tbody>
+                {plans.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.universityName}</td>
+                    <td>{row.year}</td>
+                    <td>{row.provinceName}</td>
+                    <td>{row.subjectType ?? "-"}</td>
+                    <td>{[row.batch, row.planGroup].filter(Boolean).join(" ") || "-"}</td>
+                    <td>{row.majorName ?? "院校汇总"}</td>
+                    <td>{row.planCount ?? row.schoolPlanCount ?? "-"}</td>
+                    <td>{row.tuition ?? "-"}</td>
+                    <td>{row.duration ?? "-"}</td>
+                    <td>{row.campus ?? "-"}</td>
+                    <td>{row.selectionRequirements ?? "-"}</td>
+                    <td>{row.sourceRecordId ? <button onClick={() => void openSourceSnapshot(row.sourceRecordId)}>#{row.sourceRecordId}</button> : "-"}</td>
+                    <td>{formatTime(row.fetchedAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+        <Panel title="分数线与位次" icon={<Database size={18} />}>
+          <div className="table-wrap compact-table">
+            <table>
+              <thead><tr><th>学校</th><th>年份</th><th>类型</th><th>科类</th><th>批次/组</th><th>专业</th><th>最低分</th><th>最低位次</th><th>平均分</th><th>平均位次</th><th>最高分</th><th>计划</th><th>省控线</th><th>线差</th><th>选科</th><th>来源</th><th>抓取时间</th></tr></thead>
+              <tbody>
+                {scores.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.universityName}</td>
+                    <td>{row.year}</td>
+                    <td>{row.scoreType === "major" ? "专业线" : "院校线"}</td>
+                    <td>{row.subjectType ?? "-"}</td>
+                    <td>{[row.batch, row.planGroup].filter(Boolean).join(" ") || "-"}</td>
+                    <td>{row.majorName ?? "-"}</td>
+                    <td>{row.minScore ?? "-"}</td>
+                    <td>{row.minRank ?? "-"}</td>
+                    <td>{row.avgScore ?? "-"}</td>
+                    <td>{row.avgRank ?? "-"}</td>
+                    <td>{row.maxScore ?? "-"}</td>
+                    <td>{row.planCount ?? "-"}</td>
+                    <td>{row.controlScore ?? "-"}</td>
+                    <td>{row.diffScore ?? "-"}</td>
+                    <td>{row.selectionRequirements ?? "-"}</td>
+                    <td>{row.sourceRecordId ? <button onClick={() => void openSourceSnapshot(row.sourceRecordId)}>#{row.sourceRecordId}</button> : "-"}</td>
+                    <td>{formatTime(row.fetchedAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      </div>
+
+      <Panel title="来源快照" icon={<Database size={18} />}>
+        <FormGrid>
+          <label className="field">
+            <span>来源学校</span>
+            <select value={sourceUniversityId} onChange={(event) => setSourceUniversityId(event.target.value)}>
+              <option value="">全部学校</option>
+              {universities.map((school) => <option key={school.id} value={school.id}>{school.name}</option>)}
+            </select>
+          </label>
+          <label className="field">
+            <span>来源类型</span>
+            <select value={sourceKind} onChange={(event) => setSourceKind(event.target.value)}>
+              <option value="">全部类型</option>
+              <option value="school-search">学校搜索</option>
+              <option value="school-profile">学校画像</option>
+              <option value="plan-school-summary">计划汇总</option>
+              <option value="plan-major">计划专业</option>
+              <option value="score-school">院校分数</option>
+              <option value="score-major">专业分数</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>状态</span>
+            <select value={sourceStatus} onChange={(event) => setSourceStatus(event.target.value)}>
+              <option value="">全部状态</option>
+              <option value="success">成功</option>
+              <option value="error">失败</option>
+            </select>
+          </label>
+        </FormGrid>
+        <div className="actions">
+          <button onClick={() => void refreshSources()}><Search size={16} />筛选来源</button>
+        </div>
+        <div className="table-wrap compact-table">
+          <table>
+            <thead><tr><th>ID</th><th>学校</th><th>类型</th><th>状态</th><th>掌上高考 ID</th><th>抓取时间</th><th>错误</th><th></th></tr></thead>
+            <tbody>
+              {sources.map((row) => (
+                <tr key={row.id}>
+                  <td>#{row.id}</td>
+                  <td>{row.universityName ?? "-"}</td>
+                  <td>{row.sourceKind}</td>
+                  <td>{row.status}</td>
+                  <td>{row.sourceSchoolId ?? "-"}</td>
+                  <td>{formatTime(row.fetchedAt)}</td>
+                  <td>{row.error ?? "-"}</td>
+                  <td><button onClick={() => void openSourceSnapshot(String(row.id))}><Search size={14} />查看</button></td>
+                </tr>
+              ))}
+              {!sources.length && <tr><td colSpan={8}>暂无来源快照。</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
+      <Panel title="同步日志" icon={<Bot size={18} />}>
+        <FormGrid>
+          <label className="field">
+            <span>任务类型</span>
+            <select value={jobType} onChange={(event) => setJobType(event.target.value)}>
+              <option value="">全部类型</option>
+              <option value="sync-plan">招生计划</option>
+              <option value="sync-score">分数线</option>
+              <option value="sync-mixed">计划+分数</option>
+              <option value="sync-mapping">学校映射</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>状态</span>
+            <select value={jobStatus} onChange={(event) => setJobStatus(event.target.value)}>
+              <option value="">全部状态</option>
+              <option value="running">运行中</option>
+              <option value="success">成功</option>
+              <option value="error">失败</option>
+            </select>
+          </label>
+        </FormGrid>
+        <div className="actions">
+          <button onClick={() => void refreshJobs()}><Search size={16} />筛选日志</button>
+        </div>
+        <AdmissionJobsTable jobs={jobs} emptyText="暂无同步任务。" />
+      </Panel>
+      {sourceSnapshot && (
+        <Panel title={`来源快照 #${sourceSnapshot.id}`} icon={<Database size={18} />}>
+          <div className="scheduler-grid">
+            <KeyValue label="学校" value={sourceSnapshot.universityName ?? "-"} />
+            <KeyValue label="来源类型" value={sourceSnapshot.sourceKind} />
+            <KeyValue label="掌上高考 ID" value={sourceSnapshot.sourceSchoolId ?? "-"} />
+            <KeyValue label="状态" value={sourceSnapshot.status} />
+            <KeyValue label="抓取时间" value={formatTime(sourceSnapshot.fetchedAt)} />
+            <KeyValue label="错误" value={sourceSnapshot.error ?? "-"} />
+          </div>
+          <KeyValue label="来源 URL" value={sourceSnapshot.sourceUrl} />
+          <div className="logs-grid">
+            <div>
+              <h3>请求参数</h3>
+              <pre className="json">{formatJsonText(sourceSnapshot.requestJson)}</pre>
+            </div>
+            <div>
+              <h3>原始响应</h3>
+              <pre className="json">{formatJsonText(sourceSnapshot.responseJson)}</pre>
+            </div>
+          </div>
+        </Panel>
+      )}
+    </section>
+  );
+}
+
+function AdmissionJobsTable({ jobs, emptyText }: { jobs: AdmissionSyncJob[]; emptyText: string }) {
+  return (
+    <div className="table-wrap compact-table">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>类型</th>
+            <th>状态</th>
+            <th>目标</th>
+            <th>结果</th>
+            <th>开始</th>
+            <th>结束</th>
+            <th>错误</th>
+          </tr>
+        </thead>
+        <tbody>
+          {jobs.map((job) => (
+            <tr key={job.id}>
+              <td>#{job.id}</td>
+              <td>{formatAdmissionJobType(job.jobType)}</td>
+              <td>{formatAdmissionJobStatus(job.status)}</td>
+              <td>{formatAdmissionJobTarget(job.targetJson)}</td>
+              <td>{formatAdmissionJobResult(job.resultJson)}</td>
+              <td>{formatTime(job.startedAt)}</td>
+              <td>{formatTime(job.finishedAt)}</td>
+              <td>{formatAdmissionJobError(job)}</td>
+            </tr>
+          ))}
+          {!jobs.length && <tr><td colSpan={8}>{emptyText}</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function AliasesPage() {
   const [aliases, setAliases] = useState<AliasRow[]>([]);
   const [schools, setSchools] = useState<University[]>([]);
@@ -735,12 +1598,134 @@ function FormGrid({ children }: { children: React.ReactNode }) {
   return <div className="form-grid">{children}</div>;
 }
 
-function Input({ label, value, onChange, type = "text" }: { label: string; value: string; onChange: (value: string) => void; type?: string }) {
-  return <label className="field"><span>{label}</span><input type={type} value={value} onChange={(e) => onChange(e.target.value)} /></label>;
+function Input({ label, value, onChange, type = "text", hint }: { label: string; value: string; onChange: (value: string) => void; type?: string; hint?: string }) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <input type={type} value={value} onChange={(e) => onChange(e.target.value)} />
+      {hint && <small>{hint}</small>}
+    </label>
+  );
 }
 
 function Switch({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
   return <label className="switch"><input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} /><span />{label}</label>;
+}
+
+function coverageRatio(value?: number, total?: number) {
+  const safeValue = Number(value ?? 0);
+  const safeTotal = Number(total ?? 0);
+  if (!safeTotal) return `${safeValue}/0`;
+  return `${safeValue}/${safeTotal} (${Math.round((safeValue / safeTotal) * 100)}%)`;
+}
+
+function formatCoverageYears(years?: AdmissionCoverageYear[]) {
+  if (!years?.length) return "-";
+  return years
+    .slice(0, 4)
+    .map((item) => `${item.year}: ${item.universityCount}校/${item.provinceCount}省/${item.rowCount}行`)
+    .join("；");
+}
+
+function formatAdmissionJobType(type: string) {
+  const labels: Record<string, string> = {
+    "sync-plan": "招生计划",
+    "sync-score": "分数线",
+    "sync-mixed": "计划+分数",
+    "sync-mapping": "学校映射"
+  };
+  return labels[type] ?? type;
+}
+
+function formatAdmissionJobStatus(status: string) {
+  const labels: Record<string, string> = {
+    running: "运行中",
+    success: "成功",
+    error: "失败"
+  };
+  return labels[status] ?? status;
+}
+
+function formatAdmissionJobTarget(value: string) {
+  const parsed = parseJsonObject(value);
+  if (!parsed) return formatShortText(value, 100);
+  const parts = [
+    parsed.universityId ? `学校ID ${parsed.universityId}` : null,
+    parsed.query ? `范围 ${parsed.query}` : null,
+    `limit ${parsed.limit ?? 10}`,
+    `offset ${parsed.offset ?? 0}`,
+    `省份 ${formatListValue(parsed.provinces)}`,
+    `科类 ${formatListValue(parsed.subjectTypes, "自动")}`,
+    parsed.planYears ? `计划 ${formatListValue(parsed.planYears)}` : null,
+    parsed.scoreYears ? `分数 ${formatListValue(parsed.scoreYears)}` : null,
+    parsed.includePlans === false ? "不抓计划" : null,
+    parsed.includeScores === false ? "不抓分数" : null,
+    parsed.includeSpecialScores === false ? "不抓专业线" : null
+  ].filter(Boolean);
+  return parts.join("，");
+}
+
+function formatAdmissionJobResult(value: string | null) {
+  const parsed = parseJsonObject<AdmissionSyncResult>(value);
+  if (!parsed) return "-";
+  const rows = Number(parsed.planRows ?? 0) + Number(parsed.schoolScoreRows ?? 0) + Number(parsed.majorScoreRows ?? 0);
+  const total = parsed.candidateTotal || parsed.total || 0;
+  return [
+    `${parsed.mapped ?? 0}/${total} 所`,
+    `offset ${parsed.offset ?? 0}→${parsed.nextOffset ?? 0}`,
+    `计划 ${parsed.planRows ?? 0}`,
+    `院校线 ${parsed.schoolScoreRows ?? 0}`,
+    `专业线 ${parsed.majorScoreRows ?? 0}`,
+    `来源 ${parsed.sourceRows ?? 0}`,
+    `总行 ${rows}`,
+    parsed.errors?.length ? `错误 ${parsed.errors.length}` : null
+  ].filter(Boolean).join("，");
+}
+
+function formatAdmissionJobError(job: AdmissionSyncJob) {
+  if (job.error) return formatShortText(job.error, 180);
+  const parsed = parseJsonObject<AdmissionSyncResult>(job.resultJson);
+  const errors = parsed?.errors ?? [];
+  if (!errors.length) return "-";
+  return errors
+    .slice(0, 2)
+    .map((item) => [item.university, item.message].filter(Boolean).join(": "))
+    .join("；");
+}
+
+function parseJsonObject<T extends Record<string, unknown> = Record<string, unknown>>(value?: string | null): T | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatListValue(value: unknown, fallback = "全部") {
+  if (Array.isArray(value)) return value.length ? value.join(",") : fallback;
+  if (typeof value === "string" && value.trim()) return value;
+  return fallback;
+}
+
+function formatShortText(value: string, maxLength: number) {
+  return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
+}
+
+function formatJsonText(value?: string | null) {
+  if (!value) return "-";
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
+function formatGaokaoLastResult(result?: GaokaoSchedulerResult | null) {
+  if (!result) return "-";
+  const rows = result.planRows + result.schoolScoreRows + result.majorScoreRows;
+  return `${result.ok ? "成功" : "失败"}：${result.total}/${result.candidateTotal || result.total} 所，offset ${result.offset}→${result.nextOffset}，映射 ${result.mapped}，行 ${rows}，来源 ${result.sourceRows}，错误 ${result.errorCount}，${formatTime(result.savedAt)}`;
 }
 
 function formatTime(value?: string | null) {

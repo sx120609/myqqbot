@@ -70,7 +70,22 @@ export interface SchoolReviewInput {
 export class UniversityRepository {
   constructor(private readonly database: AppDatabase) {}
 
-  countUniversities(): number {
+  countUniversities(query = ""): number {
+    const trimmed = query.trim();
+    if (trimmed) {
+      const pattern = `%${trimmed}%`;
+      const row = this.database.db
+        .prepare(
+          `
+          SELECT COUNT(DISTINCT u.id) AS count
+          FROM universities u
+          LEFT JOIN aliases a ON a.university_id = u.id
+          WHERE u.name LIKE ? OR u.slug LIKE ? OR a.alias LIKE ?
+        `
+        )
+        .get(pattern, pattern, pattern) as { count: number };
+      return row.count;
+    }
     const row = this.database.db.prepare("SELECT COUNT(*) AS count FROM universities").get() as { count: number };
     return row.count;
   }
@@ -123,8 +138,9 @@ export class UniversityRepository {
     });
   }
 
-  listUniversities(query = "", limit = 50): UniversityRow[] {
+  listUniversities(query = "", limit = 50, offset = 0): UniversityRow[] {
     const normalized = `%${query.trim()}%`;
+    const safeOffset = Math.max(0, Math.floor(offset));
     if (query.trim()) {
       return this.database.db
         .prepare(
@@ -135,9 +151,10 @@ export class UniversityRepository {
           WHERE u.name LIKE ? OR u.slug LIKE ? OR a.alias LIKE ?
           ORDER BY u.name
           LIMIT ?
+          OFFSET ?
         `
         )
-        .all(normalized, normalized, normalized, limit) as unknown as UniversityRow[];
+        .all(normalized, normalized, normalized, limit, safeOffset) as unknown as UniversityRow[];
     }
     return this.database.db
       .prepare(
@@ -146,9 +163,10 @@ export class UniversityRepository {
         FROM universities
         ORDER BY name
         LIMIT ?
+        OFFSET ?
       `
       )
-      .all(limit) as unknown as UniversityRow[];
+      .all(limit, safeOffset) as unknown as UniversityRow[];
   }
 
   listAllUniversities(): UniversityRow[] {
@@ -411,7 +429,7 @@ export class UniversityRepository {
   }
 
   getTopicQuestions(universityId: number, topic: string | null, searchText: string, limit = 6): QuestionWithAnswers[] {
-    let rows: Array<{ id: number; question: string; topic: string; position: number }>;
+    let rows: Array<{ id: number; question: string; topic: string; position: number }> = [];
     if (topic && topic !== "general") {
       rows = this.database.db
         .prepare(
@@ -424,7 +442,9 @@ export class UniversityRepository {
         `
         )
         .all(universityId, topic, limit) as Array<{ id: number; question: string; topic: string; position: number }>;
-    } else {
+    }
+
+    if (!rows.length) {
       rows = this.database.db
         .prepare(
           `

@@ -1,4 +1,10 @@
 import type { AppDatabase } from "./db.js";
+import {
+  defaultAdmissionPlanIntervalHours,
+  defaultAdmissionPlanYears,
+  defaultAdmissionScoreIntervalHours,
+  defaultAdmissionScoreYears
+} from "./services/admission-calendar.js";
 
 export interface RuntimeSettings {
   onebot: {
@@ -23,7 +29,6 @@ export interface RuntimeSettings {
   naturalLanguage: {
     groupNaturalEnabled: boolean;
     requireMentionInGroup: boolean;
-    confidenceThreshold: number;
     contextTtlMinutes: number;
     cooldownSeconds: number;
   };
@@ -34,8 +39,22 @@ export interface RuntimeSettings {
     srgaoxiaoIntervalHours: number;
     srgaoxiaoLimit: number;
     srgaoxiaoReviewMaxPages: number;
+    gaokaoCnAutoEnabled: boolean;
+    gaokaoCnIntervalHours: number;
+    gaokaoCnPlanIntervalHours: number;
+    gaokaoCnScoreIntervalHours: number;
+    gaokaoCnLimit: number;
+    gaokaoCnQuery: string;
+    gaokaoCnProvinces: string;
+    gaokaoCnSubjectTypes: string;
+    gaokaoCnEligibleOnly: boolean;
+    gaokaoCnScoreYears: string;
+    gaokaoCnPlanYears: string;
+    gaokaoCnRetryLimit: number;
   };
 }
+
+const LEGACY_GAOKAO_PROVINCES_DEFAULT = "江苏,浙江,安徽,河南,山东,四川,广东";
 
 const DEFAULTS: Record<string, string> = {
   "onebot.accessToken": process.env.ONEBOT_ACCESS_TOKEN ?? "",
@@ -53,7 +72,6 @@ const DEFAULTS: Record<string, string> = {
   "llm.timeoutMs": process.env.LLM_TIMEOUT_MS ?? "120000",
   "nl.groupNaturalEnabled": "true",
   "nl.requireMentionInGroup": "false",
-  "nl.confidenceThreshold": "0.55",
   "nl.contextTtlMinutes": "10",
   "nl.cooldownSeconds": "5",
   "sync.collegesAutoEnabled": "false",
@@ -61,7 +79,19 @@ const DEFAULTS: Record<string, string> = {
   "sync.srgaoxiaoAutoEnabled": "false",
   "sync.srgaoxiaoIntervalHours": "24",
   "sync.srgaoxiaoLimit": "120",
-  "sync.srgaoxiaoReviewMaxPages": "20"
+  "sync.srgaoxiaoReviewMaxPages": "20",
+  "sync.gaokaoCnAutoEnabled": "false",
+  "sync.gaokaoCnIntervalHours": "24",
+  "sync.gaokaoCnPlanIntervalHours": String(defaultAdmissionPlanIntervalHours()),
+  "sync.gaokaoCnScoreIntervalHours": String(defaultAdmissionScoreIntervalHours()),
+  "sync.gaokaoCnLimit": "10",
+  "sync.gaokaoCnQuery": "",
+  "sync.gaokaoCnProvinces": "",
+  "sync.gaokaoCnSubjectTypes": "",
+  "sync.gaokaoCnEligibleOnly": "true",
+  "sync.gaokaoCnScoreYears": defaultAdmissionScoreYears().join(","),
+  "sync.gaokaoCnPlanYears": defaultAdmissionPlanYears().join(","),
+  "sync.gaokaoCnRetryLimit": "1"
 };
 
 export class SettingsStore {
@@ -112,7 +142,6 @@ export class SettingsStore {
       naturalLanguage: {
         groupNaturalEnabled: this.getBoolean("nl.groupNaturalEnabled", true),
         requireMentionInGroup: this.getBoolean("nl.requireMentionInGroup", false),
-        confidenceThreshold: this.getNumber("nl.confidenceThreshold", 0.55),
         contextTtlMinutes: this.getNumber("nl.contextTtlMinutes", 10),
         cooldownSeconds: this.getNumber("nl.cooldownSeconds", 5)
       },
@@ -122,7 +151,22 @@ export class SettingsStore {
         srgaoxiaoAutoEnabled: this.getBoolean("sync.srgaoxiaoAutoEnabled", false),
         srgaoxiaoIntervalHours: this.getNumber("sync.srgaoxiaoIntervalHours", 24),
         srgaoxiaoLimit: this.getNumber("sync.srgaoxiaoLimit", 120),
-        srgaoxiaoReviewMaxPages: this.getNumber("sync.srgaoxiaoReviewMaxPages", 20)
+        srgaoxiaoReviewMaxPages: this.getNumber("sync.srgaoxiaoReviewMaxPages", 20),
+        gaokaoCnAutoEnabled: this.getBoolean("sync.gaokaoCnAutoEnabled", false),
+        gaokaoCnIntervalHours: this.getNumber("sync.gaokaoCnIntervalHours", 24),
+        gaokaoCnPlanIntervalHours: this.getNumber(
+          "sync.gaokaoCnPlanIntervalHours",
+          this.getNumber("sync.gaokaoCnIntervalHours", defaultAdmissionPlanIntervalHours())
+        ),
+        gaokaoCnScoreIntervalHours: this.getNumber("sync.gaokaoCnScoreIntervalHours", defaultAdmissionScoreIntervalHours()),
+        gaokaoCnLimit: this.getNumber("sync.gaokaoCnLimit", 10),
+        gaokaoCnQuery: this.getString("sync.gaokaoCnQuery", ""),
+        gaokaoCnProvinces: this.getString("sync.gaokaoCnProvinces", ""),
+        gaokaoCnSubjectTypes: this.getString("sync.gaokaoCnSubjectTypes", ""),
+        gaokaoCnEligibleOnly: this.getBoolean("sync.gaokaoCnEligibleOnly", true),
+        gaokaoCnScoreYears: this.getString("sync.gaokaoCnScoreYears", defaultAdmissionScoreYears().join(",")),
+        gaokaoCnPlanYears: this.getString("sync.gaokaoCnPlanYears", defaultAdmissionPlanYears().join(",")),
+        gaokaoCnRetryLimit: this.getNumber("sync.gaokaoCnRetryLimit", 1)
       }
     };
   }
@@ -192,6 +236,7 @@ export class SettingsStore {
       }
       upgradeStmt.run("1600", now, "llm.maxTokens", "900");
       upgradeStmt.run("120000", now, "llm.timeoutMs", "45000");
+      upgradeStmt.run("", now, "sync.gaokaoCnProvinces", LEGACY_GAOKAO_PROVINCES_DEFAULT);
     });
   }
 }

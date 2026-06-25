@@ -18,6 +18,8 @@ import { UniversityRepository } from "./services/university-repository.js";
 import { registerAdminAuth } from "./services/admin-auth.js";
 import { AutoSyncScheduler } from "./services/auto-sync-scheduler.js";
 import { AnswerSourceStore } from "./services/answer-source-store.js";
+import { AdmissionRepository } from "./services/admission-repository.js";
+import { GaokaoCnAdapter } from "./services/gaokao-cn-adapter.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -25,21 +27,23 @@ async function main(): Promise<void> {
   const settings = new SettingsStore(database);
   const logs = new LogStore(database);
   const answerSources = new AnswerSourceStore(database);
+  const admissions = new AdmissionRepository(database);
   const universities = new UniversityRepository(database);
   const sync = new DataSyncService(config, database, universities);
   const srgaoxiaoSync = new SrgaoxiaoSyncService(config, universities);
+  const gaokaoCn = new GaokaoCnAdapter(universities, admissions);
   const llm = new LlmClient(settings, logs);
   const nlu = new NaturalLanguageService(universities);
-  const processor = new MessageProcessor(settings, universities, nlu, llm, logs, srgaoxiaoSync, answerSources);
+  const processor = new MessageProcessor(settings, universities, nlu, llm, logs, srgaoxiaoSync, answerSources, admissions, gaokaoCn);
   const onebot = new OneBotGateway(settings, processor);
-  const autoSync = new AutoSyncScheduler(settings, sync, srgaoxiaoSync);
+  const autoSync = new AutoSyncScheduler(settings, sync, srgaoxiaoSync, gaokaoCn);
 
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });
   await registerAdminAuth(app, config, settings);
   await onebot.register(app);
   app.addHook("onClose", async () => autoSync.stop());
-  await registerApi(app, { config, database, settings, universities, sync, answerSources, srgaoxiaoSync, autoSync, llm, logs, processor, onebot });
+  await registerApi(app, { config, database, settings, universities, admissions, sync, answerSources, srgaoxiaoSync, gaokaoCn, autoSync, llm, logs, processor, onebot });
 
   const webRoot = resolve(config.cwd, "dist/web");
   if (existsSync(webRoot)) {

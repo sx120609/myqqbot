@@ -8,6 +8,7 @@
 - 自然语言学校和主题识别，支持“安大”“西电”“南航”等默认别名。
 - 同步并解析 CollegesChat `generated` 分支的 `docs/universities/*.md`。
 - 可按需同步神人高校网学校画像，补充城市、标签、地址、占地、评分等结构化信息，并缓存变化学校的评论。
+- 可按需同步掌上高考招生数据，补充分省招生计划、历年录取分、最低位次和专业分。
 - SQLite 本地索引，包含学校、问题、回答、问卷 ID 和来源链接。
 - OpenAI-compatible LLM 客户端，可配置 sub2api 源站、API Key 和模型名。
 - 支持 QQ 图片消息，会把图片传给支持视觉能力的模型进行回复。
@@ -110,6 +111,30 @@ sudo SRGAOXIAO_SYNC_ALL=1 SRGAOXIAO_PAGE_SIZE=100 SRGAOXIAO_REVIEW_MAX_PAGES=20 
 
 WebUI 的“高校数据”页可以直接开启和调整应用内自动同步，包括 CollegesChat 主数据同步间隔、神人高校全站画像同步间隔、评论每校最多页数。应用内自动同步设置保存在 SQLite 中，不需要 root 权限。
 
+同步一批掌上高考招生数据，默认抓 2026 招生计划和 2023-2025 历史分数线，先跑 10 所学校测试：
+
+```bash
+cd /opt/myqqbot
+sudo npm run sync:gaokao-cn -- --limit=10
+```
+
+也可以用部署脚本直接跑：
+
+```bash
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --limit=10
+```
+
+常用筛选和续跑：
+
+```bash
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --query=中国药科大学 --provinces=四川,河南 --limit=1
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --plans-only --plan-years=2026 --limit=20
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --scores-only --score-years=2025,2024,2023 --offset=20 --limit=20
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --plans-only --loop --max-batches=10 --limit=20
+```
+
+每批结束会打印 `next offset` 和下一批命令。WebUI 的“招生数据”页也可以开启掌上高考定期同步、调整同步年份、省份范围、每批学校数、失败重试次数，并查看映射和失败日志。
+
 如需定期更新高校数据，可启用 systemd 定时器，默认每天 `03:40` 附近执行一次：
 
 ```bash
@@ -206,4 +231,4 @@ npm.cmd run build
 
 ## 数据来源与提示
 
-高校生活资料来自 [CollegesChat/university-information](https://github.com/CollegesChat/university-information) 的问卷生成文档。院校定位可补充 [神人高校网](https://srgaoxiao.cn/) 的公开学校画像缓存，用于城市、标签、校区、占地、建校年份和聚合评分等信息；评论只在定期同步发现变化时缓存，或聊天时由 LLM 判断确实需要后实时拉取当前学校少量评论。所有神人数据都不用于模型训练。机器人会优先引用问卷资料总结宿舍、食堂、校园网、管理等生活体验。回复会提示“院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考”，不会把问卷内容包装成官方结论，也不会把常识补充伪装成该校确定事实。
+高校生活资料来自 [CollegesChat/university-information](https://github.com/CollegesChat/university-information) 的问卷生成文档。院校定位可补充 [神人高校网](https://srgaoxiao.cn/) 的公开学校画像缓存，用于城市、标签、校区、占地、建校年份和聚合评分等信息；评论只在定期同步发现变化时缓存，或聊天时由 LLM 判断确实需要后实时拉取当前学校少量评论。招生计划、历年录取分和最低位次可补充 [掌上高考](https://www.gaokao.cn/) 的第三方聚合数据。所有神人数据都不用于模型训练。机器人会优先引用问卷资料总结宿舍、食堂、校园网、管理等生活体验。回复会提示“院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考”，不会把问卷内容包装成官方结论，也不会把常识补充伪装成该校确定事实。招生相关回答会提醒最终以省考试院和学校招生网为准。

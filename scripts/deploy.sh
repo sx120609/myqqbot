@@ -54,6 +54,8 @@ Usage:
                                   Sync cached srgaoxiao school profiles.
   scripts/deploy.sh sync-srgaoxiao-full
                                   Sync all srgaoxiao school profiles once.
+  scripts/deploy.sh sync-gaokao-cn [--limit=10 ...]
+                                  Sync Gaokao.cn admission plans and score lines.
   scripts/deploy.sh enable-sync-timer
                                   Enable daily CollegesChat data sync timer.
   scripts/deploy.sh disable-sync-timer
@@ -676,6 +678,17 @@ sync_srgaoxiao_full_command() {
   fi
 }
 
+sync_gaokao_cn_command() {
+  ensure_linux_and_node
+  resolve_app_dir
+  cd "$APP_DIR"
+  if [ -f dist/server/scripts/sync-gaokao-cn.js ]; then
+    node dist/server/scripts/sync-gaokao-cn.js "$@"
+  else
+    npm run sync:gaokao-cn -- "$@"
+  fi
+}
+
 systemd_command() {
   local action="$1"
   [ "$SKIP_SYSTEMD" != "1" ] || fail "SKIP_SYSTEMD=1 is set."
@@ -709,6 +722,9 @@ main() {
       ;;
     sync-srgaoxiao-full)
       sync_srgaoxiao_full_command
+      ;;
+    sync-gaokao-cn)
+      sync_gaokao_cn_command "$@"
       ;;
     restart|status|logs)
       systemd_command "$COMMAND"

@@ -1,5 +1,4 @@
 import { basename } from "node:path";
-import { topicForQuestion } from "./topics.js";
 
 export interface ParsedAnswer {
   sourceId: string;
@@ -46,7 +45,7 @@ export function parseUniversityMarkdown(filePath: string, sourceUrl: string, mar
     const answers = parseAnswers(block, sources);
     questions.push({
       question,
-      topic: topicForQuestion(question).key,
+      topic: "general",
       position: index,
       answers
     });
@@ -102,4 +101,3 @@ function parseAnswers(block: string, sources: Map<string, SourceInfo>): ParsedAn
   if (current && current.text.trim()) answers.push(current);
   return answers;
 }
-

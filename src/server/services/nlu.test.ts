@@ -16,7 +16,7 @@ describe("NaturalLanguageService", () => {
     }
   });
 
-  it("matches default aliases and topic keywords", () => {
+  it("returns only school candidates and leaves entry routing to the LLM", () => {
     const dir = mkdtempSync(join(tmpdir(), "myqqbot-test-"));
     tempDirs.push(dir);
     const database = new AppDatabase(join(dir, "test.sqlite"));
@@ -26,9 +26,27 @@ describe("NaturalLanguageService", () => {
     const nlu = new NaturalLanguageService(repo);
     const analysis = nlu.analyze("安大宿舍怎么样");
 
-    expect(analysis.isUniversityQuery).toBe(true);
-    expect(analysis.topicKey).toBe("dorm");
     expect(analysis.candidates[0].name).toBe("安徽大学");
+    expect(Object.keys(analysis).sort()).toEqual(["candidates", "reason"]);
+    database.close();
+  });
+
+  it("supports paged university listing for batch sync", () => {
+    const dir = mkdtempSync(join(tmpdir(), "myqqbot-test-"));
+    tempDirs.push(dir);
+    const database = new AppDatabase(join(dir, "test.sqlite"));
+    const repo = new UniversityRepository(database);
+    repo.importAll([
+      fixtureUniversity("安徽大学", "an-hui-da-xue"),
+      fixtureUniversity("北京大学", "bei-jing-da-xue"),
+      fixtureUniversity("清华大学", "qing-hua-da-xue")
+    ]);
+
+    expect(repo.countUniversities()).toBe(3);
+    expect(repo.countUniversities("大学")).toBe(3);
+    expect(repo.listUniversities("", 1, 0).map((row) => row.name)).toEqual(["北京大学"]);
+    expect(repo.listUniversities("", 1, 1).map((row) => row.name)).toEqual(["安徽大学"]);
+    expect(repo.listUniversities("", 1, 2).map((row) => row.name)).toEqual(["清华大学"]);
     database.close();
   });
 });
@@ -50,4 +68,3 @@ function fixtureUniversity(name: string, slug: string): ParsedUniversity {
     ]
   };
 }
-

@@ -1,8 +1,18 @@
-import { topicLabel } from "../domain/topics.js";
+import { TOPICS, topicLabel } from "../domain/topics.js";
 import type { SettingsStore } from "../settings.js";
+import { normalizeProvinceName } from "./admission-repository.js";
+import type { AdmissionPlanRow, AdmissionRepository, AdmissionScoreRow, AdmissionSourceRow } from "./admission-repository.js";
+import {
+  currentAdmissionDate,
+  currentAdmissionYear,
+  defaultAdmissionPlanYears,
+  defaultAdmissionScoreYearRange,
+  defaultAdmissionScoreYears
+} from "./admission-calendar.js";
 import type { LlmClient } from "./llm-client.js";
 import type { LogStore } from "./log-store.js";
 import type { AnswerSourceInput, AnswerSourceStore } from "./answer-source-store.js";
+import type { GaokaoCnAdapter, GaokaoCnSyncResult } from "./gaokao-cn-adapter.js";
 import type { MessageAnalysis, NaturalLanguageService } from "./nlu.js";
 import type { SrgaoxiaoSyncService } from "./srgaoxiao-sync.js";
 import type { UniversityRepository } from "./university-repository.js";
@@ -39,6 +49,7 @@ interface ConversationContext {
   universityId: number;
   universityName: string;
   expiresAt: number;
+  pendingAdmission?: AdmissionFollowUpContext;
 }
 
 interface ImageSchoolContext {
@@ -54,6 +65,62 @@ interface ComparisonSchoolContext extends ImageSchoolContext {
   srgaoxiaoReviewsText: string | null;
 }
 
+interface AdmissionIntent {
+  isAdmissionQuery: boolean;
+  confidence: number;
+  schoolNames: string[];
+  province: string | null;
+  subjectType: string | null;
+  years: number[];
+  majorName: string | null;
+  queryTypes: Array<"plan" | "score" | "rank" | "major_score" | "trend" | "compare">;
+  needsFollowUp: boolean;
+  followUpQuestion: string | null;
+  reason: string;
+}
+
+interface AdmissionFollowUpContext {
+  province: string | null;
+  subjectType: string | null;
+  years: number[];
+  majorName: string | null;
+  queryTypes: AdmissionIntent["queryTypes"];
+}
+
+interface MessageRouteIntent extends AdmissionIntent {
+  route: "admission" | "university_info" | "casual" | "ignore";
+  shouldReply: boolean;
+  topicKey: string | null;
+  topicLabel: string | null;
+}
+
+interface AdmissionSyncSummary {
+  total: number;
+  candidateTotal: number;
+  offset: number;
+  nextOffset: number;
+  mapped: number;
+  planRows: number;
+  schoolScoreRows: number;
+  majorScoreRows: number;
+  sourceRows: number;
+  skipped: number;
+  errorCount: number;
+}
+
+type ResolvedUniversity = NonNullable<ReturnType<UniversityRepository["getUniversity"]>>;
+
+interface AdmissionSchoolData {
+  university: ResolvedUniversity;
+  sourceUrl: string | null;
+  plans: AdmissionPlanRow[];
+  scores: AdmissionScoreRow[];
+  sourceSnapshots: AdmissionSourceRow[];
+  syncSummary: AdmissionSyncSummary | null;
+  syncError: string | null;
+  contextText: string;
+}
+
 export class MessageProcessor {
   private readonly contexts = new Map<string, ConversationContext>();
   private readonly cooldown = new Map<string, number>();
@@ -65,7 +132,9 @@ export class MessageProcessor {
     private readonly llm: LlmClient,
     private readonly logs: LogStore,
     private readonly srgaoxiao?: SrgaoxiaoSyncService,
-    private readonly answerSources?: AnswerSourceStore
+    private readonly answerSources?: AnswerSourceStore,
+    private readonly admissions?: AdmissionRepository,
+    private readonly gaokaoCn?: GaokaoCnAdapter
   ) {}
 
   async process(input: IncomingMessage): Promise<ProcessedMessage> {
@@ -85,29 +154,37 @@ export class MessageProcessor {
 
     const now = Date.now();
     const context = this.getContext(input.conversationKey, now);
-    const analysis = this.nlu.analyze(input.text, context?.universityId);
-    const threshold = runtime.naturalLanguage.confidenceThreshold;
-    const greeting = isGreeting(input.text);
 
     if (input.messageType === "group") {
       if (runtime.naturalLanguage.requireMentionInGroup && !input.mentionedBot) {
-        return this.finish(input, { handled: false, reason: "群聊需要 @ 机器人", analysis });
+        return this.finish(input, { handled: false, reason: "群聊需要 @ 机器人" });
       }
       if (!runtime.naturalLanguage.groupNaturalEnabled && !input.mentionedBot) {
-        return this.finish(input, { handled: false, reason: "群聊自然触发已关闭", analysis });
+        return this.finish(input, { handled: false, reason: "群聊自然触发已关闭" });
       }
+    }
+
+    let routeIntent = await this.analyzeMessageRouteWithLlm(input, context);
+    routeIntent = this.mergeAdmissionFollowUp(routeIntent, context);
+    const shouldReply = routeIntent?.shouldReply || input.messageType === "private" || input.mentionedBot;
+    const analysis =
+      routeIntent && shouldReply && routeIntent.route !== "ignore" && shouldResolveUniversitiesLocally(routeIntent)
+        ? this.nlu.analyze(routeIntent.schoolNames.join(" "), context?.universityId)
+        : emptyMessageAnalysis();
+    if (!routeIntent || routeIntent.route === "ignore" || !shouldReply) {
+      return this.finish(input, { handled: false, reason: "模型判断无需回复", analysis: { routeIntent, schoolAnalysis: analysis } });
     }
 
     if (input.images?.length) {
       const cooldownKey = `${input.conversationKey}:${input.userId}:image`;
       const nextAllowed = this.cooldown.get(cooldownKey) ?? 0;
       if (input.platform === "onebot" && now < nextAllowed) {
-        return this.finish(input, { handled: false, reason: "图片回复冷却中", analysis });
+        return this.finish(input, { handled: false, reason: "图片回复冷却中", analysis: { routeIntent, schoolAnalysis: analysis } });
       }
       this.cooldown.set(cooldownKey, now + runtime.naturalLanguage.cooldownSeconds * 1000);
 
-      const schoolContext = this.buildImageSchoolContext(analysis, context, input.text);
-      const reply = await this.answerImageWithLlm(input.text, input.images, analysis, schoolContext);
+      const schoolContext = this.buildImageSchoolContext(routeIntent, analysis, input.conversationKey, now, input.text);
+      const reply = await this.answerImageWithLlm(input.text, input.images, analysis, schoolContext, routeIntent);
       const sourcePageUrl = schoolContext
         ? this.createAnswerSourcePage({
             question: input.text.trim() || "[图片消息]",
@@ -131,34 +208,26 @@ export class MessageProcessor {
       }
       return this.finish(input, {
         handled: true,
-        reason: "图片理解",
+        reason: "模型判断为图片消息",
         reply,
         sourcePageUrl,
-        analysis
+        analysis: { routeIntent, schoolAnalysis: analysis }
       });
     }
 
-    if (greeting) {
-      const reply = await this.answerCasualWithLlm(input.text, analysis, context, "greeting");
+    if (routeIntent.route === "admission") {
+      const admissionReply = await this.answerAdmissionQuery(input, routeIntent, analysis, now);
+      return this.finish(input, admissionReply);
+    }
+
+    if (routeIntent.route === "casual") {
+      const reply = await this.answerCasualWithLlm(input.text, context, "casual-message");
       return this.finish(input, {
         handled: true,
-        reason: "问候引导",
+        reason: "模型判断为普通对话",
         reply,
-        analysis
+        analysis: { routeIntent, schoolAnalysis: analysis }
       });
-    }
-
-    if (!analysis.isUniversityQuery || analysis.confidence < threshold) {
-      if (shouldExplainLowConfidence(input, analysis, context)) {
-        const reply = await this.answerCasualWithLlm(input.text, analysis, context, "casual-message");
-        return this.finish(input, {
-          handled: true,
-          reason: `转交模型自然回复：${analysis.confidence.toFixed(2)}`,
-          reply,
-          analysis
-        });
-      }
-      return this.finish(input, { handled: false, reason: `未触发回复：${analysis.confidence.toFixed(2)}`, analysis });
     }
 
     const cooldownKey = `${input.conversationKey}:${input.userId}`;
@@ -168,24 +237,11 @@ export class MessageProcessor {
     }
     this.cooldown.set(cooldownKey, now + runtime.naturalLanguage.cooldownSeconds * 1000);
 
-    let university = analysis.candidates[0] ?? null;
-    if (!university && context) {
-      university = this.universities.getUniversity(context.universityId) as typeof university;
-    }
-
-    if (!university) {
-      return this.finish(input, {
-        handled: true,
-        reason: "需要学校名",
-        reply: "我看起来像是在查高校生活资料，但没识别出具体学校。可以直接说“安徽大学宿舍怎么样”这种问法。"
-      });
-    }
-
-    const comparisonCandidates = selectComparisonCandidates(input.text, analysis.candidates);
-    if (comparisonCandidates.length > 1) {
-      const topicKey = analysis.topicKey ?? "general";
-      const topic = analysis.topicLabel ?? topicLabel(topicKey);
-      const schools = await this.buildComparisonSchoolContexts(comparisonCandidates, topicKey, topic, input.text);
+    const comparisonSchools = this.resolveComparisonUniversities(routeIntent, analysis);
+    if (comparisonSchools.length > 1) {
+      const topicKey = normalizeTopicKey(routeIntent.topicKey) ?? "general";
+      const topic = routeIntent.topicLabel ?? topicLabel(topicKey);
+      const schools = await this.buildComparisonSchoolContexts(comparisonSchools, topicKey, topic, input.text);
       const reply = await this.answerComparisonWithLlm({
         userMessage: input.text,
         topic,
@@ -214,13 +270,13 @@ export class MessageProcessor {
         reason: "多校对比回答",
         reply,
         sourcePageUrl,
-        analysis
+        analysis: { routeIntent, schoolAnalysis: analysis }
       });
     }
 
-    const similarTop = analysis.candidates.filter((item) => Math.abs(item.score - analysis.candidates[0].score) < 0.01);
-    if (similarTop.length > 1) {
-      const options = similarTop
+    const ambiguousSchools = this.findAmbiguousRouteCandidates(routeIntent, analysis);
+    if (ambiguousSchools.length > 1) {
+      const options = ambiguousSchools
         .slice(0, 5)
         .map((item, index) => `${index + 1}. ${item.name}`)
         .join("\n");
@@ -232,11 +288,22 @@ export class MessageProcessor {
       });
     }
 
-    const topicKey = analysis.topicKey ?? "general";
+    const university = this.resolveRouteUniversity(routeIntent, analysis, input.conversationKey, now);
+
+    if (!university) {
+      return this.finish(input, {
+        handled: true,
+        reason: "需要学校名",
+        reply: routeIntent.followUpQuestion || "你想查哪所学校？可以直接说完整学校名。"
+      });
+    }
+
+    const topicKey = normalizeTopicKey(routeIntent.topicKey) ?? "general";
+    const topic = routeIntent.topicLabel ?? topicLabel(topicKey);
     const questions = this.universities.getTopicQuestions(university.id, topicKey, input.text, 6);
     const contextText = questions.length
       ? this.nlu.buildRetrievalContext(university.name, questions)
-      : `这次没有检索到 ${university.name} 在“${analysis.topicLabel ?? "这个方向"}”上的 CollegesChat 问卷片段。请先基于公开常识给出院校定位，再如实说明生活体验问卷资料缺口，然后可以结合常见大学生活经验、公开常识和理性推断给出建议，但不要把这些补充说成该校问卷事实。`;
+      : `这次没有检索到 ${university.name} 在“${topic}”上的 CollegesChat 问卷片段。请先基于公开常识给出院校定位，再如实说明生活体验问卷资料缺口，然后可以结合常见大学生活经验、公开常识和理性推断给出建议，但不要把这些补充说成该校问卷事实。`;
     const schoolProfile = this.universities.getSchoolProfile?.(university.id, "srgaoxiao");
     const srgaoxiaoReviewsText = await this.maybeFetchSrgaoxiaoReviews(
       university.id,
@@ -245,7 +312,7 @@ export class MessageProcessor {
     const reply = await this.answerWithLlm({
       userMessage: input.text,
       universityName: university.name,
-      topic: analysis.topicLabel ?? topicLabel(topicKey),
+      topic,
       contextText,
       schoolProfileText: schoolProfile?.profileText ?? null,
       srgaoxiaoReviewsText,
@@ -255,7 +322,7 @@ export class MessageProcessor {
       question: input.text,
       universityId: university.id,
       universityName: university.name,
-      topic: analysis.topicLabel ?? topicLabel(topicKey),
+      topic,
       sourceUrl: university.source_url,
       contextText,
       schoolProfileText: schoolProfile?.profileText ?? null,
@@ -270,7 +337,588 @@ export class MessageProcessor {
       expiresAt: now + ttlMs
     });
 
-    return this.finish(input, { handled: true, reason: "已回答", reply, sourcePageUrl, analysis });
+    return this.finish(input, { handled: true, reason: "模型判断为高校资料回答", reply, sourcePageUrl, analysis: { routeIntent, schoolAnalysis: analysis } });
+  }
+
+  private async analyzeMessageRouteWithLlm(
+    input: IncomingMessage,
+    context: ConversationContext | null
+  ): Promise<MessageRouteIntent | null> {
+    const topicOptions = TOPICS.map((topic) => `${topic.key}:${topic.label}`).join("，");
+    const contextLine = renderRouteContextLine(context);
+    const today = currentAdmissionDate();
+    const currentYear = currentAdmissionYear();
+
+    try {
+      const text = await this.llm.chat(
+        [
+          {
+            role: "system",
+            content:
+              "你是 QQBot 的入口路由器。你的任务是理解用户自然语言，判断这条消息应该进入哪个处理分支。" +
+              "这是唯一入口：程序不会再用关键词或低置信度模板抢先决定回复类型。" +
+              "不要使用固定关键词思维；要根据整句语义、上下文、是否在群聊被提及、是否包含图片来判断。" +
+              "route 只能是 admission、university_info、casual、ignore。" +
+              "admission 表示高校招生数据查询，例如招生计划、招生人数、历年录取分、最低位次、专业录取分、报考趋势、录取对比。" +
+              "university_info 表示高校资料/校园生活/院校评价/学校对比，例如宿舍、食堂、校园网、外卖、澡堂、管理、学校怎么样、两校怎么选。" +
+              "casual 表示应该正常闲聊、看图闲聊、解释图片、或回答能力/模型/使用方式问题。ignore 表示群聊里没有必要回复的旁观消息。" +
+              "私聊或明确 @ 机器人时，除非是明显垃圾内容，否则 shouldReply 通常为 true；未 @ 的群聊普通路人闲聊 shouldReply 可为 false。" +
+              "如果消息含图片且需要回复，请仍然选择最接近的 route；后续图片理解会按你的 route 和学校/主题字段组织资料。" +
+              "只输出一个 JSON 对象，不要 Markdown，不要解释。字段：" +
+              "route:string, shouldReply:boolean, confidence:number, schoolNames:string[], province:string|null, subjectType:string|null, years:number[], majorName:string|null, queryTypes:string[], topicKey:string|null, topicLabel:string|null, needsFollowUp:boolean, followUpQuestion:string|null, reason:string。" +
+              "confidence 只用于调试记录，程序不会因为低置信度拒绝回复。" +
+              "queryTypes 只能使用 plan, score, rank, major_score, trend, compare。subjectType 可用 物理类、历史类、理科、文科、综合改革 或 null。" +
+              `topicKey 如果是高校生活资料，请从这些 key 中选一个或返回 general：${topicOptions}。`
+          },
+          {
+            role: "user",
+            content:
+              `${contextLine}\n` +
+              `消息场景：${input.messageType === "group" ? "群聊" : "私聊"}；是否 @ 机器人：${input.mentionedBot ? "是" : "否"}。\n` +
+              `是否包含图片：${input.images?.length ? `是，${input.images.length} 张` : "否"}。\n` +
+              "程序不会提供本地关键词候选。请你直接从用户原话和上下文中理解是否涉及学校、涉及哪些学校、属于哪类请求。\n" +
+              `当前日期：${today}。${currentYear} 年招生计划通常可查；${currentYear} 录取分数线和位次要等各省录取后才陆续出现。\n\n` +
+              `用户消息：${input.text}`
+          }
+        ],
+        "message-route"
+      );
+      return normalizeMessageRouteIntent(parseJsonObject(text));
+    } catch {
+      if (input.messageType === "private" || input.mentionedBot) {
+        return {
+          route: "casual",
+          shouldReply: true,
+          isAdmissionQuery: false,
+          confidence: 0.5,
+          schoolNames: [],
+          province: null,
+          subjectType: null,
+          years: [],
+          majorName: null,
+          queryTypes: [],
+          topicKey: null,
+          topicLabel: null,
+          needsFollowUp: false,
+          followUpQuestion: null,
+          reason: "模型路由失败，转普通回复"
+        };
+      }
+      return null;
+    }
+  }
+
+  private mergeAdmissionFollowUp(
+    routeIntent: MessageRouteIntent | null,
+    context: ConversationContext | null
+  ): MessageRouteIntent | null {
+    const pending = context?.pendingAdmission;
+    if (!routeIntent || !pending) return routeIntent;
+    const hasAdmissionSlots = Boolean(
+      routeIntent.route === "admission" ||
+        routeIntent.province ||
+        routeIntent.subjectType ||
+        routeIntent.majorName ||
+        routeIntent.years.length ||
+        routeIntent.queryTypes.length
+    );
+    if (!hasAdmissionSlots) return routeIntent;
+    return {
+      ...routeIntent,
+      route: "admission",
+      shouldReply: true,
+      isAdmissionQuery: true,
+      schoolNames: routeIntent.schoolNames.length ? routeIntent.schoolNames : [context.universityName],
+      province: routeIntent.province ?? pending.province,
+      subjectType: routeIntent.subjectType ?? pending.subjectType,
+      years: routeIntent.years.length ? routeIntent.years : pending.years,
+      majorName: routeIntent.majorName ?? pending.majorName,
+      queryTypes: routeIntent.queryTypes.length ? routeIntent.queryTypes : pending.queryTypes,
+      reason: [routeIntent.reason, "续接上一次招生追问"].filter(Boolean).join("；")
+    };
+  }
+
+  private async answerAdmissionQuery(
+    input: IncomingMessage,
+    intent: AdmissionIntent,
+    analysis: MessageAnalysis,
+    now: number
+  ): Promise<ProcessedMessage> {
+    if (!this.admissions) {
+      return { handled: true, reason: "招生数据未启用", reply: "招生数据模块还没有启用，暂时不能查询分数线和招生计划。" };
+    }
+
+    const universities = this.resolveAdmissionUniversities(intent, analysis, input.conversationKey, now);
+    const university = universities[0];
+    if (!university) {
+      return {
+        handled: true,
+        reason: "招生查询需要学校名",
+        reply: intent.followUpQuestion || "你想查哪所学校的招生计划或分数线？可以直接说完整学校名。"
+      };
+    }
+
+    if (!intent.province) {
+      this.setAdmissionFollowUpContext(input.conversationKey, university, intent, now, {
+        province: null,
+        subjectType: intent.subjectType
+      });
+      return {
+        handled: true,
+        reason: "招生查询需要省份",
+        reply: intent.followUpQuestion || `你想看 ${university.name} 在哪个省份的招生计划或分数线？`
+      };
+    }
+
+    const years = buildAdmissionYears(intent);
+    const province = normalizeAdmissionProvince(intent.province);
+    const subjectType = intent.subjectType ?? inferAdmissionSubjectType(province);
+    if (!subjectType) {
+      this.setAdmissionFollowUpContext(input.conversationKey, university, intent, now, {
+        province,
+        subjectType: null
+      });
+      return {
+        handled: true,
+        reason: "招生查询需要科类",
+        reply: `你想看 ${university.name} 在${province}的哪个科类？可以说“物理类”“历史类”“理科”“文科”，如果是不分文理的新高考省份也可以说“综合改革”。`
+      };
+    }
+    const syncKinds = pickAdmissionSyncKinds(intent);
+    if (universities.length > 1) {
+      const schoolData: AdmissionSchoolData[] = [];
+      for (const school of universities.slice(0, 3)) {
+        schoolData.push(await this.buildAdmissionSchoolData(school, intent, province, subjectType, years, syncKinds));
+      }
+      const contextText = renderAdmissionComparisonContext({
+        userMessage: input.text,
+        province,
+        subjectType,
+        majorName: intent.majorName,
+        schools: schoolData
+      });
+      const reply = await this.answerAdmissionComparisonWithLlm({
+        userMessage: input.text,
+        province,
+        subjectType,
+        majorName: intent.majorName,
+        schools: schoolData,
+        contextText
+      });
+      const sourcePageUrl = this.createAnswerSourcePage({
+        question: input.text,
+        universityId: null,
+        universityName: schoolData.map((school) => school.university.name).join(" / "),
+        topic: "招生数据",
+        sourceUrl: null,
+        contextText,
+        schoolProfileText: null,
+        srgaoxiaoReviewsText: null,
+        answerText: reply
+      });
+
+      const ttlMs = this.settings.runtime().naturalLanguage.contextTtlMinutes * 60 * 1000;
+      this.contexts.set(input.conversationKey, {
+        universityId: university.id,
+        universityName: university.name,
+        expiresAt: now + ttlMs
+      });
+
+      return {
+        handled: true,
+        reason: "招生数据对比回答",
+        reply,
+        sourcePageUrl,
+        analysis: { admissionIntent: intent, schoolAnalysis: analysis }
+      };
+    }
+
+    const data = await this.buildAdmissionSchoolData(university, intent, province, subjectType, years, syncKinds);
+    const reply = await this.answerAdmissionWithLlm({
+      userMessage: input.text,
+      universityName: university.name,
+      province,
+      subjectType,
+      majorName: intent.majorName,
+      plans: data.plans,
+      scores: data.scores,
+      contextText: data.contextText,
+      syncError: data.syncError
+    });
+    const sourcePageUrl = this.createAnswerSourcePage({
+      question: input.text,
+      universityId: university.id,
+      universityName: university.name,
+      topic: "招生数据",
+      sourceUrl: data.sourceUrl,
+      contextText: data.contextText,
+      schoolProfileText: null,
+      srgaoxiaoReviewsText: null,
+      answerText: reply
+    });
+
+    const ttlMs = this.settings.runtime().naturalLanguage.contextTtlMinutes * 60 * 1000;
+    this.contexts.set(input.conversationKey, {
+      universityId: university.id,
+      universityName: university.name,
+      expiresAt: now + ttlMs
+    });
+
+    return {
+      handled: true,
+      reason: "招生数据回答",
+      reply,
+      sourcePageUrl,
+      analysis: { admissionIntent: intent, schoolAnalysis: analysis }
+    };
+  }
+
+  private setAdmissionFollowUpContext(
+    conversationKey: string,
+    university: NonNullable<ReturnType<UniversityRepository["getUniversity"]>>,
+    intent: AdmissionIntent,
+    now: number,
+    values: Pick<AdmissionFollowUpContext, "province" | "subjectType">
+  ): void {
+    const ttlMs = this.settings.runtime().naturalLanguage.contextTtlMinutes * 60 * 1000;
+    this.contexts.set(conversationKey, {
+      universityId: university.id,
+      universityName: university.name,
+      expiresAt: now + ttlMs,
+      pendingAdmission: {
+        province: values.province,
+        subjectType: values.subjectType,
+        years: intent.years,
+        majorName: intent.majorName,
+        queryTypes: intent.queryTypes
+      }
+    });
+  }
+
+  private resolveAdmissionUniversities(
+    intent: AdmissionIntent,
+    analysis: MessageAnalysis,
+    conversationKey: string,
+    now: number
+  ): ResolvedUniversity[] {
+    const schools: ResolvedUniversity[] = [];
+    const seen = new Set<number>();
+    for (const schoolName of intent.schoolNames) {
+      const university = this.resolveUniversityName(schoolName, analysis);
+      if (!university || seen.has(university.id)) continue;
+      seen.add(university.id);
+      schools.push(university);
+    }
+    if (schools.length) return schools;
+    const context = this.getContext(conversationKey, now);
+    const contextSchool = context ? this.universities.getUniversity(context.universityId) : null;
+    return contextSchool ? [contextSchool] : [];
+  }
+
+  private async buildAdmissionSchoolData(
+    university: ResolvedUniversity,
+    intent: AdmissionIntent,
+    province: string,
+    subjectType: string,
+    years: ReturnType<typeof buildAdmissionYears>,
+    syncKinds: ReturnType<typeof pickAdmissionSyncKinds>
+  ): Promise<AdmissionSchoolData> {
+    let syncError: string | null = null;
+    let syncSummary: AdmissionSyncSummary | null = null;
+    const subjectTypes = compatibleAdmissionSubjectTypes(subjectType, province);
+    if (this.gaokaoCn) {
+      try {
+        const syncResults: GaokaoCnSyncResult[] = [];
+        if (syncKinds.includePlans) {
+          for (const group of groupYearsByAdmissionSubjectTypes(province, subjectType, years.planYears)) {
+            syncResults.push(await this.gaokaoCn.sync({
+              universityId: university.id,
+              provinces: [province],
+              subjectTypes: group.subjectTypes,
+              planYears: group.years,
+              includePlans: true,
+              includeScores: false,
+              includeSpecialScores: false
+            }));
+          }
+        }
+        if (syncKinds.includeScores) {
+          for (const group of groupYearsByAdmissionSubjectTypes(province, subjectType, years.scoreYears)) {
+            syncResults.push(await this.gaokaoCn.sync({
+              universityId: university.id,
+              provinces: [province],
+              subjectTypes: group.subjectTypes,
+              scoreYears: group.years,
+              includePlans: false,
+              includeScores: true,
+              includeSpecialScores: true
+            }));
+          }
+        }
+        syncSummary = summarizeAdmissionSyncResults(syncResults);
+      } catch (error) {
+        syncError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    let planMajorFallback = false;
+    let scoreMajorFallback = false;
+    let plans = this.admissions!.queryPlans({
+      universityId: university.id,
+      provinceName: province,
+      subjectType,
+      subjectTypes,
+      years: years.planYears,
+      majorName: intent.majorName,
+      limit: 80
+    });
+    let scores = this.admissions!.queryScores({
+      universityId: university.id,
+      provinceName: province,
+      subjectType,
+      subjectTypes,
+      years: years.scoreYears,
+      majorName: intent.majorName,
+      limit: 120
+    });
+    if (intent.majorName && !scores.length) {
+      scores = this.admissions!.queryScores({
+        universityId: university.id,
+        provinceName: province,
+        subjectType,
+        subjectTypes,
+        years: years.scoreYears,
+        limit: 80
+      });
+      scoreMajorFallback = scores.length > 0;
+    }
+    if (intent.majorName && !plans.length) {
+      plans = this.admissions!.queryPlans({
+        universityId: university.id,
+        provinceName: province,
+        subjectType,
+        subjectTypes,
+        years: years.planYears,
+        limit: 40
+      });
+      planMajorFallback = plans.length > 0;
+    }
+
+    const sourceSnapshots = this.collectAdmissionSourceSnapshots(university.id, plans, scores, syncSummary);
+    const contextText = renderAdmissionContext({
+      universityName: university.name,
+      province,
+      subjectType,
+      subjectTypes,
+      majorName: intent.majorName,
+      planMajorFallback,
+      scoreMajorFallback,
+      plans,
+      scores,
+      sourceSnapshots,
+      unavailableScoreYears: syncKinds.includeScores ? years.unavailableScoreYears : [],
+      syncSummary,
+      syncError
+    });
+    const mapping = this.admissions!.getMapping(university.id);
+    return {
+      university,
+      sourceUrl: mapping?.sourceUrl ?? university.source_url,
+      plans,
+      scores,
+      sourceSnapshots,
+      syncSummary,
+      syncError,
+      contextText
+    };
+  }
+
+  private collectAdmissionSourceSnapshots(
+    universityId: number,
+    plans: AdmissionPlanRow[],
+    scores: AdmissionScoreRow[],
+    syncSummary: AdmissionSyncSummary | null
+  ): AdmissionSourceRow[] {
+    if (!this.admissions) return [];
+    const repository = this.admissions as AdmissionRepository & {
+      getSource?: (id: number) => AdmissionSourceRow | null;
+      listSources?: (query: { universityId?: number; limit?: number }) => AdmissionSourceRow[];
+    };
+    const sourceIds = Array.from(
+      new Set(
+        [...plans, ...scores]
+          .map((row) => Number(row.sourceRecordId))
+          .filter((value) => Number.isFinite(value) && value > 0)
+      )
+    );
+    const snapshots = sourceIds
+      .slice(0, 12)
+      .map((id) => repository.getSource?.(id) ?? null)
+      .filter((row): row is AdmissionSourceRow => Boolean(row));
+    if (snapshots.length || !syncSummary?.sourceRows) return snapshots;
+    return repository.listSources?.({ universityId, limit: Math.min(12, syncSummary.sourceRows) }) ?? [];
+  }
+
+  private resolveAdmissionUniversity(
+    intent: AdmissionIntent,
+    analysis: MessageAnalysis,
+    conversationKey: string,
+    now: number
+  ): ReturnType<UniversityRepository["getUniversity"]> | null {
+    for (const schoolName of intent.schoolNames) {
+      const resolved = this.resolveUniversityName(schoolName, analysis);
+      if (resolved) return resolved;
+    }
+    const context = this.getContext(conversationKey, now);
+    if (context) return this.universities.getUniversity(context.universityId) ?? null;
+    return null;
+  }
+
+  private resolveRouteUniversity(
+    intent: Pick<MessageRouteIntent, "schoolNames">,
+    analysis: MessageAnalysis,
+    conversationKey: string,
+    now: number
+  ): ReturnType<UniversityRepository["getUniversity"]> | null {
+    return this.resolveAdmissionUniversity(
+      {
+        isAdmissionQuery: false,
+        confidence: 0,
+        schoolNames: intent.schoolNames,
+        province: null,
+        subjectType: null,
+        years: [],
+        majorName: null,
+        queryTypes: [],
+        needsFollowUp: false,
+        followUpQuestion: null,
+        reason: ""
+      },
+      analysis,
+      conversationKey,
+      now
+    );
+  }
+
+  private resolveComparisonUniversities(
+    intent: MessageRouteIntent,
+    analysis: MessageAnalysis
+  ): Array<NonNullable<ReturnType<UniversityRepository["getUniversity"]>>> {
+    if (intent.schoolNames.length < 2) return [];
+    const schools: Array<NonNullable<ReturnType<UniversityRepository["getUniversity"]>>> = [];
+    const seen = new Set<number>();
+    for (const schoolName of intent.schoolNames) {
+      const university = this.resolveUniversityName(schoolName, analysis);
+      if (!university || seen.has(university.id)) continue;
+      seen.add(university.id);
+      schools.push(university);
+    }
+    return schools.slice(0, 3);
+  }
+
+  private resolveUniversityName(
+    schoolName: string,
+    analysis: MessageAnalysis
+  ): NonNullable<ReturnType<UniversityRepository["getUniversity"]>> | null {
+    const normalizedSchoolName = normalizeSchoolName(schoolName);
+    if (!normalizedSchoolName) return null;
+
+    const localCandidate = analysis.candidates.find((row) => candidateMatchesSchoolName(row, normalizedSchoolName));
+    if (localCandidate) return localCandidate;
+
+    const repository = this.universities as UniversityRepository & {
+      listUniversities?: (query?: string, limit?: number) => ReturnType<UniversityRepository["listUniversities"]>;
+      findSchoolCandidates?: (message: string, limit?: number) => MessageAnalysis["candidates"];
+    };
+    const exact = repository
+      .listUniversities?.(schoolName, 8)
+      .find((row) => normalizeSchoolName(row.name) === normalizedSchoolName || normalizeSchoolName(row.slug) === normalizedSchoolName);
+    if (exact) return exact;
+
+    const candidate = repository.findSchoolCandidates?.(schoolName, 1)[0];
+    return candidate ?? null;
+  }
+
+  private findAmbiguousRouteCandidates(
+    intent: MessageRouteIntent,
+    analysis: MessageAnalysis
+  ): MessageAnalysis["candidates"] {
+    if (intent.schoolNames.length !== 1 || analysis.candidates.length < 2) return [];
+    const normalizedSchoolName = normalizeSchoolName(intent.schoolNames[0]);
+    if (!normalizedSchoolName) return [];
+    return dedupeCandidates(
+      analysis.candidates.filter((candidate) => candidateMatchesSchoolName(candidate, normalizedSchoolName))
+    ).slice(0, 5);
+  }
+
+  private async answerAdmissionWithLlm(input: {
+    userMessage: string;
+    universityName: string;
+    province: string;
+    subjectType: string | null;
+    majorName: string | null;
+    plans: AdmissionPlanRow[];
+    scores: AdmissionScoreRow[];
+    contextText: string;
+    syncError: string | null;
+  }): Promise<string> {
+    try {
+      return await this.llm.chat(
+        [
+          {
+            role: "system",
+            content:
+              "你是专业但口语化的高考招生数据顾问。请基于给定的掌上高考缓存数据回答，不要编造不存在的分数、位次、计划数。" +
+              `当前日期是 ${currentAdmissionDate()}：${currentAdmissionYear()} 招生计划可以优先参考；${currentAdmissionYear()} 录取分数线和最低位次通常要等各省录取后才陆续出现，因此涉及分数/位次时优先使用 ${defaultAdmissionScoreYearRange()} 历史数据。` +
+              "回答要先给结论，再给表格或分点数据，然后给报考提醒。若数据为空或同步失败，要直说缺口，并建议补充省份/科类/专业或稍后同步。" +
+              "掌上高考是第三方聚合数据，结尾必须提醒最终以省考试院和学校招生网为准。适合 QQ 阅读，可以用 Markdown 表格和加粗。"
+          },
+          {
+            role: "user",
+            content: `用户问题：${input.userMessage}\n学校：${input.universityName}\n省份：${input.province}\n科类：${input.subjectType ?? "未指定"}\n专业：${input.majorName ?? "未指定"}\n\n可用招生数据：\n${input.contextText}`
+          }
+        ],
+        "admission-answer"
+      );
+    } catch (error) {
+      const message = normalizeLlmFailureMessage(error, this.settings.runtime().llm.timeoutMs);
+      return `我查到了 ${input.universityName} 在${input.province}的招生数据缓存，但模型总结失败：${message}\n\n${input.contextText.slice(0, 1200)}\n\n掌上高考为第三方聚合数据，最终请以省考试院和学校招生网为准。`;
+    }
+  }
+
+  private async answerAdmissionComparisonWithLlm(input: {
+    userMessage: string;
+    province: string;
+    subjectType: string;
+    majorName: string | null;
+    schools: AdmissionSchoolData[];
+    contextText: string;
+  }): Promise<string> {
+    const names = input.schools.map((school) => school.university.name).join("、");
+    try {
+      return await this.llm.chat(
+        [
+          {
+            role: "system",
+            content:
+              "你是专业但口语化的高考志愿招生数据对比顾问。用户正在比较多所明确提到的学校，请基于给定掌上高考缓存数据回答。" +
+              "不要编造不存在的分数、位次、计划数或专业线；某所学校缺数据时要单独说明缺口，不能用另一所学校的数据代替。" +
+              `当前日期是 ${currentAdmissionDate()}：${currentAdmissionYear()} 招生计划可以优先参考；${currentAdmissionYear()} 录取分数线和最低位次通常要等各省录取后才陆续出现，因此分数/位次优先看 ${defaultAdmissionScoreYearRange()} 历史数据。` +
+              "回答要先给可执行结论，再用表格比较最低分、最低位次、计划数、专业口径或趋势；如果用户问专业，优先比较该专业，资料不足再回到院校线。" +
+              "结尾必须提醒：掌上高考是第三方聚合数据，最终以省考试院和学校招生网为准。适合 QQ 阅读，可以用 Markdown 表格和加粗。"
+          },
+          {
+            role: "user",
+            content:
+              `用户问题：${input.userMessage}\n比较学校：${names}\n省份：${input.province}\n科类：${input.subjectType}\n专业：${input.majorName ?? "未指定"}\n\n可用招生数据：\n${input.contextText}`
+          }
+        ],
+        "admission-comparison"
+      );
+    } catch (error) {
+      const message = normalizeLlmFailureMessage(error, this.settings.runtime().llm.timeoutMs);
+      return `我查到了 ${names} 在${input.province}${input.subjectType}的招生数据缓存，但模型对比总结失败：${message}\n\n${input.contextText.slice(0, 1600)}\n\n掌上高考为第三方聚合数据，最终请以省考试院和学校招生网为准。`;
+    }
   }
 
   private createAnswerSourcePage(input: AnswerSourceInput): string | undefined {
@@ -328,7 +976,7 @@ export class MessageProcessor {
   }
 
   private async buildComparisonSchoolContexts(
-    candidates: MessageAnalysis["candidates"],
+    candidates: Array<NonNullable<ReturnType<UniversityRepository["getUniversity"]>>>,
     topicKey: string,
     topic: string,
     userMessage: string
@@ -395,7 +1043,6 @@ export class MessageProcessor {
 
   private async answerCasualWithLlm(
     userMessage: string,
-    analysis: MessageAnalysis,
     context: ConversationContext | null,
     purpose: "greeting" | "casual-message"
   ): Promise<string> {
@@ -403,15 +1050,6 @@ export class MessageProcessor {
     const contextLine = context
       ? `当前对话前文正在查询的学校是：${context.universityName}。`
       : "当前没有已确认的学校上下文。";
-    const analysisLine = [
-      `本地识别结果：${analysis.isUniversityQuery ? "可能是高校资料问题" : "未确认是高校资料问题"}`,
-      `置信度：${analysis.confidence.toFixed(2)}`,
-      `主题：${analysis.topicLabel ?? "未识别"}`,
-      `候选学校：${analysis.candidates
-        .slice(0, 3)
-        .map((candidate) => candidate.name)
-        .join("、") || "无"}`
-    ].join("；");
 
     try {
       return await this.llm.chat(
@@ -427,27 +1065,29 @@ export class MessageProcessor {
           },
           {
             role: "user",
-            content: `${contextLine}\n${analysisLine}\n\n用户消息：${userMessage}`
+            content: `${contextLine}\n入口判断已由上一步模型完成；这一步只负责自然回复，不要再基于关键词重新猜测学校或处理分支。\n\n用户消息：${userMessage}`
           }
         ],
         purpose
       );
     } catch {
       if (purpose === "greeting") return renderGreetingReply();
-      return renderCasualFallback(analysis, Boolean(context));
+      return renderCasualFallback(Boolean(context));
     }
   }
 
   private buildImageSchoolContext(
+    routeIntent: MessageRouteIntent,
     analysis: MessageAnalysis,
-    context: ConversationContext | null,
+    conversationKey: string,
+    now: number,
     userMessage: string
   ): ImageSchoolContext | null {
-    const university = analysis.candidates[0] ?? (context ? this.universities.getUniversity(context.universityId) : null);
+    const university = this.resolveRouteUniversity(routeIntent, analysis, conversationKey, now);
     if (!university) return null;
 
-    const topicKey = analysis.topicKey ?? "general";
-    const topic = analysis.topicLabel ?? topicLabel(topicKey);
+    const topicKey = normalizeTopicKey(routeIntent.topicKey) ?? "general";
+    const topic = routeIntent.route === "admission" ? "招生数据" : (routeIntent.topicLabel ?? topicLabel(topicKey));
     const questions = this.universities.getTopicQuestions(university.id, topicKey, userMessage, 4);
     const contextText = questions.length
       ? this.nlu.buildRetrievalContext(university.name, questions)
@@ -468,7 +1108,8 @@ export class MessageProcessor {
     userMessage: string,
     images: IncomingImage[],
     analysis: MessageAnalysis,
-    schoolContext: ImageSchoolContext | null
+    schoolContext: ImageSchoolContext | null,
+    routeIntent: MessageRouteIntent
   ): Promise<string> {
     const usableUrls = images.map((image) => image.url || image.file || "").filter(isImageUrl);
     if (!usableUrls.length) {
@@ -476,9 +1117,10 @@ export class MessageProcessor {
     }
 
     const detectedLine = [
-      `本地文字识别：${analysis.isUniversityQuery ? "可能涉及高校语境" : "未确认高校语境"}`,
-      `主题：${analysis.topicLabel ?? "未识别"}`,
-      `候选学校：${analysis.candidates
+      `入口模型判断：${routeIntent.route}`,
+      `本地实体解析提示：${analysis.candidates.length ? "有可用于解析模型学校名的候选" : "无本地学校候选"}`,
+      `模型主题：${routeIntent.topicLabel ?? topicLabel(normalizeTopicKey(routeIntent.topicKey) ?? "general")}`,
+      `候选学校（仅用于实体解析，不作为入口判断）：${analysis.candidates
         .slice(0, 3)
         .map((candidate) => candidate.name)
         .join("、") || "无"}`
@@ -557,66 +1199,31 @@ function renderLogText(input: IncomingMessage): string {
   return input.text.trim() ? `${input.text.trim()} ${suffix}` : suffix;
 }
 
-function selectComparisonCandidates(
-  message: string,
-  candidates: MessageAnalysis["candidates"]
-): MessageAnalysis["candidates"] {
-  const seen = new Set<number>();
-  const withMentions = candidates
-    .map((candidate) => ({
-      candidate,
-      mention: findCandidateMention(message, candidate)
-    }))
-    .filter((item): item is { candidate: MessageAnalysis["candidates"][number]; mention: MentionRange } => item.mention !== null)
-    .filter((item) => {
-      if (seen.has(item.candidate.id)) return false;
-      seen.add(item.candidate.id);
-      return true;
-    })
-    .sort((a, b) => a.mention.start - b.mention.start);
-
-  if (withMentions.length < 2) return [];
-  if (!hasComparisonIntentBetweenMentions(message, withMentions.map((item) => item.mention))) return [];
-  return withMentions.map((item) => item.candidate).slice(0, 3);
+function emptyMessageAnalysis(): MessageAnalysis {
+  return {
+    candidates: [],
+    reason: "入口由大模型判断，未运行本地学校关键词候选"
+  };
 }
 
-interface MentionRange {
-  start: number;
-  end: number;
+function shouldResolveUniversitiesLocally(intent: MessageRouteIntent): boolean {
+  if (intent.route !== "admission" && intent.route !== "university_info") return false;
+  return intent.schoolNames.length > 0;
 }
 
-function findCandidateMention(
-  message: string,
-  candidate: MessageAnalysis["candidates"][number]
-): MentionRange | null {
-  const names = [candidate.matchedBy, candidate.name, candidate.slug]
-    .filter((name): name is string => Boolean(name))
-    .sort((a, b) => b.length - a.length);
-  let best: MentionRange | null = null;
-  const normalizedMessage = message.toLowerCase();
-
-  for (const name of names) {
-    const index = normalizedMessage.indexOf(name.toLowerCase());
-    if (index < 0) continue;
-    const range = { start: index, end: index + name.length };
-    if (!best || range.start < best.start || (range.start === best.start && range.end > best.end)) {
-      best = range;
-    }
-  }
-
-  return best;
-}
-
-function hasComparisonIntentBetweenMentions(message: string, mentions: MentionRange[]): boolean {
-  if (/(选哪个|选哪所|选哪一个|怎么选|推荐哪个|哪个更|哪所更|谁更|对比|比较|区别|差别|优劣|相比|比起来|值不值得|适合谁)/i.test(message)) {
-    return true;
-  }
-
-  for (let index = 0; index < mentions.length - 1; index += 1) {
-    const between = message.slice(mentions[index].end, mentions[index + 1].start);
-    if (/(和|跟|与|还是|或者|vs|VS|、|,|，|\/)/.test(between)) return true;
-  }
-  return false;
+function renderRouteContextLine(context: ConversationContext | null): string {
+  if (!context) return "当前没有已确认学校上下文。";
+  const pending = context.pendingAdmission
+    ? [
+        `当前有待补充的招生查询：学校=${context.universityName}`,
+        `省份=${context.pendingAdmission.province ?? "待补充"}`,
+        `科类=${context.pendingAdmission.subjectType ?? "待补充"}`,
+        `年份=${context.pendingAdmission.years.length ? context.pendingAdmission.years.join(",") : "默认"}`,
+        `专业=${context.pendingAdmission.majorName ?? "未指定"}`,
+        `查询类型=${context.pendingAdmission.queryTypes.length ? context.pendingAdmission.queryTypes.join(",") : "默认"}`
+      ].join("；")
+    : null;
+  return [`当前对话学校上下文：${context.universityName}`, pending].filter(Boolean).join("\n");
 }
 
 function renderComparisonSchoolForPrompt(school: ComparisonSchoolContext): string {
@@ -627,6 +1234,634 @@ function renderComparisonSchoolForPrompt(school: ComparisonSchoolContext): strin
     `神人高校评论资料：\n${school.srgaoxiaoReviewsText ?? "本次未调用实时评论，或没有可用评论资料。"}`,
     `可用问卷资料：\n${school.contextText}`
   ].join("\n\n");
+}
+
+function dedupeCandidates(candidates: MessageAnalysis["candidates"]): MessageAnalysis["candidates"] {
+  const seen = new Set<number>();
+  return candidates.filter((candidate) => {
+    if (seen.has(candidate.id)) return false;
+    seen.add(candidate.id);
+    return true;
+  });
+}
+
+function candidateMatchesSchoolName(candidate: MessageAnalysis["candidates"][number], normalizedSchoolName: string): boolean {
+  return [candidate.name, candidate.matchedBy, candidate.slug].some((value) => {
+    const normalized = normalizeSchoolName(value);
+    return normalized === normalizedSchoolName || normalized.includes(normalizedSchoolName) || normalizedSchoolName.includes(normalized);
+  });
+}
+
+function parseJsonObject(text: string): Record<string, unknown> {
+  const cleaned = text
+    .trim()
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("LLM JSON not found");
+  return JSON.parse(cleaned.slice(start, end + 1)) as Record<string, unknown>;
+}
+
+function normalizeMessageRouteIntent(raw: Record<string, unknown>): MessageRouteIntent {
+  const route = normalizeRoute(raw.route);
+  const admission = normalizeAdmissionIntent({ ...raw, isAdmissionQuery: route === "admission" });
+  return {
+    ...admission,
+    route,
+    shouldReply: typeof raw.shouldReply === "boolean" ? raw.shouldReply : route !== "ignore",
+    topicKey: normalizeTopicKey(toCleanString(raw.topicKey)),
+    topicLabel: toCleanString(raw.topicLabel)
+  };
+}
+
+function normalizeAdmissionIntent(raw: Record<string, unknown>): AdmissionIntent {
+  const queryTypes = toStringArray(raw.queryTypes).filter((value): value is AdmissionIntent["queryTypes"][number] =>
+    ["plan", "score", "rank", "major_score", "trend", "compare"].includes(value)
+  );
+  const isAdmissionQuery = Boolean(raw.isAdmissionQuery);
+  return {
+    isAdmissionQuery,
+    confidence: clamp01(Number(raw.confidence ?? (isAdmissionQuery ? 0.7 : 0))),
+    schoolNames: toStringArray(raw.schoolNames),
+    province: toCleanString(raw.province),
+    subjectType: normalizeSubjectFromLlm(raw.subjectType),
+    years: toNumberArray(raw.years),
+    majorName: toCleanString(raw.majorName),
+    queryTypes,
+    needsFollowUp: Boolean(raw.needsFollowUp),
+    followUpQuestion: toCleanString(raw.followUpQuestion),
+    reason: toCleanString(raw.reason) ?? ""
+  };
+}
+
+function normalizeRoute(value: unknown): MessageRouteIntent["route"] {
+  const text = toCleanString(value)?.toLowerCase();
+  if (text === "admission" || text === "university_info" || text === "casual" || text === "ignore") return text;
+  return "casual";
+}
+
+function normalizeTopicKey(value: string | null): string | null {
+  if (!value) return null;
+  if (value === "general") return "general";
+  return TOPICS.some((topic) => topic.key === value) ? value : null;
+}
+
+function normalizeSubjectFromLlm(value: unknown): string | null {
+  const text = toCleanString(value);
+  if (!text) return null;
+  if (/物理/u.test(text)) return "物理类";
+  if (/历史/u.test(text)) return "历史类";
+  if (/理科/u.test(text)) return "理科";
+  if (/文科/u.test(text)) return "文科";
+  if (/综合|不分|不限/u.test(text)) return "综合改革";
+  return text;
+}
+
+function buildAdmissionYears(intent: AdmissionIntent): { scoreYears: number[]; planYears: number[]; unavailableScoreYears: number[] } {
+  const currentYear = currentAdmissionYear();
+  const requested = intent.years.filter((year) => year >= 2020 && year <= currentYear);
+  const planYears = requested.length ? requested : defaultAdmissionPlanYears();
+  const scoreYears = requested.filter((year) => year <= currentYear - 1);
+  const unavailableScoreYears = requested.filter((year) => year >= currentYear);
+  return {
+    planYears: planYears.length ? Array.from(new Set(planYears)).sort((a, b) => b - a) : defaultAdmissionPlanYears(),
+    scoreYears: scoreYears.length ? Array.from(new Set(scoreYears)).sort((a, b) => b - a) : defaultAdmissionScoreYears(),
+    unavailableScoreYears: Array.from(new Set(unavailableScoreYears)).sort((a, b) => b - a)
+  };
+}
+
+function pickAdmissionSyncKinds(intent: AdmissionIntent): { includePlans: boolean; includeScores: boolean } {
+  const types = new Set(intent.queryTypes);
+  if (!types.size) return { includePlans: true, includeScores: true };
+  const includePlans = types.has("plan") || types.has("trend") || types.has("compare");
+  const includeScores =
+    types.has("score") ||
+    types.has("rank") ||
+    types.has("major_score") ||
+    types.has("trend") ||
+    types.has("compare");
+  return {
+    includePlans: includePlans || !includeScores,
+    includeScores: includeScores || !includePlans
+  };
+}
+
+function normalizeAdmissionProvince(value: string): string {
+  return normalizeProvinceName(value);
+}
+
+function inferAdmissionSubjectType(province: string): string | null {
+  const normalized = normalizeAdmissionProvince(province);
+  const comprehensiveReform = new Set(["北京", "天津", "上海", "浙江", "山东", "海南"]);
+  return comprehensiveReform.has(normalized) ? "综合改革" : null;
+}
+
+const COMPREHENSIVE_REFORM_ADMISSION_PROVINCES = new Set(["北京", "天津", "上海", "浙江", "山东", "海南"]);
+const THIRD_BATCH_3_1_2_ADMISSION_PROVINCES = new Set(["河北", "辽宁", "江苏", "福建", "湖北", "湖南", "广东", "重庆"]);
+const FOURTH_BATCH_3_1_2_ADMISSION_PROVINCES = new Set(["吉林", "黑龙江", "安徽", "江西", "广西", "贵州", "甘肃"]);
+const FIFTH_BATCH_3_1_2_ADMISSION_PROVINCES = new Set(["山西", "内蒙古", "河南", "四川", "云南", "陕西", "青海", "宁夏"]);
+
+function compatibleAdmissionSubjectTypes(subjectType: string | null, province?: string): string[] {
+  if (province && COMPREHENSIVE_REFORM_ADMISSION_PROVINCES.has(normalizeAdmissionProvince(province))) return ["综合改革"];
+  const normalized = normalizeSubjectFromLlm(subjectType);
+  if (!normalized) return [];
+  if (normalized === "物理类" || normalized === "理科") return ["物理类", "理科"];
+  if (normalized === "历史类" || normalized === "文科") return ["历史类", "文科"];
+  return [normalized];
+}
+
+function groupYearsByAdmissionSubjectTypes(
+  province: string,
+  subjectType: string | null,
+  years: number[]
+): Array<{ subjectTypes: string[]; years: number[] }> {
+  const groups = new Map<string, { subjectTypes: string[]; years: number[] }>();
+  for (const year of years) {
+    const subjectTypes = admissionSubjectTypesForYear(province, subjectType, year);
+    if (!subjectTypes.length) continue;
+    const key = subjectTypes.join("|");
+    const group = groups.get(key) ?? { subjectTypes, years: [] };
+    group.years.push(year);
+    groups.set(key, group);
+  }
+  return Array.from(groups.values()).map((group) => ({
+    subjectTypes: group.subjectTypes,
+    years: Array.from(new Set(group.years)).sort((left, right) => right - left)
+  }));
+}
+
+function admissionSubjectTypesForYear(province: string, subjectType: string | null, year: number): string[] {
+  const normalized = normalizeSubjectFromLlm(subjectType);
+  if (!normalized) return [];
+  const provinceName = normalizeAdmissionProvince(province);
+  if (COMPREHENSIVE_REFORM_ADMISSION_PROVINCES.has(provinceName)) return ["综合改革"];
+  if (normalized === "综合改革") return ["综合改革"];
+  if (normalized !== "物理类" && normalized !== "理科" && normalized !== "历史类" && normalized !== "文科") return [normalized];
+
+  const isPhysicsTrack = normalized === "物理类" || normalized === "理科";
+  const transitionYear = admissionTransitionYear(provinceName);
+  if (transitionYear && year >= transitionYear) return [isPhysicsTrack ? "物理类" : "历史类"];
+  return [isPhysicsTrack ? "理科" : "文科"];
+}
+
+function admissionTransitionYear(provinceName: string): number | null {
+  if (THIRD_BATCH_3_1_2_ADMISSION_PROVINCES.has(provinceName)) return 2021;
+  if (FOURTH_BATCH_3_1_2_ADMISSION_PROVINCES.has(provinceName)) return 2024;
+  if (FIFTH_BATCH_3_1_2_ADMISSION_PROVINCES.has(provinceName)) return 2025;
+  return null;
+}
+
+function renderSubjectCompatibilityNote(subjectType: string | null, subjectTypes: string[]): string | null {
+  if (!subjectType || subjectTypes.length <= 1) return null;
+  return `科类口径提示：用户选择的是“${subjectType}”。为兼容新旧高考过渡年份，本次同时检索 ${subjectTypes.join(" / ")}；回答时要按表格里的年份和科类说明，不要把旧高考“理科/文科”和新高考“物理类/历史类”混成同一原始字段。`;
+}
+
+function renderAdmissionComparisonContext(input: {
+  userMessage: string;
+  province: string;
+  subjectType: string;
+  majorName: string | null;
+  schools: AdmissionSchoolData[];
+}): string {
+  const lines = [
+    `多校招生对比查询：${input.schools.map((school) => school.university.name).join(" / ")}`,
+    `用户问题：${input.userMessage}`,
+    `省份：${input.province}；科类：${input.subjectType}；专业：${input.majorName ?? "未指定"}`,
+    "使用的数据表：admission_plans、admission_scores、admission_sources。",
+    ""
+  ];
+  for (const school of input.schools) {
+    lines.push(`===== ${school.university.name} =====`);
+    lines.push(school.contextText);
+    lines.push("");
+  }
+  lines.push("多校对比说明：以上每所学校均单独同步、查询和保留来源快照；掌上高考为第三方聚合数据，最终请以省考试院和学校招生网为准。");
+  return lines.join("\n");
+}
+
+function renderAdmissionContext(input: {
+  universityName: string;
+  province: string;
+  subjectType: string | null;
+  subjectTypes: string[];
+  majorName: string | null;
+  planMajorFallback: boolean;
+  scoreMajorFallback: boolean;
+  plans: AdmissionPlanRow[];
+  scores: AdmissionScoreRow[];
+  sourceSnapshots: AdmissionSourceRow[];
+  unavailableScoreYears: number[];
+  syncSummary: AdmissionSyncSummary | null;
+  syncError: string | null;
+}): string {
+  const lines = [
+    `查询条件：${input.universityName}；省份：${input.province}；科类：${input.subjectType ?? "未指定"}；专业：${input.majorName ?? "未指定"}`,
+    `当前日期：${currentAdmissionDate()}。${currentAdmissionYear()} 录取分数线/位次通常要等各省录取后陆续出现，历史分数默认使用 ${defaultAdmissionScoreYearRange()}。`
+  ];
+  const compatibilityNote = renderSubjectCompatibilityNote(input.subjectType, input.subjectTypes);
+  if (compatibilityNote) lines.push(compatibilityNote);
+  if (input.majorName && (input.planMajorFallback || input.scoreMajorFallback)) {
+    lines.push(renderMajorFallbackNotice(input.majorName, input.planMajorFallback, input.scoreMajorFallback));
+  }
+  if (input.syncError) lines.push(`实时同步提示：${input.syncError}`);
+  if (input.unavailableScoreYears.length) {
+    lines.push(
+      `分数年份提示：用户请求了 ${input.unavailableScoreYears.join("、")} 年录取分数/位次，但当前日期 ${currentAdmissionDate()} 通常尚未能完整获取当年录取结果；本次优先使用 ${defaultAdmissionScoreYearRange()} 历史分数作为参考。`
+    );
+  }
+  if (input.syncSummary) {
+    lines.push(
+      `实时同步结果：已请求掌上高考；本批 ${input.syncSummary.total}/${input.syncSummary.candidateTotal || input.syncSummary.total} 所，offset ${input.syncSummary.offset} → ${input.syncSummary.nextOffset}，映射 ${input.syncSummary.mapped}，计划 ${input.syncSummary.planRows}，院校线 ${input.syncSummary.schoolScoreRows}，专业线 ${input.syncSummary.majorScoreRows}，来源快照 ${input.syncSummary.sourceRows}，跳过 ${input.syncSummary.skipped}，错误 ${input.syncSummary.errorCount}。`
+    );
+  }
+  if (!input.plans.length && !input.scores.length && !input.syncError) {
+    lines.push(
+      input.syncSummary
+        ? "数据状态：本次同步正常完成，但当前学校/省份/科类/年份/专业条件没有返回可入库的计划或分数。常见原因是掌上高考暂未开放该年份数据、该校当年未在该省该科类招生，或源站字段与当前条件不完全一致。"
+        : "数据状态：本地暂未检索到当前条件的招生计划或录取分数。"
+    );
+  }
+
+  const referenceTable = renderAdmissionReferenceTable(input.plans, input.scores);
+  if (referenceTable) {
+    lines.push("\n报考参考表：");
+    lines.push("年份 | 数据类型 | 科类 | 批次/专业组 | 专业/口径 | 最低分 | 最低位次 | 计划数 | 抓取时间");
+    lines.push(...referenceTable);
+  }
+
+  lines.push("\n招生计划：");
+  if (input.plans.length) {
+    lines.push("年份 | 科类 | 批次/专业组 | 专业 | 计划数 | 专业数 | 学费 | 学制 | 校区 | 选科要求 | 抓取时间");
+    for (const row of input.plans.slice(0, 30)) {
+      lines.push(
+        [
+          row.year,
+          row.subjectType ?? "-",
+          [row.batch, row.planGroup].filter(Boolean).join(" ") || "-",
+          row.majorName ?? "院校计划汇总",
+          row.planCount ?? row.schoolPlanCount ?? "-",
+          row.majorCount ?? "-",
+          row.tuition ?? "-",
+          row.duration ?? "-",
+          row.campus ?? "-",
+          row.selectionRequirements ?? "-",
+          formatDateTimeShort(row.fetchedAt)
+        ].join(" | ")
+      );
+    }
+  } else {
+    lines.push("暂无匹配的招生计划缓存。");
+  }
+
+  const scoreTrendSummary = renderScoreTrendSummary(input.scores);
+  if (scoreTrendSummary) lines.push(`\n分数趋势摘要：\n${scoreTrendSummary}`);
+
+  lines.push("\n录取分数/位次：");
+  if (input.scores.length) {
+    lines.push("年份 | 类型 | 科类 | 批次/专业组 | 专业 | 最低分 | 最低位次 | 计划数 | 抓取时间");
+    for (const row of input.scores.slice(0, 50)) {
+      lines.push(
+        [
+          row.year,
+          row.scoreType === "major" ? "专业线" : "院校线",
+          row.subjectType ?? "-",
+          [row.batch, row.planGroup].filter(Boolean).join(" ") || "-",
+          row.majorName ?? "-",
+          row.minScore ?? "-",
+          row.minRank ?? "-",
+          row.planCount ?? "-",
+          formatDateTimeShort(row.fetchedAt)
+        ].join(" | ")
+      );
+    }
+  } else {
+    lines.push("暂无匹配的录取分数/位次缓存。");
+  }
+
+  const sourceIds = Array.from(
+    new Set(
+      [...input.plans, ...input.scores]
+        .map((row) => row.sourceRecordId)
+        .filter((value): value is string => Boolean(value))
+    )
+  );
+  const fetchedTimes = Array.from(new Set([...input.plans, ...input.scores].map((row) => formatDateTimeShort(row.fetchedAt))));
+  lines.push("\n资料页追溯：");
+  lines.push("使用的数据表：admission_plans、admission_scores、admission_sources。");
+  lines.push(`掌上高考来源记录：${sourceIds.length ? sourceIds.slice(0, 24).join("、") : "本次没有匹配到来源记录"}`);
+  if (input.sourceSnapshots.length) {
+    lines.push("掌上高考来源快照：");
+    for (const snapshot of input.sourceSnapshots.slice(0, 8)) {
+      lines.push(renderAdmissionSourceSnapshotLine(snapshot));
+    }
+  }
+  if (input.syncSummary && !sourceIds.length) {
+    lines.push(`本次同步来源快照数：${input.syncSummary.sourceRows}；没有入库行时，说明源站响应未包含当前查询条件可用的数据行。`);
+  }
+  lines.push(`抓取时间：${fetchedTimes.length ? fetchedTimes.slice(0, 12).join("、") : "暂无"}`);
+  lines.push(`原始数据行摘要：${renderRawSnapshotSummary(input.plans, input.scores)}`);
+  lines.push("\n来源：掌上高考公开聚合数据；最终请以省考试院和学校招生网为准。");
+  return lines.join("\n");
+}
+
+function renderMajorFallbackNotice(majorName: string, planMajorFallback: boolean, scoreMajorFallback: boolean): string {
+  const tables = [
+    planMajorFallback ? "招生计划" : null,
+    scoreMajorFallback ? "录取分数/位次" : null
+  ].filter(Boolean);
+  return `专业匹配提示：用户请求了“${majorName}”，但${tables.join("、")}没有检索到完全匹配的专业记录；下方对应表格已回退展示当前学校/省份/科类/年份的通用记录。回答时必须明确这些不是“${majorName}”的精确专业数据，不能把院校线或其他专业计划当成该专业结论。`;
+}
+
+function renderAdmissionReferenceTable(plans: AdmissionPlanRow[], scores: AdmissionScoreRow[]): string[] {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  const pushLine = (
+    keyParts: Array<string | number | null | undefined>,
+    values: Array<string | number | null | undefined>
+  ) => {
+    const key = keyParts.map((value) => String(value ?? "")).join("|");
+    if (seen.has(key)) return;
+    seen.add(key);
+    lines.push(values.map((value) => value ?? "-").join(" | "));
+  };
+
+  const scoreRows = scores
+    .slice()
+    .sort((left, right) => right.year - left.year || scoreTrendPriority(left) - scoreTrendPriority(right))
+    .slice(0, 16);
+  for (const row of scoreRows) {
+    const planCount = row.planCount ?? findMatchingPlanCount(row, plans) ?? "-";
+    pushLine(
+      ["score", row.year, row.scoreType, row.subjectType, row.batch, row.planGroup, row.majorName],
+      [
+        row.year,
+        row.scoreType === "major" ? "专业线" : "院校线",
+        row.subjectType ?? "-",
+        [row.batch, row.planGroup].filter(Boolean).join(" ") || "-",
+        row.majorName ?? "院校线",
+        row.minScore ?? "-",
+        row.minRank ?? "-",
+        planCount,
+        formatDateTimeShort(row.fetchedAt)
+      ]
+    );
+  }
+
+  const scoreYears = new Set(scores.map((row) => row.year));
+  const planRows = plans
+    .filter((row) => !scoreYears.has(row.year))
+    .slice()
+    .sort((left, right) => right.year - left.year || String(left.majorName ?? "").localeCompare(String(right.majorName ?? ""), "zh-CN"))
+    .slice(0, 16);
+  for (const row of planRows) {
+    pushLine(
+      ["plan", row.year, row.subjectType, row.batch, row.planGroup, row.majorName],
+      [
+        row.year,
+        "招生计划",
+        row.subjectType ?? "-",
+        [row.batch, row.planGroup].filter(Boolean).join(" ") || "-",
+        row.majorName ?? "院校计划汇总",
+        "-",
+        "-",
+        row.planCount ?? row.schoolPlanCount ?? "-",
+        formatDateTimeShort(row.fetchedAt)
+      ]
+    );
+  }
+
+  return lines.slice(0, 24);
+}
+
+function findMatchingPlanCount(score: AdmissionScoreRow, plans: AdmissionPlanRow[]): number | null {
+  const sameYear = plans.filter((plan) => plan.year === score.year && admissionRowsSameBucket(score, plan));
+  const majorName = normalizeComparableMajor(score.majorName);
+  if (majorName) {
+    const exactMajor = sameYear.find((plan) => normalizeComparableMajor(plan.majorName) === majorName && typeof plan.planCount === "number");
+    if (exactMajor?.planCount !== null && exactMajor?.planCount !== undefined) return exactMajor.planCount;
+  }
+  const summary = sameYear.find((plan) => !plan.majorName && typeof plan.schoolPlanCount === "number");
+  if (summary?.schoolPlanCount !== null && summary?.schoolPlanCount !== undefined) return summary.schoolPlanCount;
+  const anyPlan = sameYear.find((plan) => typeof plan.planCount === "number");
+  return anyPlan?.planCount ?? null;
+}
+
+function admissionRowsSameBucket(score: AdmissionScoreRow, plan: AdmissionPlanRow): boolean {
+  if (score.subjectType && plan.subjectType && score.subjectType !== plan.subjectType) return false;
+  if (score.batch && plan.batch && score.batch !== plan.batch) return false;
+  if (score.planGroup && plan.planGroup && score.planGroup !== plan.planGroup) return false;
+  return true;
+}
+
+function normalizeComparableMajor(value: string | null): string | null {
+  if (!value) return null;
+  return value.replace(/[（）()\s]/gu, "").toLowerCase();
+}
+
+function renderScoreTrendSummary(scores: AdmissionScoreRow[]): string | null {
+  const rankedRows = scores
+    .filter((row) => row.minRank !== null || row.minScore !== null)
+    .slice()
+    .sort((left, right) => right.year - left.year || scoreTrendPriority(left) - scoreTrendPriority(right));
+  if (!rankedRows.length) return null;
+
+  const bestByYear = new Map<number, AdmissionScoreRow>();
+  for (const row of rankedRows) {
+    const existing = bestByYear.get(row.year);
+    if (!existing || scoreTrendPriority(row) < scoreTrendPriority(existing)) {
+      bestByYear.set(row.year, row);
+    }
+  }
+  const yearly = Array.from(bestByYear.values()).sort((left, right) => right.year - left.year);
+  const ranks = yearly.map((row) => row.minRank).filter((value): value is number => typeof value === "number");
+  const scoresOnly = yearly.map((row) => row.minScore).filter((value): value is number => typeof value === "number");
+  const plans = yearly.map((row) => row.planCount).filter((value): value is number => typeof value === "number");
+  const lines = [
+    `代表记录：${yearly.map((row) => `${row.year}${row.scoreType === "major" ? "专业线" : "院校线"}${row.majorName ? `/${row.majorName}` : ""}${row.minScore !== null ? ` ${row.minScore}分` : ""}${row.minRank !== null ? ` 位次${row.minRank}` : ""}`).join("；")}`
+  ];
+  if (ranks.length) lines.push(`最低位次区间：${Math.min(...ranks)}-${Math.max(...ranks)}，位次数字越小通常代表录取门槛越高。`);
+  if (scoresOnly.length) lines.push(`最低分区间：${Math.min(...scoresOnly)}-${Math.max(...scoresOnly)}。`);
+  if (plans.length) lines.push(`计划数范围：${Math.min(...plans)}-${Math.max(...plans)}。`);
+  const latest = yearly[0];
+  const previous = yearly[1];
+  if (latest && previous && latest.minRank !== null && previous.minRank !== null) {
+    const delta = latest.minRank - previous.minRank;
+    const direction = delta < 0 ? "位次前移，门槛抬高" : delta > 0 ? "位次后移，门槛降低" : "位次基本持平";
+    lines.push(`最近变化：${latest.year} 相比 ${previous.year} ${direction}（变化 ${Math.abs(delta)} 位）。`);
+  }
+  return lines.join("\n");
+}
+
+function scoreTrendPriority(row: AdmissionScoreRow): number {
+  const rankPenalty = row.minRank === null ? 1_000_000_000 : row.minRank;
+  const typePenalty = row.scoreType === "school" ? 0 : 100_000_000;
+  return typePenalty + rankPenalty;
+}
+
+function summarizeAdmissionSync(result: Partial<GaokaoCnSyncResult>): AdmissionSyncSummary {
+  return {
+    total: toSafeCount(result.total),
+    candidateTotal: toSafeCount(result.candidateTotal),
+    offset: toSafeCount(result.offset),
+    nextOffset: toSafeCount(result.nextOffset),
+    mapped: toSafeCount(result.mapped),
+    planRows: toSafeCount(result.planRows),
+    schoolScoreRows: toSafeCount(result.schoolScoreRows),
+    majorScoreRows: toSafeCount(result.majorScoreRows),
+    sourceRows: toSafeCount(result.sourceRows),
+    skipped: toSafeCount(result.skipped),
+    errorCount: Array.isArray(result.errors) ? result.errors.length : 0
+  };
+}
+
+function summarizeAdmissionSyncResults(results: GaokaoCnSyncResult[]): AdmissionSyncSummary | null {
+  if (!results.length) return null;
+  const summaries = results.map((result) => summarizeAdmissionSync(result));
+  return {
+    total: Math.max(...summaries.map((item) => item.total)),
+    candidateTotal: Math.max(...summaries.map((item) => item.candidateTotal)),
+    offset: Math.min(...summaries.map((item) => item.offset)),
+    nextOffset: Math.max(...summaries.map((item) => item.nextOffset)),
+    mapped: Math.max(...summaries.map((item) => item.mapped)),
+    planRows: summaries.reduce((sum, item) => sum + item.planRows, 0),
+    schoolScoreRows: summaries.reduce((sum, item) => sum + item.schoolScoreRows, 0),
+    majorScoreRows: summaries.reduce((sum, item) => sum + item.majorScoreRows, 0),
+    sourceRows: summaries.reduce((sum, item) => sum + item.sourceRows, 0),
+    skipped: summaries.reduce((sum, item) => sum + item.skipped, 0),
+    errorCount: summaries.reduce((sum, item) => sum + item.errorCount, 0)
+  };
+}
+
+function renderRawSnapshotSummary(plans: AdmissionPlanRow[], scores: AdmissionScoreRow[]): string {
+  const snippets = [...plans.slice(0, 2), ...scores.slice(0, 2)]
+    .map((row) => summarizeRawJson(row.rawJson))
+    .filter(Boolean);
+  return snippets.length ? snippets.join("；") : "暂无可展示的原始 JSON 摘要";
+}
+
+function renderAdmissionSourceSnapshotLine(snapshot: AdmissionSourceRow): string {
+  const request = summarizeSourceRequest(snapshot.requestJson);
+  const response = summarizeSourceResponse(snapshot.responseJson, snapshot.error);
+  return [
+    `#${snapshot.id}`,
+    snapshot.sourceKind,
+    snapshot.status,
+    `抓取=${formatDateTimeShort(snapshot.fetchedAt)}`,
+    `URL=${snapshot.sourceUrl}`,
+    `请求=${request}`,
+    `响应=${response}`
+  ].join("；");
+}
+
+function summarizeSourceRequest(requestJson: string): string {
+  try {
+    const data = JSON.parse(requestJson) as Record<string, unknown>;
+    return pickObjectEntries(data, ["uri", "school_id", "local_province_id", "local_type_id", "year", "page", "size"]).join(", ") || requestJson.slice(0, 180);
+  } catch {
+    return requestJson.slice(0, 180);
+  }
+}
+
+function summarizeSourceResponse(responseJson: string | null, error: string | null): string {
+  if (error) return error;
+  if (!responseJson) return "无响应正文";
+  try {
+    const data = JSON.parse(responseJson) as Record<string, unknown>;
+    const summary = pickObjectEntries(data, ["code", "message", "location"]);
+    const itemCount = countResponseItems(data);
+    if (itemCount !== null) summary.push(`item_count=${itemCount}`);
+    return summary.join(", ") || responseJson.slice(0, 220);
+  } catch {
+    return responseJson.slice(0, 220);
+  }
+}
+
+function pickObjectEntries(data: Record<string, unknown>, keys: string[]): string[] {
+  return keys
+    .filter((key) => data[key] !== undefined && data[key] !== null && String(data[key]).trim() !== "")
+    .map((key) => `${key}=${String(data[key])}`);
+}
+
+function countResponseItems(data: Record<string, unknown>): number | null {
+  const body = data.data;
+  if (!body || typeof body !== "object") return null;
+  const item = (body as Record<string, unknown>).item;
+  if (Array.isArray(item)) return item.length;
+  return null;
+}
+
+function summarizeRawJson(rawJson: string): string {
+  try {
+    const data = JSON.parse(rawJson) as Record<string, unknown>;
+    const picked = Object.entries(data)
+      .filter(([key]) =>
+        [
+          "year",
+          "local_province_name",
+          "local_type_name",
+          "local_batch_name",
+          "sg_name",
+          "spname",
+          "sp_name",
+          "num",
+          "tuition",
+          "length",
+          "campus",
+          "campus_name",
+          "min",
+          "min_section"
+        ].includes(key)
+      )
+      .slice(0, 8);
+    return picked.map(([key, value]) => `${key}=${String(value ?? "-")}`).join(", ");
+  } catch {
+    return rawJson.slice(0, 180);
+  }
+}
+
+function normalizeSchoolName(value: unknown): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[·.\s（）()]/g, "")
+    .trim();
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(toCleanString).filter((item): item is string => Boolean(item));
+}
+
+function toNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item))
+    .map((item) => Math.floor(item));
+}
+
+function toSafeCount(value: unknown): number {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
+}
+
+function toCleanString(value: unknown): string | null {
+  const text = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text && text !== "null" && text !== "undefined" ? text : null;
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
+}
+
+function formatDateTimeShort(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", { hour12: false });
 }
 
 function normalizeLlmFailureMessage(error: unknown, timeoutMs: number): string {
@@ -685,26 +1920,6 @@ function normalizeImageContentType(contentType: string | null, url: string): str
   return null;
 }
 
-function isGreeting(text: string): boolean {
-  const normalized = text
-    .trim()
-    .replace(/^[\s@]+/, "")
-    .replace(/[!！?？。~～,.，、\s]+$/g, "")
-    .toLowerCase();
-  return /^(你好|您好|hello|hi|嗨|哈喽|哈啰|在吗|在不在|有人吗|help|帮助|菜单)$/.test(normalized);
-}
-
-function shouldExplainLowConfidence(
-  input: IncomingMessage,
-  analysis: { isUniversityQuery: boolean },
-  context: ConversationContext | null
-): boolean {
-  if (input.messageType === "private") return true;
-  if (input.mentionedBot) return true;
-  if (context) return true;
-  return analysis.isUniversityQuery;
-}
-
 function renderGreetingReply(): string {
   return [
     "你好，我可以帮你查高校生活资料。",
@@ -715,14 +1930,10 @@ function renderGreetingReply(): string {
   ].join("\n");
 }
 
-function renderCasualFallback(analysis: { isUniversityQuery: boolean }, hasContext: boolean): string {
+function renderCasualFallback(hasContext: boolean): string {
   if (hasContext) {
-    return "我没太理解你想继续查哪个方面。可以直接说“宿舍”“食堂”“校园网”“外卖”“澡堂”等关键词。";
+    return "我没太理解你想继续查哪个方面。可以直接说想查的学校和具体方面，比如宿舍、食堂、校园网、外卖或澡堂。";
   }
 
-  if (analysis.isUniversityQuery) {
-    return "我看起来像是在查高校资料，但没识别清楚学校或问题。可以说得更完整一点，例如“安徽大学宿舍怎么样”或“西电能点外卖吗”。";
-  }
-
-  return "我没识别出具体的高校资料问题。可以直接问“安徽大学宿舍怎么样”“西电校园网咋样”“南航能点外卖吗”。";
+  return "模型回复暂时失败了。你可以直接用自然语言问学校资料、招生计划、分数线，或者普通聊天也可以。";
 }

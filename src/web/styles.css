@@ -286,6 +286,11 @@ nav button:hover {
   color: #536170;
 }
 
+.field small {
+  color: #7b8794;
+  line-height: 1.45;
+}
+
 input,
 select,
 textarea {

@@ -214,13 +214,12 @@ function settings(): SettingsStore {
         replyEnabled: true,
         replyAsImage: false
       },
-      naturalLanguage: {
-        groupNaturalEnabled: true,
-        requireMentionInGroup: false,
-        confidenceThreshold: 0.55,
-        contextTtlMinutes: 10,
-        cooldownSeconds: 5
-      }
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: false,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5
+        }
     })
   } as SettingsStore;
 }
