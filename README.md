@@ -38,7 +38,7 @@ ws://127.0.0.1:8787/onebot/v11/ws
 
 在 NapCat WebUI 里进入网络配置，新建 WebSocket 客户端，填入上面的地址即可。如果设置了 `ONEBOT_ACCESS_TOKEN`，NapCat 侧也需要配置相同 token。
 
-如果 NapCat 反向 WebSocket 看起来还连着，但 QQ 实际掉登录了，可以在 WebUI 仪表盘的“NapCat 运维”里配置重启命令和 NapCat 管理台地址。常见命令例如 `systemctl restart napcat`、`docker restart napcat` 或 `pm2 restart napcat`；如果 MyQQBot 不是 root 运行，需要提前给对应命令配置免密权限。点“重启 NapCat”后后台会先保存当前配置再执行命令，重启完成后可直接打开 NapCat 管理台扫码登录。
+如果 NapCat 反向 WebSocket 看起来还连着，但 QQ 实际掉登录了，可以在 WebUI 仪表盘的“NapCat 运维”里配置 NapCat 启动器地址和 WebUI Key。启动器默认地址通常是 `http://127.0.0.1:6099`，MyQQBot 后端会按 NapCat WebUI 的登录流程用 key 换取临时 Credential，然后调用 `/api/QQLogin/CheckLoginStatus` 判断 QQ 是否真的在线，调用 `/api/QQLogin/RestartNapCat` 触发启动器重启。重启完成后可直接打开扫码页重新登录。若没有使用启动器，也可以填写兜底重启命令，例如 `systemctl restart napcat`、`docker restart napcat` 或 `pm2 restart napcat`。
 
 ## Linux 部署
 

@@ -16,6 +16,7 @@ export interface RuntimeSettings {
     replyImageBadge: string;
     napcatRestartCommand: string;
     napcatWebUrl: string;
+    napcatWebKey: string;
   };
   site: {
     publicBaseUrl: string;
@@ -82,7 +83,8 @@ const DEFAULTS: Record<string, string> = {
   "onebot.replyImageTitle": process.env.ONEBOT_REPLY_IMAGE_TITLE ?? "高校资料助手",
   "onebot.replyImageBadge": process.env.ONEBOT_REPLY_IMAGE_BADGE ?? "AI 生成回复",
   "onebot.napcatRestartCommand": process.env.NAPCAT_RESTART_COMMAND ?? "",
-  "onebot.napcatWebUrl": process.env.NAPCAT_WEB_URL ?? "",
+  "onebot.napcatWebUrl": process.env.NAPCAT_WEB_URL ?? "http://127.0.0.1:6099",
+  "onebot.napcatWebKey": process.env.NAPCAT_WEB_KEY ?? "",
   "site.publicBaseUrl": process.env.PUBLIC_BASE_URL ?? "http://127.0.0.1:8787",
   "site.filingNumber": process.env.SITE_FILING_NUMBER ?? "",
   "llm.baseUrl": process.env.LLM_BASE_URL ?? "https://your-sub2api.example.com/v1",
@@ -140,7 +142,7 @@ export class SettingsStore {
     for (const row of rows) {
       if (row.key.startsWith("auth.")) continue;
       if (row.key.startsWith("sync.internal.")) continue;
-      if (maskSecrets && row.key === "llm.apiKey") {
+      if (maskSecrets && (row.key === "llm.apiKey" || row.key === "onebot.napcatWebKey")) {
         values[row.key] = row.value ? "********" : "";
       } else {
         values[row.key] = row.value;
@@ -160,7 +162,8 @@ export class SettingsStore {
         replyImageTitle: this.getString("onebot.replyImageTitle", "高校资料助手"),
         replyImageBadge: this.getString("onebot.replyImageBadge", "AI 生成回复"),
         napcatRestartCommand: this.getString("onebot.napcatRestartCommand", ""),
-        napcatWebUrl: this.getString("onebot.napcatWebUrl", "")
+        napcatWebUrl: this.getString("onebot.napcatWebUrl", "http://127.0.0.1:6099"),
+        napcatWebKey: this.getString("onebot.napcatWebKey", "")
       },
       site: {
         publicBaseUrl: this.getString("site.publicBaseUrl", "http://127.0.0.1:8787"),
@@ -223,7 +226,7 @@ export class SettingsStore {
     this.database.transaction(() => {
       for (const [key, value] of Object.entries(values)) {
         if (!(key in DEFAULTS)) continue;
-        if (key === "llm.apiKey" && value === "********") continue;
+        if ((key === "llm.apiKey" || key === "onebot.napcatWebKey") && value === "********") continue;
         stmt.run(key, normalizeGaokaoSyncSetting(key, String(value ?? "")), now);
       }
     });

@@ -58,6 +58,18 @@ interface Dashboard {
   publicBaseUrl: string;
 }
 
+interface NapcatWebStatus {
+  configured?: boolean;
+  reachable?: boolean;
+  baseUrl?: string;
+  panelUrl?: string;
+  isLogin?: boolean;
+  isOffline?: boolean;
+  qrcodeUrl?: string;
+  loginError?: string;
+  message?: string;
+}
+
 interface University {
   id: number;
   name: string;
@@ -503,6 +515,7 @@ function LoginPage({ auth, onLoggedIn }: { auth: AuthStatus; onLoggedIn: () => v
 
 function DashboardPage() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
+  const [napcatWeb, setNapcatWeb] = useState<NapcatWebStatus | null>(null);
   const [settings, setSettings] = useState<Record<string, string | boolean>>({});
   const [status, setStatus] = useState("");
   const [napcatStatus, setNapcatStatus] = useState("");
@@ -511,9 +524,11 @@ function DashboardPage() {
 
   const load = async () => setDashboard(await api<Dashboard>("/api/dashboard"));
   const loadSettings = async () => setSettings(await api<Record<string, string | boolean>>("/api/settings"));
+  const loadNapcatWebStatus = async () => setNapcatWeb(await api<NapcatWebStatus>("/api/onebot/napcat/status"));
   useEffect(() => {
     void load();
     void loadSettings();
+    void loadNapcatWebStatus();
     const timer = window.setInterval(() => void load(), 8000);
     return () => window.clearInterval(timer);
   }, []);
@@ -531,7 +546,8 @@ function DashboardPage() {
   const updateNapcatSetting = (key: string, value: string) => setSettings((current) => ({ ...current, [key]: value }));
   const napcatSettingsPayload = () => ({
     "onebot.napcatRestartCommand": settings["onebot.napcatRestartCommand"] ?? "",
-    "onebot.napcatWebUrl": settings["onebot.napcatWebUrl"] ?? ""
+    "onebot.napcatWebUrl": settings["onebot.napcatWebUrl"] ?? "",
+    "onebot.napcatWebKey": settings["onebot.napcatWebKey"] ?? ""
   });
   const saveNapcatSettings = async () => {
     setSavingNapcat(true);
@@ -543,6 +559,7 @@ function DashboardPage() {
       });
       setNapcatStatus("NapCat 运维配置已保存");
       await loadSettings();
+      await loadNapcatWebStatus();
     } catch (error) {
       setNapcatStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -551,28 +568,44 @@ function DashboardPage() {
   };
   const restartNapcat = async () => {
     setRestartingNapcat(true);
-    setNapcatStatus("正在执行 NapCat 重启命令...");
+    setNapcatStatus("正在向 NapCat 启动器发送重启请求...");
     try {
       await api("/api/settings", {
         method: "PUT",
         body: JSON.stringify(napcatSettingsPayload())
       });
-      const result = await api<{ stdout?: string; stderr?: string }>("/api/onebot/napcat/restart", {
+      const result = await api<{ mode?: string; message?: string; stdout?: string; stderr?: string }>("/api/onebot/napcat/restart", {
         method: "POST",
         body: "{}"
       });
       const output = [result.stdout?.trim() ? `输出：${result.stdout.trim()}` : "", result.stderr?.trim() ? `错误输出：${result.stderr.trim()}` : ""]
         .filter(Boolean)
         .join("；");
-      setNapcatStatus(output ? `命令已执行。${output}` : "命令已执行，等待 NapCat 重连；如掉登录请打开管理台扫码。");
+      setNapcatStatus(output ? `命令已执行。${output}` : result.message || "已向 NapCat 启动器发送重启请求；如掉登录请打开扫码页。");
       await load();
+      await loadNapcatWebStatus();
     } catch (error) {
       setNapcatStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setRestartingNapcat(false);
     }
   };
-  const napcatWebUrl = String(settings["onebot.napcatWebUrl"] ?? "").trim();
+  const checkNapcatWebStatus = async () => {
+    setNapcatStatus("正在检查 NapCat QQ 登录状态...");
+    try {
+      await api("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify(napcatSettingsPayload())
+      });
+      await loadSettings();
+      const data = await api<NapcatWebStatus>("/api/onebot/napcat/status");
+      setNapcatWeb(data);
+      setNapcatStatus(formatNapcatWebStatus(data));
+    } catch (error) {
+      setNapcatStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const openNapcatWeb = () => window.open("/api/onebot/napcat/open", "_blank", "noopener,noreferrer");
 
   return (
     <section>
@@ -593,31 +626,45 @@ function DashboardPage() {
           <KeyValue label="最近事件" value={formatTime(dashboard?.onebot.lastEventAt)} />
         </Panel>
         <Panel title="NapCat 运维" icon={<PlugZap size={18} />}>
+          <KeyValue label="QQ 状态" value={formatNapcatWebStatus(napcatWeb)} />
+          <KeyValue label="启动器" value={napcatWeb?.reachable ? "可访问" : napcatWeb?.configured ? "不可访问" : "未配置"} />
+          <KeyValue label="地址" value={napcatWeb?.baseUrl ?? String(settings["onebot.napcatWebUrl"] ?? "")} />
           <FormGrid>
             <Input
-              label="重启命令"
-              value={String(settings["onebot.napcatRestartCommand"] ?? "")}
-              onChange={(v) => updateNapcatSetting("onebot.napcatRestartCommand", v)}
-              hint="例如 systemctl restart napcat，或 docker restart napcat。"
-            />
-            <Input
-              label="管理台地址"
+              label="启动器地址"
               value={String(settings["onebot.napcatWebUrl"] ?? "")}
               onChange={(v) => updateNapcatSetting("onebot.napcatWebUrl", v)}
-              hint="填浏览器可访问的 NapCat WebUI 地址，方便扫码登录。"
+              hint="默认 http://127.0.0.1:6099；可填完整 /webui 地址。"
+            />
+            <Input
+              label="WebUI Key"
+              value={String(settings["onebot.napcatWebKey"] ?? "")}
+              onChange={(v) => updateNapcatSetting("onebot.napcatWebKey", v)}
+              type="password"
+              hint="NapCat 启动器 WebUI 的 key，会打码保存。"
+            />
+            <Input
+              label="兜底重启命令"
+              value={String(settings["onebot.napcatRestartCommand"] ?? "")}
+              onChange={(v) => updateNapcatSetting("onebot.napcatRestartCommand", v)}
+              hint="可选；只有没填 WebUI Key 时才使用。"
             />
           </FormGrid>
           <div className="actions">
             <button className="primary" onClick={restartNapcat} disabled={restartingNapcat}>
-              <RefreshCcw size={16} />{restartingNapcat ? "重启中..." : "重启 NapCat"}
+              <RefreshCcw size={16} />{restartingNapcat ? "重启中..." : "重启启动器"}
             </button>
+            <button onClick={checkNapcatWebStatus}><PlugZap size={16} />检查状态</button>
             <button onClick={saveNapcatSettings} disabled={savingNapcat}>
               <Save size={16} />{savingNapcat ? "保存中..." : "保存配置"}
             </button>
-            <button onClick={() => window.open(napcatWebUrl, "_blank", "noopener,noreferrer")} disabled={!napcatWebUrl}>
-              <ExternalLink size={16} />打开管理台
+            <button onClick={openNapcatWeb} disabled={!String(settings["onebot.napcatWebUrl"] ?? "").trim()}>
+              <ExternalLink size={16} />打开扫码页
             </button>
           </div>
+          {napcatWeb?.qrcodeUrl && !napcatWeb.isLogin && (
+            <p className="notice ops-status">二维码已就绪，可打开扫码页重新登录。登录页地址不会在这里直接暴露 key。</p>
+          )}
           {napcatStatus && <p className="notice ops-status">{napcatStatus}</p>}
         </Panel>
         <Panel title="数据同步" icon={<Database size={18} />}>
@@ -2124,6 +2171,15 @@ function formatCoverageYears(years?: AdmissionCoverageYear[]) {
     .slice(0, 4)
     .map((item) => `${item.year}: ${item.universityCount}校/${item.provinceCount}省/${item.rowCount}行`)
     .join("；");
+}
+
+function formatNapcatWebStatus(status?: NapcatWebStatus | null) {
+  if (!status) return "未检查";
+  if (status.isLogin) return "QQ 在线";
+  if (status.isOffline) return "QQ 已登录但离线，建议重启后扫码";
+  if (status.reachable && status.qrcodeUrl) return "等待扫码登录";
+  if (status.reachable) return status.loginError || "启动器可访问，QQ 未在线";
+  return status.message || "启动器不可访问";
 }
 
 function formatCoverageGapKind(kind: AdmissionCoverageGap["kind"]) {

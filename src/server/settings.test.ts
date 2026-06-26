@@ -45,8 +45,10 @@ describe("SettingsStore", () => {
     expect(settings.all(false)["sync.gaokaoCnScoreIntervalHours"]).toBe(String(defaultAdmissionScoreIntervalHours()));
     expect(settings.runtime().onebot.napcatRestartCommand).toBe("");
     expect(settings.all(false)["onebot.napcatRestartCommand"]).toBe("");
-    expect(settings.runtime().onebot.napcatWebUrl).toBe("");
-    expect(settings.all(false)["onebot.napcatWebUrl"]).toBe("");
+    expect(settings.runtime().onebot.napcatWebUrl).toBe("http://127.0.0.1:6099");
+    expect(settings.all(false)["onebot.napcatWebUrl"]).toBe("http://127.0.0.1:6099");
+    expect(settings.runtime().onebot.napcatWebKey).toBe("");
+    expect(settings.all(false)["onebot.napcatWebKey"]).toBe("");
 
     database.close();
   });

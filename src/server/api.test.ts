@@ -10,6 +10,13 @@ import { ADMISSION_SOURCE, AdmissionRepository } from "./services/admission-repo
 import type { AnswerSourceRecord } from "./services/answer-source-store.js";
 import { UniversityRepository } from "./services/university-repository.js";
 
+function jsonResponse(payload: unknown): Response {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { "content-type": "application/json" }
+  });
+}
+
 describe("renderAnswerSourcePage", () => {
   it("renders admission source pages as traceable sections", () => {
     const html = renderAnswerSourcePage(
@@ -146,7 +153,7 @@ describe("renderAnswerSourcePage", () => {
 });
 
 describe("OneBot operation API", () => {
-  it("rejects NapCat restart when no restart command is configured", async () => {
+  it("rejects NapCat restart when neither launcher key nor restart command is configured", async () => {
     const app = Fastify();
     try {
       await registerApi(app, {
@@ -155,7 +162,9 @@ describe("OneBot operation API", () => {
         settings: {
           runtime: () => ({
             onebot: {
-              napcatRestartCommand: ""
+              napcatRestartCommand: "",
+              napcatWebUrl: "http://127.0.0.1:6099",
+              napcatWebKey: ""
             }
           })
         },
@@ -183,9 +192,71 @@ describe("OneBot operation API", () => {
       expect(response.statusCode).toBe(400);
       expect(response.json()).toMatchObject({
         ok: false,
-        message: "请先在后台填写 NapCat 重启命令。"
+        message: "请先填写 NapCat 启动器地址和 WebUI Key；如果不用启动器，再填写 NapCat 重启命令。"
       });
     } finally {
+      await app.close();
+    }
+  });
+
+  it("restarts NapCat through the launcher WebUI API when a key is configured", async () => {
+    const app = Fastify();
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/login")) {
+        expect(JSON.parse(String(init?.body))).toHaveProperty("hash");
+        return jsonResponse({ code: 0, data: { Credential: "credential" }, message: "success" });
+      }
+      if (url.endsWith("/api/QQLogin/RestartNapCat")) {
+        expect(init?.headers).toMatchObject({ authorization: "Bearer credential" });
+        return jsonResponse({ code: 0, data: { message: "Restart initiated" }, message: "success" });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await registerApi(app, {
+        config: { server: { publicBaseUrl: "http://localhost:8787" } },
+        database: {},
+        settings: {
+          runtime: () => ({
+            onebot: {
+              napcatRestartCommand: "",
+              napcatWebUrl: "http://127.0.0.1:6099",
+              napcatWebKey: "secret"
+            }
+          })
+        },
+        universities: {},
+        admissions: {},
+        sync: {},
+        answerSources: {},
+        srgaoxiaoSync: {},
+        gaokaoCn: {},
+        autoSync: {},
+        llm: {},
+        logs: {},
+        processor: {},
+        onebot: {
+          status: () => ({ connected: false })
+        }
+      } as never);
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/onebot/napcat/restart",
+        payload: {}
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        ok: true,
+        mode: "launcher",
+        message: "Restart initiated"
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
       await app.close();
     }
   });

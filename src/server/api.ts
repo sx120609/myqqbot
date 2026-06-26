@@ -1,4 +1,5 @@
 import { exec } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import type { FastifyInstance } from "fastify";
 import type { AppConfig } from "./config.js";
@@ -484,12 +485,44 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
 
   app.get("/api/onebot/status", async () => deps.onebot.status());
 
+  app.get("/api/onebot/napcat/status", async () => getNapcatLauncherStatus(deps.settings.runtime().onebot));
+
+  app.get("/api/onebot/napcat/open", async (_request, reply) => {
+    const settings = deps.settings.runtime().onebot;
+    const url = buildNapcatWebPanelUrl(settings.napcatWebUrl, settings.napcatWebKey);
+    if (!url) {
+      return reply.code(400).send({
+        ok: false,
+        message: "请先填写 NapCat 启动器地址。"
+      });
+    }
+    return reply.redirect(url);
+  });
+
   app.post("/api/onebot/napcat/restart", async (_request, reply) => {
-    const command = deps.settings.runtime().onebot.napcatRestartCommand.trim();
+    const settings = deps.settings.runtime().onebot;
+    if (settings.napcatWebKey.trim()) {
+      try {
+        const result = await callNapcatLauncherApi<{ message?: string }>(settings, "/QQLogin/RestartNapCat");
+        return {
+          ok: true,
+          mode: "launcher",
+          message: result.message || "已向 NapCat 启动器发送重启请求。"
+        };
+      } catch (error) {
+        return reply.code(500).send({
+          ok: false,
+          mode: "launcher",
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    const command = settings.napcatRestartCommand.trim();
     if (!command) {
       return reply.code(400).send({
         ok: false,
-        message: "请先在后台填写 NapCat 重启命令。"
+        message: "请先填写 NapCat 启动器地址和 WebUI Key；如果不用启动器，再填写 NapCat 重启命令。"
       });
     }
 
@@ -532,6 +565,131 @@ function truncateCommandOutput(value: unknown): string {
   const text = value == null ? "" : String(value);
   if (text.length <= COMMAND_OUTPUT_LIMIT) return text;
   return `${text.slice(0, COMMAND_OUTPUT_LIMIT)}\n...（输出已截断）`;
+}
+
+type NapcatLauncherSettings = ReturnType<SettingsStore["runtime"]>["onebot"];
+
+interface NapcatApiResponse<T> {
+  code: number;
+  message?: string;
+  data?: T;
+}
+
+interface NapcatLoginResponse {
+  Credential?: string;
+  require2FA?: boolean;
+  message?: string;
+}
+
+interface NapcatLoginStatus {
+  isLogin?: boolean;
+  isOffline?: boolean;
+  qrcodeurl?: string;
+  loginError?: string;
+}
+
+async function getNapcatLauncherStatus(settings: NapcatLauncherSettings): Promise<Record<string, unknown>> {
+  const baseUrl = normalizeNapcatWebBaseUrl(settings.napcatWebUrl);
+  if (!baseUrl) {
+    return {
+      configured: false,
+      reachable: false,
+      message: "请先填写 NapCat 启动器地址。"
+    };
+  }
+  if (!settings.napcatWebKey.trim()) {
+    return {
+      configured: false,
+      reachable: false,
+      baseUrl,
+      panelUrl: buildNapcatWebPanelUrl(settings.napcatWebUrl, settings.napcatWebKey),
+      message: "请填写 NapCat WebUI Key 后再检查登录状态。"
+    };
+  }
+
+  try {
+    const data = await callNapcatLauncherApi<NapcatLoginStatus>(settings, "/QQLogin/CheckLoginStatus");
+    return {
+      configured: true,
+      reachable: true,
+      baseUrl,
+      panelUrl: buildNapcatWebPanelUrl(settings.napcatWebUrl, settings.napcatWebKey),
+      isLogin: Boolean(data.isLogin),
+      isOffline: Boolean(data.isOffline),
+      qrcodeUrl: data.qrcodeurl || "",
+      loginError: data.loginError || ""
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      reachable: false,
+      baseUrl,
+      panelUrl: buildNapcatWebPanelUrl(settings.napcatWebUrl, settings.napcatWebKey),
+      message: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function callNapcatLauncherApi<T>(settings: NapcatLauncherSettings, path: string): Promise<T> {
+  const baseUrl = normalizeNapcatWebBaseUrl(settings.napcatWebUrl);
+  if (!baseUrl) throw new Error("NapCat 启动器地址无效。");
+  const credential = await loginNapcatWebUi(baseUrl, settings.napcatWebKey);
+  const response = await fetch(`${baseUrl}/api${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${credential}`
+    },
+    body: "{}"
+  });
+  return parseNapcatApiResponse<T>(response, path);
+}
+
+async function loginNapcatWebUi(baseUrl: string, key: string): Promise<string> {
+  const trimmedKey = key.trim();
+  if (!trimmedKey) throw new Error("请填写 NapCat WebUI Key。");
+  const hash = createHash("sha256").update(`${trimmedKey}.napcat`).digest("hex");
+  const response = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ hash })
+  });
+  const data = await parseNapcatApiResponse<NapcatLoginResponse>(response, "/auth/login");
+  if (data.require2FA) throw new Error("NapCat WebUI 已开启 2FA，请先手动打开 NapCat 管理台登录。");
+  if (!data.Credential) throw new Error(data.message || "NapCat WebUI 没有返回登录凭证。");
+  return data.Credential;
+}
+
+async function parseNapcatApiResponse<T>(response: Response, path: string): Promise<T> {
+  const text = await response.text();
+  let parsed: NapcatApiResponse<T>;
+  try {
+    parsed = JSON.parse(text) as NapcatApiResponse<T>;
+  } catch {
+    throw new Error(`NapCat WebUI ${path} 返回了无法解析的响应：${text.slice(0, 180)}`);
+  }
+  if (!response.ok || parsed.code !== 0) {
+    throw new Error(`NapCat WebUI ${path} 调用失败：${parsed.message || response.statusText || response.status}`);
+  }
+  return (parsed.data ?? {}) as T;
+}
+
+function normalizeNapcatWebBaseUrl(value: string): string {
+  const text = value.trim() || "http://127.0.0.1:6099";
+  try {
+    const url = new URL(text);
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return "";
+  }
+}
+
+function buildNapcatWebPanelUrl(baseUrl: string, key: string): string {
+  const normalized = normalizeNapcatWebBaseUrl(baseUrl);
+  if (!normalized) return "";
+  const url = new URL("/webui", normalized);
+  if (key.trim()) url.searchParams.set("token", key.trim());
+  return url.toString();
 }
 
 export function renderAnswerSourcePage(record: AnswerSourceRecord, filingNumber: string): string {
