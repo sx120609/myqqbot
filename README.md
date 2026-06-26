@@ -38,6 +38,8 @@ ws://127.0.0.1:8787/onebot/v11/ws
 
 在 NapCat WebUI 里进入网络配置，新建 WebSocket 客户端，填入上面的地址即可。如果设置了 `ONEBOT_ACCESS_TOKEN`，NapCat 侧也需要配置相同 token。
 
+如果 NapCat 反向 WebSocket 看起来还连着，但 QQ 实际掉登录了，可以在 WebUI 仪表盘的“NapCat 运维”里配置重启命令和 NapCat 管理台地址。常见命令例如 `systemctl restart napcat`、`docker restart napcat` 或 `pm2 restart napcat`；如果 MyQQBot 不是 root 运行，需要提前给对应命令配置免密权限。点“重启 NapCat”后后台会先保存当前配置再执行命令，重启完成后可直接打开 NapCat 管理台扫码登录。
+
 ## Linux 部署
 
 服务器需要 Node.js 24+、git、npm 和 systemd。脚本默认使用 `https://gh.lizmt.cn/CollegesChat/university-information.git` 同步高校数据，适合国内服务器。克隆仓库后运行：
@@ -143,11 +145,11 @@ cd /opt/myqqbot
 sudo npm run sync:xuefeng-agent
 sudo npm run sync:xuefeng-agent -- --query=南京大学 --provinces=江苏,浙江 --years=2024,2025
 sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-xuefeng-agent --limit=50000 --offset=0
-sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-xuefeng-agent --url=https://gh.lizmt.cn/https://github.com/ziqihe10-droid/xuefeng-agent/raw/main/admission_clean.db.gz
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-xuefeng-agent --url=https://gh.lizmt.cn/https://github.com/ziqihe10-droid/xuefeng-agent/raw/master/admission_clean.db.gz
 sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-xuefeng-agent --db=/opt/myqqbot/data/xuefeng-agent/admission_clean.db
 ```
 
-WebUI 的“招生数据”页也提供“导入雪峰 Agent 历史库”按钮。注意：该上游仓库采用 AGPLv3 协议，且数据仍应按第三方缓存处理；对外回答会继续提示最终以省考试院和学校招生网为准。
+WebUI 的“招生数据”页也提供“导入雪峰 Agent 历史库”按钮。导入会在后台任务中执行，避免浏览器或 Nginx 因下载、解压和全量入库耗时太久而 504；点完后刷新“同步任务”查看运行和失败记录。注意：该上游仓库采用 AGPLv3 协议，且数据仍应按第三方缓存处理；对外回答会继续提示最终以省考试院和学校招生网为准。
 
 同步一批掌上高考招生数据，默认抓 2026 招生计划汇总和 2023-2025 历史分数线。这个源站容易限流，建议按后台补库方式慢慢跑：每批 1 所学校、请求间隔 180 秒、每批源站请求预算 1 次、跳过已有覆盖。专业招生计划明细请求量更大，默认关闭，需要时加 `--plan-details` 或在 WebUI 打开。
 

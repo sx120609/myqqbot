@@ -5,6 +5,7 @@ import {
   Bot,
   Brain,
   Database,
+  ExternalLink,
   ListFilter,
   Lock,
   LogOut,
@@ -379,7 +380,7 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const text = await response.text();
-    let message = text || response.statusText;
+    let message = formatApiErrorText(text, response.status, response.statusText);
     try {
       const parsed = JSON.parse(text) as { message?: string; error?: string };
       message = parsed.message || parsed.error || message;
@@ -389,6 +390,14 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(message);
   }
   return response.json() as Promise<T>;
+}
+
+function formatApiErrorText(text: string, status: number, statusText: string): string {
+  if (/^\s*</u.test(text)) {
+    if (status === 504) return "请求超时：任务可能仍在后台执行，请稍后刷新同步任务或来源列表。";
+    return `${status} ${statusText || "HTTP Error"}`.trim();
+  }
+  return text || statusText;
 }
 
 function App() {
@@ -494,11 +503,17 @@ function LoginPage({ auth, onLoggedIn }: { auth: AuthStatus; onLoggedIn: () => v
 
 function DashboardPage() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
+  const [settings, setSettings] = useState<Record<string, string | boolean>>({});
   const [status, setStatus] = useState("");
+  const [napcatStatus, setNapcatStatus] = useState("");
+  const [savingNapcat, setSavingNapcat] = useState(false);
+  const [restartingNapcat, setRestartingNapcat] = useState(false);
 
   const load = async () => setDashboard(await api<Dashboard>("/api/dashboard"));
+  const loadSettings = async () => setSettings(await api<Record<string, string | boolean>>("/api/settings"));
   useEffect(() => {
     void load();
+    void loadSettings();
     const timer = window.setInterval(() => void load(), 8000);
     return () => window.clearInterval(timer);
   }, []);
@@ -511,8 +526,53 @@ function DashboardPage() {
       await load();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
+      }
+  };
+  const updateNapcatSetting = (key: string, value: string) => setSettings((current) => ({ ...current, [key]: value }));
+  const napcatSettingsPayload = () => ({
+    "onebot.napcatRestartCommand": settings["onebot.napcatRestartCommand"] ?? "",
+    "onebot.napcatWebUrl": settings["onebot.napcatWebUrl"] ?? ""
+  });
+  const saveNapcatSettings = async () => {
+    setSavingNapcat(true);
+    setNapcatStatus("保存中...");
+    try {
+      await api("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify(napcatSettingsPayload())
+      });
+      setNapcatStatus("NapCat 运维配置已保存");
+      await loadSettings();
+    } catch (error) {
+      setNapcatStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingNapcat(false);
     }
   };
+  const restartNapcat = async () => {
+    setRestartingNapcat(true);
+    setNapcatStatus("正在执行 NapCat 重启命令...");
+    try {
+      await api("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify(napcatSettingsPayload())
+      });
+      const result = await api<{ stdout?: string; stderr?: string }>("/api/onebot/napcat/restart", {
+        method: "POST",
+        body: "{}"
+      });
+      const output = [result.stdout?.trim() ? `输出：${result.stdout.trim()}` : "", result.stderr?.trim() ? `错误输出：${result.stderr.trim()}` : ""]
+        .filter(Boolean)
+        .join("；");
+      setNapcatStatus(output ? `命令已执行。${output}` : "命令已执行，等待 NapCat 重连；如掉登录请打开管理台扫码。");
+      await load();
+    } catch (error) {
+      setNapcatStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRestartingNapcat(false);
+    }
+  };
+  const napcatWebUrl = String(settings["onebot.napcatWebUrl"] ?? "").trim();
 
   return (
     <section>
@@ -531,6 +591,34 @@ function DashboardPage() {
           <KeyValue label="反向 WS" value={dashboard?.onebotWsUrl ?? "-"} />
           <KeyValue label="Bot QQ" value={dashboard?.onebot.selfId ?? "-"} />
           <KeyValue label="最近事件" value={formatTime(dashboard?.onebot.lastEventAt)} />
+        </Panel>
+        <Panel title="NapCat 运维" icon={<PlugZap size={18} />}>
+          <FormGrid>
+            <Input
+              label="重启命令"
+              value={String(settings["onebot.napcatRestartCommand"] ?? "")}
+              onChange={(v) => updateNapcatSetting("onebot.napcatRestartCommand", v)}
+              hint="例如 systemctl restart napcat，或 docker restart napcat。"
+            />
+            <Input
+              label="管理台地址"
+              value={String(settings["onebot.napcatWebUrl"] ?? "")}
+              onChange={(v) => updateNapcatSetting("onebot.napcatWebUrl", v)}
+              hint="填浏览器可访问的 NapCat WebUI 地址，方便扫码登录。"
+            />
+          </FormGrid>
+          <div className="actions">
+            <button className="primary" onClick={restartNapcat} disabled={restartingNapcat}>
+              <RefreshCcw size={16} />{restartingNapcat ? "重启中..." : "重启 NapCat"}
+            </button>
+            <button onClick={saveNapcatSettings} disabled={savingNapcat}>
+              <Save size={16} />{savingNapcat ? "保存中..." : "保存配置"}
+            </button>
+            <button onClick={() => window.open(napcatWebUrl, "_blank", "noopener,noreferrer")} disabled={!napcatWebUrl}>
+              <ExternalLink size={16} />打开管理台
+            </button>
+          </div>
+          {napcatStatus && <p className="notice ops-status">{napcatStatus}</p>}
         </Panel>
         <Panel title="数据同步" icon={<Database size={18} />}>
           <KeyValue label="状态" value={dashboard?.sync?.status ?? "未同步"} />
@@ -1133,11 +1221,14 @@ function AdmissionsPage() {
         provinces: manualProvince || undefined,
         years: manualScoreYears || undefined,
         limit: Number(xuefengAgentLimit) || undefined,
-        offset: Number(xuefengAgentOffset) || undefined
+        offset: Number(xuefengAgentOffset) || undefined,
+        background: true
       };
       if (xuefengAgentUrl.trim()) body.url = xuefengAgentUrl.trim();
       if (xuefengAgentDbPath.trim()) body.dbPath = xuefengAgentDbPath.trim();
       const result = await api<{
+        queued?: boolean;
+        message?: string;
         total: number;
         candidateTotal: number;
         offset: number;
@@ -1155,6 +1246,13 @@ function AdmissionsPage() {
         method: "POST",
         body: JSON.stringify(body)
       });
+      if (result.queued) {
+        await load();
+        setJobStatus("running");
+        setJobType("sync-score");
+        setStatus(result.message || "雪峰 Agent 导入已在后台启动，请稍后刷新同步任务查看进度。");
+        return;
+      }
       setSourceKind("xuefeng-agent-sqlite");
       setSourceYear(firstListValue(manualScoreYears) || "");
       setSourceProvince(firstListValue(manualProvince) || "");

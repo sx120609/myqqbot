@@ -1,3 +1,5 @@
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
 import type { FastifyInstance } from "fastify";
 import type { AppConfig } from "./config.js";
 import type { AppDatabase } from "./db.js";
@@ -17,6 +19,10 @@ import type { MessageProcessor } from "./services/message-processor.js";
 import type { SrgaoxiaoSyncService } from "./services/srgaoxiao-sync.js";
 import type { UniversityRepository } from "./services/university-repository.js";
 import { XuefengAgentAdapter, type XuefengAgentSyncOptions } from "./services/xuefeng-agent-adapter.js";
+
+const execShell = promisify(exec);
+const NAPCAT_RESTART_TIMEOUT_MS = 30_000;
+const COMMAND_OUTPUT_LIMIT = 8000;
 
 export interface ApiDeps {
   config: AppConfig;
@@ -173,6 +179,7 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       years?: number[] | string;
       limit?: number;
       offset?: number;
+      background?: boolean;
     };
     const options: XuefengAgentSyncOptions = {
       dbPath: body.dbPath,
@@ -185,6 +192,16 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       offset: toOptionalNumber(body.offset)
     };
     const adapter = new XuefengAgentAdapter(deps.config.dataDir, deps.database, deps.universities, deps.admissions);
+    if (body.background) {
+      void adapter.sync(options).catch((error) => {
+        console.error("[api] Background Xuefeng Agent sync failed:", error);
+      });
+      return {
+        ok: true,
+        queued: true,
+        message: "雪峰 Agent 导入已在后台启动，请稍后刷新同步任务查看进度。"
+      };
+    }
     const result = await adapter.sync(options);
     return { ok: true, ...result };
   });
@@ -466,6 +483,55 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
   });
 
   app.get("/api/onebot/status", async () => deps.onebot.status());
+
+  app.post("/api/onebot/napcat/restart", async (_request, reply) => {
+    const command = deps.settings.runtime().onebot.napcatRestartCommand.trim();
+    if (!command) {
+      return reply.code(400).send({
+        ok: false,
+        message: "请先在后台填写 NapCat 重启命令。"
+      });
+    }
+
+    const startedAt = new Date().toISOString();
+    try {
+      const { stdout, stderr } = await execShell(command, {
+        timeout: NAPCAT_RESTART_TIMEOUT_MS,
+        windowsHide: true,
+        maxBuffer: 1024 * 1024
+      });
+      return {
+        ok: true,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        stdout: truncateCommandOutput(stdout),
+        stderr: truncateCommandOutput(stderr)
+      };
+    } catch (error) {
+      const failed = error as Error & {
+        stdout?: string;
+        stderr?: string;
+        code?: string | number;
+        signal?: string;
+      };
+      return reply.code(500).send({
+        ok: false,
+        message: failed.message || "NapCat 重启命令执行失败。",
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        exitCode: failed.code,
+        signal: failed.signal,
+        stdout: truncateCommandOutput(failed.stdout),
+        stderr: truncateCommandOutput(failed.stderr)
+      });
+    }
+  });
+}
+
+function truncateCommandOutput(value: unknown): string {
+  const text = value == null ? "" : String(value);
+  if (text.length <= COMMAND_OUTPUT_LIMIT) return text;
+  return `${text.slice(0, COMMAND_OUTPUT_LIMIT)}\n...（输出已截断）`;
 }
 
 export function renderAnswerSourcePage(record: AnswerSourceRecord, filingNumber: string): string {

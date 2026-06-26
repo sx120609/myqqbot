@@ -14,6 +14,8 @@ export interface RuntimeSettings {
     replyAsImage: boolean;
     replyImageTitle: string;
     replyImageBadge: string;
+    napcatRestartCommand: string;
+    napcatWebUrl: string;
   };
   site: {
     publicBaseUrl: string;
@@ -79,6 +81,8 @@ const DEFAULTS: Record<string, string> = {
   "onebot.replyAsImage": process.env.ONEBOT_REPLY_AS_IMAGE ?? "true",
   "onebot.replyImageTitle": process.env.ONEBOT_REPLY_IMAGE_TITLE ?? "高校资料助手",
   "onebot.replyImageBadge": process.env.ONEBOT_REPLY_IMAGE_BADGE ?? "AI 生成回复",
+  "onebot.napcatRestartCommand": process.env.NAPCAT_RESTART_COMMAND ?? "",
+  "onebot.napcatWebUrl": process.env.NAPCAT_WEB_URL ?? "",
   "site.publicBaseUrl": process.env.PUBLIC_BASE_URL ?? "http://127.0.0.1:8787",
   "site.filingNumber": process.env.SITE_FILING_NUMBER ?? "",
   "llm.baseUrl": process.env.LLM_BASE_URL ?? "https://your-sub2api.example.com/v1",
@@ -154,7 +158,9 @@ export class SettingsStore {
         replyEnabled: this.getBoolean("onebot.replyEnabled", true),
         replyAsImage: this.getBoolean("onebot.replyAsImage", true),
         replyImageTitle: this.getString("onebot.replyImageTitle", "高校资料助手"),
-        replyImageBadge: this.getString("onebot.replyImageBadge", "AI 生成回复")
+        replyImageBadge: this.getString("onebot.replyImageBadge", "AI 生成回复"),
+        napcatRestartCommand: this.getString("onebot.napcatRestartCommand", ""),
+        napcatWebUrl: this.getString("onebot.napcatWebUrl", "")
       },
       site: {
         publicBaseUrl: this.getString("site.publicBaseUrl", "http://127.0.0.1:8787"),

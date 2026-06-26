@@ -145,6 +145,52 @@ describe("renderAnswerSourcePage", () => {
   });
 });
 
+describe("OneBot operation API", () => {
+  it("rejects NapCat restart when no restart command is configured", async () => {
+    const app = Fastify();
+    try {
+      await registerApi(app, {
+        config: { server: { publicBaseUrl: "http://localhost:8787" } },
+        database: {},
+        settings: {
+          runtime: () => ({
+            onebot: {
+              napcatRestartCommand: ""
+            }
+          })
+        },
+        universities: {},
+        admissions: {},
+        sync: {},
+        answerSources: {},
+        srgaoxiaoSync: {},
+        gaokaoCn: {},
+        autoSync: {},
+        llm: {},
+        logs: {},
+        processor: {},
+        onebot: {
+          status: () => ({ connected: false })
+        }
+      } as never);
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/onebot/napcat/restart",
+        payload: {}
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({
+        ok: false,
+        message: "请先在后台填写 NapCat 重启命令。"
+      });
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 describe("admission API", () => {
   it("uses configured Gaokao.cn plan detail setting for manual sync by default", async () => {
     const dir = mkdtempSync(join(tmpdir(), "myqqbot-api-admission-test-"));

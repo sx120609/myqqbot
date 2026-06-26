@@ -320,6 +320,13 @@ textarea {
 
 .status-text {
   color: #536170;
+  overflow-wrap: anywhere;
+}
+
+.ops-status {
+  margin-top: 10px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 .password-form {

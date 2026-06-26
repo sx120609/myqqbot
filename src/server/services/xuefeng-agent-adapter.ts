@@ -18,9 +18,10 @@ export const XUEFENG_AGENT_SOURCE = "xuefeng_agent";
 export const XUEFENG_AGENT_SOURCE_URL = "https://github.com/ziqihe10-droid/xuefeng-agent";
 
 const DEFAULT_DB_GZ_URLS = [
-  "https://gh.lizmt.cn/https://github.com/ziqihe10-droid/xuefeng-agent/raw/main/admission_clean.db.gz",
-  "https://raw.githubusercontent.com/ziqihe10-droid/xuefeng-agent/main/admission_clean.db.gz",
-  "https://github.com/ziqihe10-droid/xuefeng-agent/raw/main/admission_clean.db.gz"
+  "https://gh.lizmt.cn/https://github.com/ziqihe10-droid/xuefeng-agent/raw/master/admission_clean.db.gz",
+  "https://gh.lizmt.cn/https://raw.githubusercontent.com/ziqihe10-droid/xuefeng-agent/master/admission_clean.db.gz",
+  "https://raw.githubusercontent.com/ziqihe10-droid/xuefeng-agent/master/admission_clean.db.gz",
+  "https://github.com/ziqihe10-droid/xuefeng-agent/raw/master/admission_clean.db.gz"
 ];
 
 export interface XuefengAgentSyncOptions {
@@ -87,8 +88,6 @@ export class XuefengAgentAdapter {
   ) {}
 
   async sync(options: XuefengAgentSyncOptions = {}): Promise<XuefengAgentSyncResult> {
-    const db = await this.resolveSourceDb(options);
-    const sourceDb = new DatabaseSync(db.path, { readOnly: true });
     const offset = normalizeOffset(options.offset);
     const limit = normalizeLimit(options.limit);
     const result: XuefengAgentSyncResult = {
@@ -104,17 +103,22 @@ export class XuefengAgentAdapter {
       sourceRows: 0,
       skipped: 0,
       unmapped: 0,
-      dbPath: db.path,
-      downloaded: db.downloaded,
+      dbPath: options.dbPath ? resolve(options.dbPath) : "",
+      downloaded: false,
       errors: []
     };
     const jobId = this.admissions.startJob({
       source: XUEFENG_AGENT_SOURCE,
       jobType: "sync-score",
-      targetJson: JSON.stringify({ ...options, dbPath: db.path })
+      targetJson: JSON.stringify(options)
     });
+    let sourceDb: DatabaseSync | null = null;
 
     try {
+      const db = await this.resolveSourceDb(options);
+      result.dbPath = db.path;
+      result.downloaded = db.downloaded;
+      sourceDb = new DatabaseSync(db.path, { readOnly: true });
       const query = buildSourceQuery(options);
       result.candidateTotal = Number((sourceDb.prepare(`SELECT COUNT(*) AS count FROM admission ${query.where}`).get(...query.params) as { count: number }).count);
       result.total = Math.min(limit, Math.max(0, result.candidateTotal - offset));
@@ -215,7 +219,7 @@ export class XuefengAgentAdapter {
       this.admissions.finishJob(jobId, { status: "error", error: message, resultJson: JSON.stringify(result) });
       throw error;
     } finally {
-      sourceDb.close();
+      sourceDb?.close();
     }
   }
 
@@ -236,7 +240,11 @@ export class XuefengAgentAdapter {
   }
 
   private async downloadGzip(targetPath: string, preferredUrl?: string): Promise<void> {
-    const urls = [preferredUrl, process.env.XUEFENG_AGENT_DB_URL, ...DEFAULT_DB_GZ_URLS].filter((url): url is string => Boolean(url));
+    const urls = normalizedUnique(
+      [preferredUrl, process.env.XUEFENG_AGENT_DB_URL, ...DEFAULT_DB_GZ_URLS]
+        .map((url) => url?.trim())
+        .filter((url): url is string => Boolean(url))
+    );
     let lastError: unknown = null;
     for (const url of urls) {
       try {
@@ -248,7 +256,7 @@ export class XuefengAgentAdapter {
         safeUnlink(targetPath);
       }
     }
-    throw new Error(`无法下载 Xuefeng Agent 数据库：${lastError instanceof Error ? lastError.message : String(lastError)}`);
+    throw new Error(`无法下载 Xuefeng Agent 数据库：${lastError instanceof Error ? cleanDownloadError(lastError.message) : String(lastError)}`);
   }
 
   private report(message: string): void {
@@ -387,10 +395,35 @@ async function downloadFile(url: string, targetPath: string): Promise<void> {
   const tempPath = `${targetPath}.tmp`;
   const response = await fetch(url, { redirect: "follow" });
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+    throw new Error(await formatDownloadHttpError(response));
   }
-  writeFileSync(tempPath, Buffer.from(await response.arrayBuffer()));
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!isGzip(bytes)) {
+    throw new Error("下载地址返回的不是 gzip 数据，请检查 URL 是否指向 admission_clean.db.gz。");
+  }
+  writeFileSync(tempPath, bytes);
   renameSync(tempPath, targetPath);
+}
+
+async function formatDownloadHttpError(response: Response): Promise<string> {
+  const body = cleanDownloadError(await response.text().catch(() => ""));
+  const status = `${response.status} ${response.statusText || "HTTP Error"}`.trim();
+  return body ? `${status}：${body}` : status;
+}
+
+function cleanDownloadError(message: string): string {
+  return message
+    .replace(/<script[\s\S]*?<\/script>/giu, " ")
+    .replace(/<style[\s\S]*?<\/style>/giu, " ")
+    .replace(/<[^>]+>/gu, " ")
+    .replace(/<!--[\s\S]*?-->/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 240);
+}
+
+function isGzip(bytes: Buffer): boolean {
+  return bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
 }
 
 async function gunzipFile(gzPath: string, dbPath: string): Promise<void> {
