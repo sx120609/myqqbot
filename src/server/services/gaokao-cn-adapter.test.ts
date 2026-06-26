@@ -424,6 +424,8 @@ describe("GaokaoCnAdapter", () => {
     expect(result.errors).toEqual([]);
     expect(result.mapped).toBe(1);
     expect(result.planRows).toBe(0);
+    expect(result.planSummaryRows).toBe(0);
+    expect(result.majorPlanRows).toBe(0);
     expect(result.schoolScoreRows).toBe(0);
     expect(result.majorScoreRows).toBe(0);
     expect(result.skippedRequests).toBe(4);
@@ -478,6 +480,8 @@ describe("GaokaoCnAdapter", () => {
     const uris = fetchMock.mock.calls.map(([input]) => new URL(input instanceof Request ? input.url : String(input)).searchParams.get("uri"));
     expect(result.errors).toEqual([]);
     expect(result.planRows).toBe(1);
+    expect(result.planSummaryRows).toBe(1);
+    expect(result.majorPlanRows).toBe(0);
     expect(result.sourceRows).toBe(1);
     expect(uris).toEqual(["apidata/api/gkv3/plan/schoollists"]);
     database.close();
@@ -535,6 +539,8 @@ describe("GaokaoCnAdapter", () => {
     expect(result.sourceRequests).toBe(1);
     expect(result.sourceRequestBudget).toBe(1);
     expect(result.planRows).toBe(1);
+    expect(result.planSummaryRows).toBe(1);
+    expect(result.majorPlanRows).toBe(0);
     expect(result.sourceRows).toBe(1);
     expect(uris).toEqual(["apidata/api/gkv3/plan/schoollists"]);
     database.close();

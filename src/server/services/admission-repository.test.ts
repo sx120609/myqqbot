@@ -29,9 +29,15 @@ describe("admission normalization", () => {
     expect(normalizeBatchName("本科普通批")).toBe("本科批");
     expect(normalizeBatchName("本科第一批")).toBe("本科一批");
     expect(normalizeBatchName("第一批本科")).toBe("本科一批");
+    expect(normalizeBatchName("第一批")).toBe("本科一批");
+    expect(normalizeBatchName("一批")).toBe("本科一批");
     expect(normalizeBatchName("本科一批A段")).toBe("本科一批");
     expect(normalizeBatchName("本科第二批")).toBe("本科二批");
     expect(normalizeBatchName("第二批本科")).toBe("本科二批");
+    expect(normalizeBatchName("第二批")).toBe("本科二批");
+    expect(normalizeBatchName("二批")).toBe("本科二批");
+    expect(normalizeBatchName("本科A段")).toBe("本科批");
+    expect(normalizeBatchName("本科批B段")).toBe("本科批");
     expect(normalizeBatchName("高职(专科)批")).toBe("专科批");
     expect(normalizeBatchName("国家专项计划本科批")).toBe("国家专项计划本科批");
     expect(normalizeBatchName("普通类平行录取一段")).toBe("普通类一段");
@@ -68,6 +74,11 @@ describe("admission normalization", () => {
     expect(normalizeMajorName("计算机科学与技术（认同并执行四川省少数民族加分项目和分值。将军路校区就读）（一、二年级在常州市天目湖校区就读，三、四年级在南京市将军路校区就读）")).toBe("计算机科学与技术");
     expect(normalizeMajorName("航空航天类（包含专业:飞行器设计与工程、飞行器动力工程）（认同并执行四川省少数民族加分项目和分值。将军路校区就读）")).toBe("航空航天类（包含专业:飞行器设计与工程、飞行器动力工程）");
     expect(normalizeMajorName("软件工程（中外合作办学）")).toBe("软件工程（中外合作办学）");
+    expect(normalizeMajorName("计算机科学与技术（拔尖学生培养基地）")).toBe("计算机科学与技术（拔尖学生培养基地）");
+    expect(normalizeMajorName("临床医学（5+3一体化）")).toBe("临床医学（5+3一体化）");
+    expect(normalizeMajorName("药学类，不招色盲色弱考生")).toBe("药学类");
+    expect(normalizeMajorName("英语，只招英语语种考生")).toBe("英语");
+    expect(normalizeMajorName("电子信息类，办学地点：江宁校区")).toBe("电子信息类");
   });
 
   it("deduplicates previously stored rows after normalization", () => {
@@ -173,6 +184,17 @@ describe("admission normalization", () => {
       planCount: 26,
       rawJson: "{}"
     });
+    admissions.upsertPlan({
+      universityId: anhui.id,
+      sourceSchoolId: "67",
+      year: 2026,
+      provinceName: "安徽",
+      subjectType: "物理类",
+      batch: "普通类本科批",
+      schoolPlanCount: 120,
+      majorCount: 32,
+      rawJson: "{}"
+    });
     admissions.upsertScore({
       scoreType: "school",
       universityId: anhui.id,
@@ -195,13 +217,16 @@ describe("admission normalization", () => {
     expect(stats.unmatchedUniversities).toBe(1);
     expect(stats.mappingIssueUniversities).toBe(1);
     expect(stats.planUniversities).toBe(1);
+    expect(stats.majorPlanUniversities).toBe(1);
     expect(stats.scoreUniversities).toBe(1);
-    expect(stats.planYears[0]).toMatchObject({ year: 2026, rowCount: 1, universityCount: 1, provinceCount: 1 });
+    expect(stats.planRows).toBe(2);
+    expect(stats.majorPlanRows).toBe(1);
+    expect(stats.planYears[0]).toMatchObject({ year: 2026, rowCount: 2, universityCount: 1, provinceCount: 1 });
     const gaps = admissions.coverageGaps({
       planYears: [2026],
       scoreYears: [2024],
       provinces: ["安徽", "北京"],
-      limit: 10
+      limit: 20
     });
     expect(gaps.find((gap) => gap.kind === "plan" && gap.year === 2026 && gap.provinceName === "安徽" && gap.subjectType === "历史类")).toMatchObject({
       totalMappedUniversities: 1,
@@ -211,6 +236,18 @@ describe("admission normalization", () => {
       coverageRatio: 1
     });
     expect(gaps.find((gap) => gap.kind === "plan" && gap.year === 2026 && gap.provinceName === "安徽" && gap.subjectType === "物理类")).toMatchObject({
+      totalMappedUniversities: 1,
+      coveredUniversities: 1,
+      missingUniversities: 0,
+      rowCount: 1
+    });
+    expect(gaps.find((gap) => gap.kind === "major_plan" && gap.year === 2026 && gap.provinceName === "安徽" && gap.subjectType === "历史类")).toMatchObject({
+      totalMappedUniversities: 1,
+      coveredUniversities: 1,
+      missingUniversities: 0,
+      rowCount: 1
+    });
+    expect(gaps.find((gap) => gap.kind === "major_plan" && gap.year === 2026 && gap.provinceName === "安徽" && gap.subjectType === "物理类")).toMatchObject({
       totalMappedUniversities: 1,
       coveredUniversities: 0,
       missingUniversities: 1,
@@ -380,6 +417,15 @@ describe("admission normalization", () => {
       expect.objectContaining({ universityName: "合肥工业大学" })
     ]));
     expect(admissions.coverageMissingUniversities({
+      kind: "major_plan",
+      year: 2026,
+      provinceName: "安徽",
+      subjectType: "物理类"
+    })).toEqual(expect.arrayContaining([
+      expect.objectContaining({ universityName: "安徽大学" }),
+      expect.objectContaining({ universityName: "合肥工业大学" })
+    ]));
+    expect(admissions.coverageMissingUniversities({
       kind: "school_score",
       year: 2025,
       provinceName: "安徽",
@@ -464,6 +510,44 @@ describe("admission normalization", () => {
     expect(admissions.queryScores({ universityId: anhui.id, planGroup: "003", scoreType: "school" })).toHaveLength(1);
     expect(admissions.queryScores({ universityId: anhui.id, batch: "普通类一段", scoreType: "major" }).map((row) => row.majorName)).toEqual(["计算机类"]);
     expect(admissions.queryScores({ universityId: anhui.id, planGroup: "03组", scoreType: "major" }).map((row) => row.majorName)).toEqual(["计算机类"]);
+    database.close();
+  });
+
+  it("matches common short batch aliases in admission queries", () => {
+    const dir = mkdtempSync(join(tmpdir(), "myqqbot-admission-test-"));
+    tempDirs.push(dir);
+    const database = new AppDatabase(join(dir, "test.sqlite"));
+    const universities = new UniversityRepository(database);
+    universities.importAll([fixtureUniversity("南京航空航天大学", "nan-jing-hang-kong-hang-tian-da-xue")]);
+    const [university] = universities.listUniversities("南京航空航天大学", 1);
+    const admissions = new AdmissionRepository(database);
+
+    admissions.upsertScore({
+      scoreType: "school",
+      universityId: university.id,
+      sourceSchoolId: "452",
+      year: 2025,
+      provinceName: "四川",
+      subjectType: "理科",
+      batch: "本科第一批",
+      minScore: 620,
+      minRank: 12000,
+      rawJson: "{}"
+    });
+    admissions.upsertPlan({
+      universityId: university.id,
+      sourceSchoolId: "452",
+      year: 2026,
+      provinceName: "北京",
+      subjectType: "综合改革",
+      batch: "本科A段",
+      schoolPlanCount: 12,
+      rawJson: "{}"
+    });
+
+    expect(admissions.queryScores({ universityId: university.id, provinceName: "四川省", batch: "一批" })).toHaveLength(1);
+    expect(admissions.queryScores({ universityId: university.id, provinceName: "四川", batch: "第一批" })).toHaveLength(1);
+    expect(admissions.queryPlans({ universityId: university.id, provinceName: "北京市", batch: "本科批B段" })).toHaveLength(1);
     database.close();
   });
 
@@ -709,6 +793,86 @@ describe("admission normalization", () => {
     database.close();
   });
 
+  it("matches major qualifier queries without mixing unrestricted majors", () => {
+    const dir = mkdtempSync(join(tmpdir(), "myqqbot-admission-test-"));
+    tempDirs.push(dir);
+    const database = new AppDatabase(join(dir, "test.sqlite"));
+    const universities = new UniversityRepository(database);
+    universities.importAll([fixtureUniversity("南京航空航天大学", "nan-jing-hang-kong-hang-tian-da-xue")]);
+    const [university] = universities.listUniversities("南京航空航天大学", 1);
+    const admissions = new AdmissionRepository(database);
+
+    admissions.upsertScore({
+      scoreType: "major",
+      universityId: university.id,
+      sourceSchoolId: "452",
+      year: 2025,
+      provinceName: "江苏",
+      subjectType: "物理类",
+      batch: "本科批",
+      majorName: "软件工程",
+      minScore: 620,
+      minRank: 12000,
+      rawJson: "{}"
+    });
+    admissions.upsertScore({
+      scoreType: "major",
+      universityId: university.id,
+      sourceSchoolId: "452",
+      year: 2025,
+      provinceName: "江苏",
+      subjectType: "物理类",
+      batch: "本科批",
+      majorName: "软件工程（中外合作办学）",
+      minScore: 610,
+      minRank: 18000,
+      rawJson: "{}"
+    });
+    admissions.upsertScore({
+      scoreType: "major",
+      universityId: university.id,
+      sourceSchoolId: "452",
+      year: 2025,
+      provinceName: "江苏",
+      subjectType: "物理类",
+      batch: "本科批",
+      majorName: "计算机类",
+      minScore: 630,
+      minRank: 9000,
+      rawJson: "{}"
+    });
+    admissions.upsertScore({
+      scoreType: "major",
+      universityId: university.id,
+      sourceSchoolId: "452",
+      year: 2025,
+      provinceName: "江苏",
+      subjectType: "物理类",
+      batch: "本科批",
+      majorName: "计算机科学与技术（拔尖学生培养基地）",
+      minScore: 640,
+      minRank: 5000,
+      rawJson: "{}"
+    });
+
+    expect(admissions.queryScores({
+      universityId: university.id,
+      provinceName: "江苏",
+      subjectType: "物理类",
+      scoreType: "major",
+      majorName: "软件工程中外合作"
+    }).map((row) => row.majorName)).toEqual(["软件工程（中外合作办学）"]);
+    expect(admissions.queryScores({
+      universityId: university.id,
+      provinceName: "江苏",
+      subjectType: "物理类",
+      scoreType: "major",
+      majorName: "计算机拔尖班"
+    }).map((row) => row.majorName)).toEqual(["计算机科学与技术（拔尖学生培养基地）"]);
+
+    database.close();
+  });
+
   it("filters admission rows by compatible subject type groups", () => {
     const dir = mkdtempSync(join(tmpdir(), "myqqbot-admission-test-"));
     tempDirs.push(dir);
@@ -836,8 +1000,28 @@ describe("admission normalization", () => {
       responseJson: "{\"code\":\"0000\"}",
       status: "success"
     });
+    admissions.insertSource({
+      source: "jiangsu_eea",
+      sourceKind: "jiangsu-eea-score-pdf",
+      sourceUrl: "https://www.jseea.cn/webfile/upload/2025/07-18/official.pdf",
+      requestJson: JSON.stringify({
+        year: 2025,
+        province: "江苏",
+        subjectType: "物理类",
+        batch: "本科批"
+      }),
+      responseJson: JSON.stringify({ title: "江苏省2025年普通高校招生普通类本科批次平行志愿投档线（物理等科目类）", rowCount: 2546 }),
+      status: "success"
+    });
 
     expect(admissions.listSources({ universityId: anhui.id }).map((row) => row.sourceKind)).toEqual(["score-school", "plan-major"]);
+    expect(admissions.listSources({ year: 2025, provinceName: "江苏省", subjectType: "物理类" })).toEqual([
+      expect.objectContaining({
+        source: "jiangsu_eea",
+        sourceKind: "jiangsu-eea-score-pdf",
+        status: "success"
+      })
+    ]);
     expect(admissions.listSources({ universityId: anhui.id, status: "error" })).toEqual([
       expect.objectContaining({
         universityName: "安徽大学",

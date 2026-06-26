@@ -1,5 +1,6 @@
 import type { AppDatabase } from "./db.js";
 import {
+  currentAdmissionYear,
   defaultAdmissionPlanIntervalHours,
   defaultAdmissionPlanYears,
   defaultAdmissionScoreIntervalHours,
@@ -57,15 +58,20 @@ export interface RuntimeSettings {
     gaokaoCnBatchDelayMs: number;
     gaokaoCnRateLimitCooldownMinutes: number;
     gaokaoCnSkipExisting: boolean;
+    gaokaoCnIncludePlanDetails: boolean;
   };
 }
 
 const LEGACY_GAOKAO_PROVINCES_DEFAULT = "江苏,浙江,安徽,河南,山东,四川,广东";
 const DEFAULT_GAOKAO_CN_LIMIT = "1";
-const DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS = "60000";
-const DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN = "4";
-const DEFAULT_GAOKAO_CN_BATCH_DELAY_MS = "900000";
-const DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES = "720";
+const DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS = "180000";
+const DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN = "1";
+const DEFAULT_GAOKAO_CN_BATCH_DELAY_MS = "1800000";
+const DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES = "1440";
+const MIN_GAOKAO_CN_REQUEST_DELAY_MS = 180000;
+const MIN_GAOKAO_CN_BATCH_DELAY_MS = 1800000;
+const MIN_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES = 1440;
+const SEASONAL_GAOKAO_AUTO_DEFAULT_MARKER_PREFIX = "sync.internal.autoDefault.";
 
 const DEFAULTS: Record<string, string> = {
   "onebot.accessToken": process.env.ONEBOT_ACCESS_TOKEN ?? "",
@@ -108,15 +114,20 @@ const DEFAULTS: Record<string, string> = {
   "sync.gaokaoCnBatchesPerRun": process.env.GAOKAO_CN_BATCHES_PER_RUN ?? "1",
   "sync.gaokaoCnBatchDelayMs": process.env.GAOKAO_CN_BATCH_DELAY_MS ?? DEFAULT_GAOKAO_CN_BATCH_DELAY_MS,
   "sync.gaokaoCnRateLimitCooldownMinutes": process.env.GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES ?? DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES,
-  "sync.gaokaoCnSkipExisting": process.env.GAOKAO_CN_SKIP_EXISTING ?? "true"
+  "sync.gaokaoCnSkipExisting": process.env.GAOKAO_CN_SKIP_EXISTING ?? "true",
+  "sync.gaokaoCnIncludePlanDetails": process.env.GAOKAO_CN_INCLUDE_PLAN_DETAILS ?? "false"
 };
 
 export class SettingsStore {
-  constructor(private readonly database: AppDatabase) {
+  constructor(
+    private readonly database: AppDatabase,
+    private readonly now: () => Date = () => new Date()
+  ) {
     this.seedDefaults();
   }
 
   all(maskSecrets = true): Record<string, string | boolean> {
+    this.refreshSeasonalAdmissionDefaults();
     const rows = this.database.db.prepare("SELECT key, value FROM settings ORDER BY key").all() as Array<{
       key: string;
       value: string;
@@ -136,6 +147,7 @@ export class SettingsStore {
   }
 
   runtime(): RuntimeSettings {
+    this.refreshSeasonalAdmissionDefaults();
     return {
       onebot: {
         accessToken: this.getString("onebot.accessToken", ""),
@@ -184,12 +196,13 @@ export class SettingsStore {
         gaokaoCnScoreYears: this.getString("sync.gaokaoCnScoreYears", defaultAdmissionScoreYears().join(",")),
         gaokaoCnPlanYears: this.getString("sync.gaokaoCnPlanYears", defaultAdmissionPlanYears().join(",")),
         gaokaoCnRetryLimit: this.getNumber("sync.gaokaoCnRetryLimit", 1),
-        gaokaoCnRequestDelayMs: this.getNumber("sync.gaokaoCnRequestDelayMs", Number(DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS)),
-        gaokaoCnMaxRequestsPerRun: this.getNumber("sync.gaokaoCnMaxRequestsPerRun", Number(DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN)),
+        gaokaoCnRequestDelayMs: clampGaokaoRequestDelayMs(this.getNumber("sync.gaokaoCnRequestDelayMs", Number(DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS))),
+        gaokaoCnMaxRequestsPerRun: clampGaokaoMaxRequestsPerRun(this.getNumber("sync.gaokaoCnMaxRequestsPerRun", Number(DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN))),
         gaokaoCnBatchesPerRun: this.getNumber("sync.gaokaoCnBatchesPerRun", 1),
-        gaokaoCnBatchDelayMs: this.getNumber("sync.gaokaoCnBatchDelayMs", Number(DEFAULT_GAOKAO_CN_BATCH_DELAY_MS)),
-        gaokaoCnRateLimitCooldownMinutes: this.getNumber("sync.gaokaoCnRateLimitCooldownMinutes", Number(DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES)),
-        gaokaoCnSkipExisting: this.getBoolean("sync.gaokaoCnSkipExisting", true)
+        gaokaoCnBatchDelayMs: clampGaokaoBatchDelayMs(this.getNumber("sync.gaokaoCnBatchDelayMs", Number(DEFAULT_GAOKAO_CN_BATCH_DELAY_MS))),
+        gaokaoCnRateLimitCooldownMinutes: clampGaokaoRateLimitCooldownMinutes(this.getNumber("sync.gaokaoCnRateLimitCooldownMinutes", Number(DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES))),
+        gaokaoCnSkipExisting: this.getBoolean("sync.gaokaoCnSkipExisting", true),
+        gaokaoCnIncludePlanDetails: this.getBoolean("sync.gaokaoCnIncludePlanDetails", false)
       }
     };
   }
@@ -205,7 +218,7 @@ export class SettingsStore {
       for (const [key, value] of Object.entries(values)) {
         if (!(key in DEFAULTS)) continue;
         if (key === "llm.apiKey" && value === "********") continue;
-        stmt.run(key, String(value ?? ""), now);
+        stmt.run(key, normalizeGaokaoSyncSetting(key, String(value ?? "")), now);
       }
     });
   }
@@ -231,6 +244,7 @@ export class SettingsStore {
 
   private getNumber(key: string, fallback: number): number {
     const value = this.getString(key, String(fallback));
+    if (!value.trim()) return fallback;
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
   }
@@ -252,7 +266,8 @@ export class SettingsStore {
       SET value = ?, updated_at = ?
       WHERE key = ? AND value = ?
     `);
-    const now = new Date().toISOString();
+    const seedNow = this.now();
+    const now = seedNow.toISOString();
     this.database.transaction(() => {
       for (const [key, value] of Object.entries(DEFAULTS)) {
         stmt.run(key, value, now);
@@ -265,11 +280,140 @@ export class SettingsStore {
       upgradeStmt.run(DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS, now, "sync.gaokaoCnRequestDelayMs", "5000");
       upgradeStmt.run(DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS, now, "sync.gaokaoCnRequestDelayMs", "12000");
       upgradeStmt.run(DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS, now, "sync.gaokaoCnRequestDelayMs", "30000");
+      upgradeStmt.run(DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS, now, "sync.gaokaoCnRequestDelayMs", "60000");
       upgradeStmt.run(DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN, now, "sync.gaokaoCnMaxRequestsPerRun", "12");
+      upgradeStmt.run(DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN, now, "sync.gaokaoCnMaxRequestsPerRun", "4");
       upgradeStmt.run(DEFAULT_GAOKAO_CN_BATCH_DELAY_MS, now, "sync.gaokaoCnBatchDelayMs", "60000");
       upgradeStmt.run(DEFAULT_GAOKAO_CN_BATCH_DELAY_MS, now, "sync.gaokaoCnBatchDelayMs", "300000");
+      upgradeStmt.run(DEFAULT_GAOKAO_CN_BATCH_DELAY_MS, now, "sync.gaokaoCnBatchDelayMs", "900000");
       upgradeStmt.run(DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES, now, "sync.gaokaoCnRateLimitCooldownMinutes", "180");
       upgradeStmt.run(DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES, now, "sync.gaokaoCnRateLimitCooldownMinutes", "360");
+      upgradeStmt.run(DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES, now, "sync.gaokaoCnRateLimitCooldownMinutes", "720");
+    });
+    this.normalizeGaokaoSyncSettings(now);
+    this.refreshSeasonalAdmissionDefaults(seedNow);
+  }
+
+  private normalizeGaokaoSyncSettings(now: string): void {
+    const rows = this.database.db.prepare(`
+      SELECT key, value FROM settings
+      WHERE key IN (
+        'sync.gaokaoCnRequestDelayMs',
+        'sync.gaokaoCnMaxRequestsPerRun',
+        'sync.gaokaoCnBatchDelayMs',
+        'sync.gaokaoCnRateLimitCooldownMinutes'
+      )
+    `).all() as Array<{ key: string; value: string }>;
+    const stmt = this.database.db.prepare(`
+      UPDATE settings
+      SET value = ?, updated_at = ?
+      WHERE key = ?
+    `);
+    this.database.transaction(() => {
+      for (const row of rows) {
+        const normalized = normalizeGaokaoSyncSetting(row.key, row.value);
+        if (normalized !== row.value) stmt.run(normalized, now, row.key);
+      }
     });
   }
+
+  private refreshSeasonalAdmissionDefaults(now = this.now()): void {
+    for (const entry of seasonalAdmissionDefaults(now)) {
+      this.refreshAutoDefaultSetting(entry.key, entry.value, entry.recognizedValues);
+    }
+  }
+
+  private refreshAutoDefaultSetting(key: string, currentDefault: string, recognizedValues: string[]): void {
+    const markerKey = `${SEASONAL_GAOKAO_AUTO_DEFAULT_MARKER_PREFIX}${key}`;
+    const value = this.getString(key, "");
+    const marker = this.getString(markerKey, "");
+    const recognized = new Set([...recognizedValues, currentDefault].filter(Boolean));
+
+    if (marker) {
+      if (value === marker && value !== currentDefault) {
+        this.setInternal(key, currentDefault);
+        this.setInternal(markerKey, currentDefault);
+      }
+      return;
+    }
+
+    if (recognized.has(value)) {
+      if (value !== currentDefault) {
+        this.setInternal(key, currentDefault);
+      }
+      this.setInternal(markerKey, currentDefault);
+    }
+  }
+}
+
+function normalizeGaokaoSyncSetting(key: string, value: string): string {
+  if (key === "sync.gaokaoCnRequestDelayMs") return String(clampGaokaoRequestDelayMs(Number(value)));
+  if (key === "sync.gaokaoCnMaxRequestsPerRun") return String(clampGaokaoMaxRequestsPerRun(Number(value)));
+  if (key === "sync.gaokaoCnBatchDelayMs") return String(clampGaokaoBatchDelayMs(Number(value)));
+  if (key === "sync.gaokaoCnRateLimitCooldownMinutes") return String(clampGaokaoRateLimitCooldownMinutes(Number(value)));
+  return value;
+}
+
+function clampGaokaoRequestDelayMs(value: number): number {
+  if (!Number.isFinite(value)) return Number(DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS);
+  return Math.max(MIN_GAOKAO_CN_REQUEST_DELAY_MS, Math.min(60 * 60 * 1000, Math.floor(value)));
+}
+
+function clampGaokaoMaxRequestsPerRun(value: number): number {
+  if (!Number.isFinite(value)) return Number(DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN);
+  return Math.max(1, Math.min(500, Math.floor(value)));
+}
+
+function clampGaokaoBatchDelayMs(value: number): number {
+  if (!Number.isFinite(value)) return Number(DEFAULT_GAOKAO_CN_BATCH_DELAY_MS);
+  return Math.max(MIN_GAOKAO_CN_BATCH_DELAY_MS, Math.min(24 * 60 * 60 * 1000, Math.floor(value)));
+}
+
+function clampGaokaoRateLimitCooldownMinutes(value: number): number {
+  if (!Number.isFinite(value)) return Number(DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES);
+  return Math.max(MIN_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES, Math.min(7 * 24 * 60, Math.floor(value)));
+}
+
+function seasonalAdmissionDefaults(now: Date): Array<{ key: string; value: string; recognizedValues: string[] }> {
+  return [
+    {
+      key: "sync.gaokaoCnPlanYears",
+      value: defaultAdmissionPlanYears(now).join(","),
+      recognizedValues: admissionPlanYearDefaultCandidates(now)
+    },
+    {
+      key: "sync.gaokaoCnScoreYears",
+      value: defaultAdmissionScoreYears(now).join(","),
+      recognizedValues: admissionScoreYearDefaultCandidates(now)
+    },
+    {
+      key: "sync.gaokaoCnPlanIntervalHours",
+      value: String(defaultAdmissionPlanIntervalHours(now)),
+      recognizedValues: ["24", "168"]
+    },
+    {
+      key: "sync.gaokaoCnScoreIntervalHours",
+      value: String(defaultAdmissionScoreIntervalHours(now)),
+      recognizedValues: ["24", "720"]
+    }
+  ];
+}
+
+function admissionPlanYearDefaultCandidates(now: Date): string[] {
+  const year = currentAdmissionYear(now);
+  return uniqueStrings([String(year), String(year - 1)]);
+}
+
+function admissionScoreYearDefaultCandidates(now: Date): string[] {
+  const year = currentAdmissionYear(now);
+  return uniqueStrings([
+    [year, year - 1, year - 2, year - 3].join(","),
+    [year - 1, year - 2, year - 3].join(","),
+    [year - 1, year - 2, year - 3, year - 4].join(","),
+    [year - 2, year - 3, year - 4].join(",")
+  ]);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
 }

@@ -19,6 +19,13 @@ describe("renderAnswerSourcePage", () => {
           "查询条件：中国药科大学；省份：河南；科类：理科；专业：未指定",
           "当前日期：2026-06-25。历史分数默认使用 2023-2025。",
           "实时同步节流：本批已用 12/12 次源站请求预算，已主动暂停继续补数；后续定时同步会从当前 offset 继续。",
+          "掌上高考院校基础信息：",
+          "来源：掌上高考（https://www.gaokao.cn/school/114）",
+          "学校：中国药科大学",
+          "掌上高考 school_id：114",
+          "地区：江苏 南京",
+          "层次/类型：本科 / 医药类 / 公办",
+          "标签：211；双一流",
           "",
           "报考参考表：",
           "年份 | 数据类型 | 科类 | 批次/专业组 | 专业/口径 | 最低分 | 最低位次 | 平均分 | 平均位次 | 最高分 | 省控线 | 线差 | 计划数",
@@ -50,6 +57,9 @@ describe("renderAnswerSourcePage", () => {
 
     expect(html).toContain("<h2>查询条件与同步状态</h2>");
     expect(html).toContain("实时同步节流");
+    expect(html).toContain("<h2>掌上高考院校基础信息</h2>");
+    expect(html).toContain("掌上高考 school_id：114");
+    expect(html).toContain("地区：江苏 南京");
     expect(html).toContain("<h2>报考参考表</h2>");
     expect(html).toContain("<h2>招生计划</h2>");
     expect(html).toContain("<h2>分数趋势摘要</h2>");
@@ -68,10 +78,149 @@ describe("renderAnswerSourcePage", () => {
     expect(html).toContain("admission_plans、admission_scores、admission_sources");
     expect(html).toContain("year=2025, min=610, min_section=12000");
     expect(html).toContain("ICP备案号");
+    const profileIndex = html.indexOf("<h2>掌上高考院校基础信息</h2>");
+    const profileSourceIndex = html.indexOf("来源：掌上高考（https://www.gaokao.cn/school/114）");
+    const referenceIndex = html.indexOf("<h2>报考参考表</h2>");
+    expect(profileIndex).toBeGreaterThan(-1);
+    expect(profileSourceIndex).toBeGreaterThan(profileIndex);
+    expect(profileSourceIndex).toBeLessThan(referenceIndex);
+  });
+
+  it("keeps multi-school admission source sections separated by school", () => {
+    const html = renderAnswerSourcePage(
+      sourceRecord({
+        topic: "招生数据",
+        universityName: "北京邮电大学 / 西安电子科技大学",
+        sourceUrl: null,
+        contextText: [
+          "多校招生对比查询：北京邮电大学 / 西安电子科技大学",
+          "用户问题：北邮和西电计算机山东多少位次，怎么选",
+          "省份：山东；科类：综合改革；专业组：未指定；专业：计算机",
+          "使用的数据表：admission_plans、admission_scores、admission_sources。",
+          "",
+          "===== 北京邮电大学 =====",
+          "查询条件：北京邮电大学；省份：山东；科类：综合改革；专业组：未指定；专业：计算机",
+          "掌上高考院校基础信息：",
+          "掌上高考 school_id：42",
+          "地区：北京",
+          "报考参考表：",
+          "年份 | 数据类型 | 科类 | 专业/口径 | 最低分 | 最低位次 | 计划数",
+          "2025 | 专业线 | 综合改革 | 计算机类 | 650 | 4200 | 18",
+          "资料页追溯：",
+          "掌上高考来源记录：201",
+          "",
+          "来源：掌上高考公开聚合数据；最终请以省考试院和学校招生网为准。",
+          "",
+          "===== 西安电子科技大学 =====",
+          "查询条件：西安电子科技大学；省份：山东；科类：综合改革；专业组：未指定；专业：计算机",
+          "掌上高考院校基础信息：",
+          "掌上高考 school_id：37",
+          "地区：陕西 西安",
+          "报考参考表：",
+          "年份 | 数据类型 | 科类 | 专业/口径 | 最低分 | 最低位次 | 计划数",
+          "2025 | 专业线 | 综合改革 | 计算机类 | 638 | 6800 | 28",
+          "资料页追溯：",
+          "掌上高考来源记录：301",
+          "",
+          "来源：掌上高考公开聚合数据；最终请以省考试院和学校招生网为准。",
+          "",
+          "多校对比说明：以上每所学校均单独同步、查询和保留来源快照；掌上高考为第三方聚合数据，最终请以省考试院和学校招生网为准。"
+        ].join("\n")
+      }),
+      ""
+    );
+
+    expect(html).toContain("<h2>学校：北京邮电大学</h2>");
+    expect(html).toContain("<h2>北京邮电大学 - 掌上高考院校基础信息</h2>");
+    expect(html).toContain("<h2>北京邮电大学 - 来源提醒</h2>");
+    expect(html).toContain("<h2>学校：西安电子科技大学</h2>");
+    expect(html).toContain("<h2>西安电子科技大学 - 掌上高考院校基础信息</h2>");
+    expect(html).toContain("<h2>西安电子科技大学 - 来源提醒</h2>");
+    const firstSourceIndex = html.indexOf("<h2>北京邮电大学 - 来源提醒</h2>");
+    const secondSchoolIndex = html.indexOf("<h2>学校：西安电子科技大学</h2>");
+    const secondProfileIndex = html.indexOf("<h2>西安电子科技大学 - 掌上高考院校基础信息</h2>");
+    expect(firstSourceIndex).toBeGreaterThan(-1);
+    expect(secondSchoolIndex).toBeGreaterThan(firstSourceIndex);
+    expect(secondProfileIndex).toBeGreaterThan(secondSchoolIndex);
   });
 });
 
 describe("admission API", () => {
+  it("uses configured Gaokao.cn plan detail setting for manual sync by default", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "myqqbot-api-admission-test-"));
+    const database = new AppDatabase(join(dir, "test.sqlite"));
+    const universities = new UniversityRepository(database);
+    const admissions = new AdmissionRepository(database);
+    const app = Fastify();
+    const sync = vi.fn().mockResolvedValue({
+      source: "gaokao_cn",
+      total: 0,
+      candidateTotal: 0,
+      offset: 0,
+      nextOffset: 0,
+      mapped: 0,
+      planRows: 0,
+      planSummaryRows: 0,
+      majorPlanRows: 0,
+      schoolScoreRows: 0,
+      majorScoreRows: 0,
+      sourceRows: 0,
+      sourceRequests: 0,
+      sourceRequestBudget: 1,
+      requestBudgetExhausted: false,
+      skippedRequests: 0,
+      skipped: 0,
+      errors: []
+    });
+    try {
+      await registerApi(app, {
+        config: { server: { publicBaseUrl: "http://localhost:8787" } },
+        database,
+        settings: {
+          runtime: () => ({
+            sync: {
+              gaokaoCnRateLimitCooldownMinutes: 1440,
+              gaokaoCnMaxRequestsPerRun: 1,
+              gaokaoCnIncludePlanDetails: false
+            }
+          })
+        },
+        universities,
+        admissions,
+        sync: {},
+        answerSources: {},
+        srgaoxiaoSync: {},
+        gaokaoCn: {
+          rateLimitStatus: () => ({ active: false, until: null }),
+          sync
+        },
+        autoSync: {},
+        llm: {},
+        logs: {},
+        processor: {},
+        onebot: {}
+      } as never);
+
+      await app.inject({
+        method: "POST",
+        url: "/api/data/sync-gaokao-cn",
+        payload: { includePlans: true, limit: 1 }
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/data/sync-gaokao-cn",
+        payload: { includePlans: true, includePlanDetails: true, limit: 1 }
+      });
+
+      expect(sync).toHaveBeenNthCalledWith(1, expect.objectContaining({ includePlanDetails: false }));
+      expect(sync).toHaveBeenNthCalledWith(2, expect.objectContaining({ includePlanDetails: true }));
+    } finally {
+      await app.close();
+      database.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("skips manual Gaokao.cn sync while the source cooldown is active", async () => {
     const dir = mkdtempSync(join(tmpdir(), "myqqbot-api-admission-test-"));
     const database = new AppDatabase(join(dir, "test.sqlite"));
@@ -87,8 +236,9 @@ describe("admission API", () => {
         settings: {
           runtime: () => ({
             sync: {
-              gaokaoCnRateLimitCooldownMinutes: 720,
-              gaokaoCnMaxRequestsPerRun: 4
+              gaokaoCnRateLimitCooldownMinutes: 1440,
+              gaokaoCnMaxRequestsPerRun: 1,
+              gaokaoCnIncludePlanDetails: false
             }
           })
         },
@@ -186,6 +336,40 @@ describe("admission API", () => {
       minRank: 5000,
       rawJson: "{}"
     });
+    const matchingSourceId = admissions.insertSource({
+      sourceKind: "plan-school-summary",
+      universityId: university.id,
+      sourceSchoolId: "30",
+      sourceUrl: "https://api.zjzw.cn/web/api/",
+      requestJson: JSON.stringify({
+        uri: "apidata/api/gkv3/plan/schoollists",
+        school_id: "30",
+        local_province_id: "37",
+        local_type_id: "3",
+        year: 2026,
+        page: 1,
+        size: 80
+      }),
+      responseJson: JSON.stringify({ code: "0000", data: { item: [] } }),
+      status: "success"
+    });
+    admissions.insertSource({
+      sourceKind: "score-school",
+      universityId: university.id,
+      sourceSchoolId: "30",
+      sourceUrl: "https://api.zjzw.cn/web/api/",
+      requestJson: JSON.stringify({
+        uri: "apidata/api/gk/score/province",
+        school_id: "30",
+        local_province_id: "51",
+        local_type_id: "1",
+        year: 2025,
+        page: 1,
+        size: 20
+      }),
+      responseJson: JSON.stringify({ code: "0000", data: { item: [] } }),
+      status: "success"
+    });
 
     const app = Fastify();
     try {
@@ -247,6 +431,49 @@ describe("admission API", () => {
           diffScore: 207,
           selectionRequirements: "物理,化学",
           sourceRecordId: "502"
+        })
+      ]);
+
+      const nameQueryResponse = await app.inject({
+        method: "GET",
+        url: "/api/admissions/query?university=北京邮电&province=山东&subject=综合改革&years=2026,2025&major=通信"
+      });
+      expect(nameQueryResponse.statusCode).toBe(200);
+      const nameQueryPayload = nameQueryResponse.json() as { plans: Array<Record<string, unknown>>; scores: Array<Record<string, unknown>> };
+      expect(nameQueryPayload.plans).toEqual([
+        expect.objectContaining({
+          universityName: "北京邮电大学",
+          majorName: "通信工程",
+          planCount: 18
+        })
+      ]);
+      expect(nameQueryPayload.scores).toEqual([
+        expect.objectContaining({
+          universityName: "北京邮电大学",
+          majorName: "电子信息类",
+          minRank: 1000
+        })
+      ]);
+
+      const unmatchedResponse = await app.inject({
+        method: "GET",
+        url: "/api/admissions/query?university=不存在大学&province=山东&years=2026,2025"
+      });
+      expect(unmatchedResponse.statusCode).toBe(200);
+      expect(unmatchedResponse.json()).toEqual({ plans: [], scores: [] });
+
+      const sourceResponse = await app.inject({
+        method: "GET",
+        url: `/api/admissions/sources?universityId=${university.id}&year=2026&province=山东&subject=综合改革`
+      });
+      expect(sourceResponse.statusCode).toBe(200);
+      const sourcePayload = sourceResponse.json() as Array<Record<string, unknown>>;
+      expect(sourcePayload).toEqual([
+        expect.objectContaining({
+          id: matchingSourceId,
+          sourceKind: "plan-school-summary",
+          universityName: "北京邮电大学",
+          status: "success"
         })
       ]);
     } finally {

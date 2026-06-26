@@ -24,6 +24,8 @@ interface GaokaoSchedulerResult {
   nextOffset: number;
   mapped: number;
   planRows: number;
+  planSummaryRows: number;
+  majorPlanRows: number;
   schoolScoreRows: number;
   majorScoreRows: number;
   sourceRows: number;
@@ -127,7 +129,7 @@ export class AutoSyncScheduler {
           nextRunAt: this.nextRunAt("gaokaoCnPlan", runtime.gaokaoCnAutoEnabled, runtime.gaokaoCnPlanIntervalHours),
           cursorOffset: this.gaokaoCursor("gaokaoCnPlan", gaokaoSignature(planOptions)),
           lastResult: this.gaokaoLastResult("gaokaoCnPlan"),
-          cooldownUntil: this.gaokaoRateLimitCooldownUntil("gaokaoCnPlan"),
+          cooldownUntil: this.gaokaoEffectiveRateLimitCooldownUntil("gaokaoCnPlan"),
           retryAt: this.gaokaoRetryAt("gaokaoCnPlan")
         },
         gaokaoCnScore: {
@@ -137,7 +139,7 @@ export class AutoSyncScheduler {
           nextRunAt: this.nextRunAt("gaokaoCnScore", runtime.gaokaoCnAutoEnabled, runtime.gaokaoCnScoreIntervalHours),
           cursorOffset: this.gaokaoCursor("gaokaoCnScore", gaokaoSignature(scoreOptions)),
           lastResult: this.gaokaoLastResult("gaokaoCnScore"),
-          cooldownUntil: this.gaokaoRateLimitCooldownUntil("gaokaoCnScore"),
+          cooldownUntil: this.gaokaoEffectiveRateLimitCooldownUntil("gaokaoCnScore"),
           retryAt: this.gaokaoRetryAt("gaokaoCnScore")
         }
       }
@@ -256,7 +258,8 @@ export class AutoSyncScheduler {
       skipExisting: runtime.gaokaoCnSkipExisting,
       includePlans: true,
       includeScores: false,
-      includeSpecialScores: false
+      includeSpecialScores: false,
+      includePlanDetails: runtime.gaokaoCnIncludePlanDetails
     };
   }
 
@@ -423,6 +426,8 @@ export class AutoSyncScheduler {
       nextOffset: result.nextOffset,
       mapped: result.mapped,
       planRows: result.planRows,
+      planSummaryRows: result.planSummaryRows,
+      majorPlanRows: result.majorPlanRows,
       schoolScoreRows: result.schoolScoreRows,
       majorScoreRows: result.majorScoreRows,
       sourceRows: result.sourceRows,
@@ -484,6 +489,10 @@ export class AutoSyncScheduler {
     if (!jobCooldown) return adapterCooldown;
     if (!adapterCooldown) return jobCooldown;
     return new Date(Math.max(jobCooldown.getTime(), adapterCooldown.getTime()));
+  }
+
+  private gaokaoEffectiveRateLimitCooldownUntil(key: GaokaoJobKey): string | null {
+    return this.gaokaoEffectiveRateLimitCooldownDate(key)?.toISOString() ?? null;
   }
 
   private gaokaoAdapterRateLimitCooldownDate(): Date | null {
@@ -592,6 +601,8 @@ function aggregateGaokaoResults(results: GaokaoCnSyncResult[]): GaokaoCnSyncResu
     nextOffset: last.nextOffset,
     mapped: sumGaokaoResults(results, "mapped"),
     planRows: sumGaokaoResults(results, "planRows"),
+    planSummaryRows: sumGaokaoResults(results, "planSummaryRows"),
+    majorPlanRows: sumGaokaoResults(results, "majorPlanRows"),
     schoolScoreRows: sumGaokaoResults(results, "schoolScoreRows"),
     majorScoreRows: sumGaokaoResults(results, "majorScoreRows"),
     sourceRows: sumGaokaoResults(results, "sourceRows"),
@@ -606,7 +617,7 @@ function aggregateGaokaoResults(results: GaokaoCnSyncResult[]): GaokaoCnSyncResu
 
 function sumGaokaoResults(
   results: GaokaoCnSyncResult[],
-  key: "total" | "mapped" | "planRows" | "schoolScoreRows" | "majorScoreRows" | "sourceRows" | "sourceRequests" | "skippedRequests" | "skipped"
+  key: "total" | "mapped" | "planRows" | "planSummaryRows" | "majorPlanRows" | "schoolScoreRows" | "majorScoreRows" | "sourceRows" | "sourceRequests" | "skippedRequests" | "skipped"
 ): number {
   return results.reduce((sum, result) => sum + result[key], 0);
 }

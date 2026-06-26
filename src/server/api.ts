@@ -9,11 +9,14 @@ import type { AutoSyncScheduler } from "./services/auto-sync-scheduler.js";
 import type { AnswerSourceRecord, AnswerSourceStore } from "./services/answer-source-store.js";
 import type { DataSyncService } from "./services/data-sync.js";
 import { renderGaokaoSchoolProfile, type GaokaoCnAdapter, type GaokaoSchool } from "./services/gaokao-cn-adapter.js";
+import { DEFAULT_JIANGSU_OFFICIAL_SCORE_SOURCES, JiangsuOfficialAdmissionAdapter, type JiangsuOfficialSyncOptions } from "./services/jiangsu-official-adapter.js";
+import { JiangsuOfficialPlanAdapter, type JiangsuOfficialPlanSyncOptions } from "./services/jiangsu-official-plan-adapter.js";
 import type { LlmClient } from "./services/llm-client.js";
 import type { LogStore } from "./services/log-store.js";
 import type { MessageProcessor } from "./services/message-processor.js";
 import type { SrgaoxiaoSyncService } from "./services/srgaoxiao-sync.js";
 import type { UniversityRepository } from "./services/university-repository.js";
+import { XuefengAgentAdapter, type XuefengAgentSyncOptions } from "./services/xuefeng-agent-adapter.js";
 
 export interface ApiDeps {
   config: AppConfig;
@@ -150,13 +153,76 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       includePlans: body.includePlans,
       includeScores: body.includeScores,
       includeSpecialScores: body.includeSpecialScores,
-      includePlanDetails: body.includePlanDetails,
+      includePlanDetails: body.includePlanDetails ?? syncSettings.gaokaoCnIncludePlanDetails,
       eligibleOnly: body.eligibleOnly,
       requestDelayMs: body.requestDelayMs,
       rateLimitCooldownMinutes: syncSettings.gaokaoCnRateLimitCooldownMinutes,
       maxSourceRequests: body.maxSourceRequests ?? syncSettings.gaokaoCnMaxRequestsPerRun,
       skipExisting: body.skipExisting
     });
+    return { ok: true, ...result };
+  });
+
+  app.post("/api/data/sync-xuefeng-agent", async (request) => {
+    const body = request.body as {
+      dbPath?: string;
+      gzPath?: string;
+      url?: string;
+      query?: string;
+      provinces?: string[] | string;
+      years?: number[] | string;
+      limit?: number;
+      offset?: number;
+    };
+    const options: XuefengAgentSyncOptions = {
+      dbPath: body.dbPath,
+      gzPath: body.gzPath,
+      url: body.url,
+      query: body.query,
+      provinces: parseStringList(body.provinces),
+      years: parseNumberList(body.years),
+      limit: toOptionalNumber(body.limit),
+      offset: toOptionalNumber(body.offset)
+    };
+    const adapter = new XuefengAgentAdapter(deps.config.dataDir, deps.database, deps.universities, deps.admissions);
+    const result = await adapter.sync(options);
+    return { ok: true, ...result };
+  });
+
+  app.post("/api/data/sync-jiangsu-official", async (request, reply) => {
+    const body = request.body as {
+      query?: string;
+      limit?: number;
+      year?: number;
+      subjectType?: string;
+      pageUrl?: string;
+      pdfUrl?: string;
+      batch?: string;
+      title?: string;
+    };
+    const options = buildJiangsuOfficialSyncOptions(body);
+    if (options === null) {
+      return reply.code(400).send({
+        ok: false,
+        message: "自定义江苏官方来源时，请同时提供科类：物理类或历史类。"
+      });
+    }
+    const adapter = new JiangsuOfficialAdmissionAdapter(deps.universities, deps.admissions);
+    const result = await adapter.sync(options);
+    return { ok: true, ...result };
+  });
+
+  app.post("/api/data/sync-jiangsu-official-plans", async (request) => {
+    const body = request.body as {
+      query?: string;
+      limit?: number;
+    };
+    const options: JiangsuOfficialPlanSyncOptions = {
+      query: body.query,
+      limit: toOptionalNumber(body.limit)
+    };
+    const adapter = new JiangsuOfficialPlanAdapter(deps.universities, deps.admissions);
+    const result = await adapter.sync(options);
     return { ok: true, ...result };
   });
 
@@ -180,8 +246,8 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
 
   app.get("/api/admissions/coverage-gaps/missing", async (request) => {
     const query = request.query as { kind?: string; year?: string; province?: string; subjectType?: string; limit?: string };
-    const kind = query.kind === "plan" || query.kind === "school_score" || query.kind === "major_score" ? query.kind : null;
-    if (!kind) throw new Error("kind must be plan, school_score or major_score");
+    const kind = query.kind === "plan" || query.kind === "major_plan" || query.kind === "school_score" || query.kind === "major_score" ? query.kind : null;
+    if (!kind) throw new Error("kind must be plan, major_plan, school_score or major_score");
     if (!query.year) throw new Error("year is required");
     if (!query.province?.trim()) throw new Error("province is required");
     return deps.admissions.coverageMissingUniversities({
@@ -257,6 +323,7 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
   app.get("/api/admissions/query", async (request) => {
     const query = request.query as {
       universityId?: string;
+      university?: string;
       province?: string;
       subject?: string;
       years?: string;
@@ -268,8 +335,14 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
     };
     const scoreType: "school" | "major" | undefined =
       query.scoreType === "school" || query.scoreType === "major" ? query.scoreType : undefined;
+    const universityQuery = !query.universityId ? query.university?.trim() : "";
+    const universityIds = universityQuery
+      ? deps.universities.listUniversities(universityQuery, 20).map((row) => row.id)
+      : undefined;
+    if (universityQuery && !universityIds?.length) return { plans: [], scores: [] };
     const input = {
       universityId: query.universityId ? Number(query.universityId) : undefined,
+      universityIds,
       provinceName: query.province,
       subjectType: query.subject,
       subjectTypes: parseStringList(query.subject),
@@ -303,14 +376,22 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
   app.get("/api/admissions/sources", async (request) => {
     const query = request.query as {
       universityId?: string;
+      sourceSchoolId?: string;
       sourceKind?: string;
       status?: string;
+      year?: string;
+      province?: string;
+      subject?: string;
       limit?: string;
     };
     return deps.admissions.listSources({
       universityId: query.universityId ? Number(query.universityId) : undefined,
+      sourceSchoolId: query.sourceSchoolId?.trim() || undefined,
       sourceKind: query.sourceKind,
       status: query.status,
+      year: query.year ? Number(query.year) : undefined,
+      provinceName: query.province,
+      subjectType: query.subject,
       limit: Number(query.limit ?? 20)
     });
   });
@@ -430,19 +511,27 @@ function renderAdmissionSourceSections(contextText: string): string {
 
 function splitAdmissionContext(contextText: string): Array<{ title: string; content: string }> {
   const markers = [
+    { pattern: /^掌上高考院校基础信息：\s*$/u, title: "掌上高考院校基础信息" },
     { pattern: /^报考参考表：\s*$/u, title: "报考参考表" },
     { pattern: /^招生计划：\s*$/u, title: "招生计划" },
     { pattern: /^分数趋势摘要：\s*$/u, title: "分数趋势摘要" },
     { pattern: /^录取分数\/位次：\s*$/u, title: "录取分数与最低位次" },
     { pattern: /^资料页追溯：\s*$/u, title: "资料页追溯" },
-    { pattern: /^来源：/u, title: "来源提醒" }
+    { pattern: /^来源：掌上高考公开聚合数据/u, title: "来源提醒" }
   ];
   const sections: Array<{ title: string; lines: string[] }> = [{ title: "查询条件与同步状态", lines: [] }];
+  let schoolSectionTitle: string | null = null;
   for (const line of contextText.split(/\r?\n/u)) {
+    const schoolDivider = /^=+\s*(.+?)\s*=+$/u.exec(line.trim());
+    if (schoolDivider?.[1]) {
+      schoolSectionTitle = schoolDivider[1];
+      sections.push({ title: `学校：${schoolSectionTitle}`, lines: [] });
+      continue;
+    }
     const marker = markers.find((item) => item.pattern.test(line.trim()));
     if (marker) {
       sections.push({
-        title: marker.title,
+        title: schoolSectionTitle ? `${schoolSectionTitle} - ${marker.title}` : marker.title,
         lines: marker.title === "来源提醒" ? [line] : []
       });
       continue;
@@ -671,6 +760,69 @@ function cleanApiString(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   const text = String(value).trim();
   return text || null;
+}
+
+function buildJiangsuOfficialSyncOptions(body: {
+  query?: string;
+  limit?: number;
+  year?: number;
+  subjectType?: string;
+  pageUrl?: string;
+  pdfUrl?: string;
+  excelUrl?: string;
+  batch?: string;
+  title?: string;
+}): JiangsuOfficialSyncOptions | null {
+  const query = cleanApiString(body.query) ?? undefined;
+  const limit = toOptionalNumber(body.limit);
+  const year = toOptionalNumber(body.year);
+  const subjectType = normalizeJiangsuOfficialSubject(body.subjectType);
+  const pageUrl = cleanApiString(body.pageUrl) ?? undefined;
+  const pdfUrl = cleanApiString(body.pdfUrl) ?? undefined;
+  const excelUrl = cleanApiString(body.excelUrl) ?? undefined;
+  const batch = cleanApiString(body.batch) ?? undefined;
+  const title = cleanApiString(body.title) ?? undefined;
+  const hasCustomSource = Boolean(year || subjectType || pageUrl || pdfUrl || excelUrl || batch || title);
+  const options: JiangsuOfficialSyncOptions = { query, limit };
+  if (!hasCustomSource) return options;
+  if (!subjectType) return null;
+
+  const defaultSource = DEFAULT_JIANGSU_OFFICIAL_SCORE_SOURCES.find(
+    (source) => source.subjectType === subjectType && (!year || source.year === year)
+  );
+  if (!pageUrl && !pdfUrl && !excelUrl && !defaultSource) return null;
+  options.sources = [
+    {
+      ...(defaultSource ?? {
+        year: year ?? 2025,
+        subjectType,
+        batch: "本科批",
+        linkTextIncludes: subjectType.includes("物理") ? "物理" : "历史"
+      }),
+      year: year ?? defaultSource?.year ?? 2025,
+      subjectType,
+      batch: batch ?? defaultSource?.batch ?? "本科批",
+      title: title ?? defaultSource?.title,
+      pageUrl: pageUrl ?? defaultSource?.pageUrl,
+      pdfUrl: pdfUrl ?? defaultSource?.pdfUrl,
+      excelUrl: excelUrl ?? defaultSource?.excelUrl,
+      linkTextIncludes: subjectType.includes("物理") ? "物理" : "历史"
+    }
+  ];
+  return options;
+}
+
+function normalizeJiangsuOfficialSubject(value: unknown): "物理类" | "历史类" | undefined {
+  const text = cleanApiString(value);
+  if (!text) return undefined;
+  if (text.includes("物理")) return "物理类";
+  if (text.includes("历史")) return "历史类";
+  return undefined;
+}
+
+function toOptionalNumber(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function parseStringList(value: string[] | string | undefined): string[] | undefined {

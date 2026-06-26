@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   __layoutKindsForTest,
   __splitReplyImageContentForTest,
+  __tableRowHeightsForTest,
   __wrapInlineTextForTest,
   markdownToPlainText,
   renderReplyImage
@@ -47,6 +48,18 @@ describe("reply-image-renderer", () => {
     expect(__layoutKindsForTest(markdown).filter((kind) => kind === "tableRow")).toHaveLength(3);
   });
 
+  it("wraps long admission table cells instead of squeezing them into one line", () => {
+    const markdown = [
+      "年份 | 科类 | 批次/专业组 | 专业/口径 | 最低分 | 最低位次 | 计划数",
+      "--- | --- | --- | --- | --- | --- | ---",
+      "2025 | 物理类 | 本科批 03专业组 | 计算机科学与技术（拔尖学生培养基地） | 640 | 5000 | 6"
+    ].join("\n");
+
+    const rowHeights = __tableRowHeightsForTest(markdown);
+    expect(rowHeights).toHaveLength(2);
+    expect(rowHeights[1]).toBeGreaterThan(40);
+  });
+
   it("renders a local QR code for the source page", () => {
     const image = renderReplyImage("测试回复", {
       sourcePageUrl: "https://example.com/sources/source-token"
@@ -64,6 +77,39 @@ describe("reply-image-renderer", () => {
       footerNotice: "院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。"
     });
   });
+
+  it("moves admission source disclaimers into the image footer", () => {
+    expect(__splitReplyImageContentForTest(
+      "结论：近三年位次大致在 12000-16000。\n\n掌上高考为第三方聚合数据，最终请以省考试院和学校招生网为准。"
+    )).toEqual({
+      body: "结论：近三年位次大致在 12000-16000。",
+      footerNotice: "掌上高考为第三方聚合数据，最终请以省考试院和学校招生网为准。"
+    });
+    expect(__splitReplyImageContentForTest(
+      "结论：江苏官方投档线显示最低分 638。\n\n招生数据最终请以省考试院和学校招生网为准。"
+    )).toEqual({
+      body: "结论：江苏官方投档线显示最低分 638。",
+      footerNotice: "招生数据最终请以省考试院和学校招生网为准。"
+    });
+  });
+
+  it("renders admission source pages with footer notice and QR code", () => {
+    const image = renderReplyImage(
+      [
+        "## 中国药科大学 近三年河南录取情况",
+        "",
+        "年份 | 科类 | 批次 | 最低分 | 最低位次 | 计划数",
+        "--- | --- | --- | --- | --- | ---",
+        "2025 | 理科 | 本科一批 | 610 | 12000 | 20",
+        "",
+        "掌上高考是第三方聚合数据，最终以省考试院和学校招生网为准。"
+      ].join("\n"),
+      { sourcePageUrl: "https://example.com/sources/admission-token" }
+    );
+
+    expect(image.mimeType).toBe("image/png");
+    expect(image.bytes).toBeGreaterThan(2000);
+  }, IMAGE_RENDER_TIMEOUT_MS);
 
   it("keeps common punctuation away from awkward line edges", () => {
     const cases = [

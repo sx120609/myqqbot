@@ -24,14 +24,15 @@ describe("AutoSyncScheduler", () => {
     expect(scheduler.gaokaoScoreOptions(runtime.sync).subjectTypes).toEqual(["理科", "文科"]);
     expect(scheduler.gaokaoPlanOptions(runtime.sync).eligibleOnly).toBe(true);
     expect(scheduler.gaokaoScoreOptions(runtime.sync).eligibleOnly).toBe(true);
-    expect(scheduler.gaokaoPlanOptions(runtime.sync).requestDelayMs).toBe(60000);
-    expect(scheduler.gaokaoScoreOptions(runtime.sync).requestDelayMs).toBe(60000);
-    expect(scheduler.gaokaoPlanOptions(runtime.sync).rateLimitCooldownMinutes).toBe(720);
-    expect(scheduler.gaokaoScoreOptions(runtime.sync).rateLimitCooldownMinutes).toBe(720);
-    expect(scheduler.gaokaoPlanOptions(runtime.sync).maxSourceRequests).toBe(4);
-    expect(scheduler.gaokaoScoreOptions(runtime.sync).maxSourceRequests).toBe(4);
+    expect(scheduler.gaokaoPlanOptions(runtime.sync).requestDelayMs).toBe(180000);
+    expect(scheduler.gaokaoScoreOptions(runtime.sync).requestDelayMs).toBe(180000);
+    expect(scheduler.gaokaoPlanOptions(runtime.sync).rateLimitCooldownMinutes).toBe(1440);
+    expect(scheduler.gaokaoScoreOptions(runtime.sync).rateLimitCooldownMinutes).toBe(1440);
+    expect(scheduler.gaokaoPlanOptions(runtime.sync).maxSourceRequests).toBe(1);
+    expect(scheduler.gaokaoScoreOptions(runtime.sync).maxSourceRequests).toBe(1);
     expect(scheduler.gaokaoPlanOptions(runtime.sync).skipExisting).toBe(true);
     expect(scheduler.gaokaoScoreOptions(runtime.sync).skipExisting).toBe(true);
+    expect(scheduler.gaokaoPlanOptions(runtime.sync).includePlanDetails).toBe(false);
   });
 
   it("persists Gaokao.cn batch summaries and only advances cursors on success", async () => {
@@ -378,6 +379,8 @@ function fixtureGaokaoResult(overrides: Partial<GaokaoCnSyncResult> = {}): Gaoka
     nextOffset: 10,
     mapped: 10,
     planRows: 0,
+    planSummaryRows: 0,
+    majorPlanRows: 0,
     schoolScoreRows: 0,
     majorScoreRows: 0,
     sourceRows: 20,
@@ -437,12 +440,13 @@ function fixtureRuntime(): RuntimeSettings {
       gaokaoCnScoreYears: "2025,2024,2023",
       gaokaoCnPlanYears: "2026",
       gaokaoCnRetryLimit: 1,
-      gaokaoCnRequestDelayMs: 60000,
-      gaokaoCnMaxRequestsPerRun: 4,
+      gaokaoCnRequestDelayMs: 180000,
+      gaokaoCnMaxRequestsPerRun: 1,
       gaokaoCnBatchesPerRun: 2,
       gaokaoCnBatchDelayMs: 0,
-      gaokaoCnRateLimitCooldownMinutes: 720,
-      gaokaoCnSkipExisting: true
+      gaokaoCnRateLimitCooldownMinutes: 1440,
+      gaokaoCnSkipExisting: true,
+      gaokaoCnIncludePlanDetails: false
     }
   };
 }

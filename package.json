@@ -13,7 +13,10 @@
     "test": "vitest run",
     "sync:data": "tsx src/server/scripts/sync-data.ts",
     "sync:srgaoxiao": "tsx src/server/scripts/sync-srgaoxiao.ts",
-    "sync:gaokao-cn": "tsx src/server/scripts/sync-gaokao-cn.ts"
+    "sync:gaokao-cn": "tsx src/server/scripts/sync-gaokao-cn.ts",
+    "sync:xuefeng-agent": "tsx src/server/scripts/sync-xuefeng-agent.ts",
+    "sync:jiangsu-official": "tsx src/server/scripts/sync-jiangsu-official.ts",
+    "sync:jiangsu-official-plans": "tsx src/server/scripts/sync-jiangsu-official-plans.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.1",
@@ -22,9 +25,13 @@
     "@resvg/resvg-js": "^2.6.2",
     "fastify": "^5.4.0",
     "lucide-react": "^0.468.0",
+    "pdf-parse": "^2.4.5",
     "qrcode": "^1.5.4",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "sharp": "^0.35.2",
+    "tesseract.js": "^7.0.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^24.0.3",

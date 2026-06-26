@@ -56,6 +56,13 @@ Usage:
                                   Sync all srgaoxiao school profiles once.
   scripts/deploy.sh sync-gaokao-cn [--limit=10 ...]
                                   Sync Gaokao.cn admission plans and score lines.
+  scripts/deploy.sh sync-xuefeng-agent [--limit=10000 ...]
+                                  Import Xuefeng Agent historical admission score data.
+                                  Uses gh.lizmt.cn mirror first by default; override with --url if needed.
+  scripts/deploy.sh sync-jiangsu-official [--query=南京大学 ...]
+                                  Sync official Jiangsu EEA score lines.
+  scripts/deploy.sh sync-jiangsu-official-plans [--query=苏州大学 ...]
+                                  Sync official Jiangsu university admission plans.
   scripts/deploy.sh enable-sync-timer
                                   Enable daily CollegesChat data sync timer.
   scripts/deploy.sh disable-sync-timer
@@ -689,6 +696,39 @@ sync_gaokao_cn_command() {
   fi
 }
 
+sync_xuefeng_agent_command() {
+  ensure_linux_and_node
+  resolve_app_dir
+  cd "$APP_DIR"
+  if [ -f dist/server/scripts/sync-xuefeng-agent.js ]; then
+    node dist/server/scripts/sync-xuefeng-agent.js "$@"
+  else
+    npm run sync:xuefeng-agent -- "$@"
+  fi
+}
+
+sync_jiangsu_official_command() {
+  ensure_linux_and_node
+  resolve_app_dir
+  cd "$APP_DIR"
+  if [ -f dist/server/scripts/sync-jiangsu-official.js ]; then
+    node dist/server/scripts/sync-jiangsu-official.js "$@"
+  else
+    npm run sync:jiangsu-official -- "$@"
+  fi
+}
+
+sync_jiangsu_official_plans_command() {
+  ensure_linux_and_node
+  resolve_app_dir
+  cd "$APP_DIR"
+  if [ -f dist/server/scripts/sync-jiangsu-official-plans.js ]; then
+    node dist/server/scripts/sync-jiangsu-official-plans.js "$@"
+  else
+    npm run sync:jiangsu-official-plans -- "$@"
+  fi
+}
+
 systemd_command() {
   local action="$1"
   [ "$SKIP_SYSTEMD" != "1" ] || fail "SKIP_SYSTEMD=1 is set."
@@ -725,6 +765,15 @@ main() {
       ;;
     sync-gaokao-cn)
       sync_gaokao_cn_command "$@"
+      ;;
+    sync-xuefeng-agent)
+      sync_xuefeng_agent_command "$@"
+      ;;
+    sync-jiangsu-official)
+      sync_jiangsu_official_command "$@"
+      ;;
+    sync-jiangsu-official-plans)
+      sync_jiangsu_official_plans_command "$@"
       ;;
     restart|status|logs)
       systemd_command "$COMMAND"

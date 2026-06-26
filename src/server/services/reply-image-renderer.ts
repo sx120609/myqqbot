@@ -45,6 +45,7 @@ interface LineStyle {
 
 interface TableCell {
   text: string;
+  lines?: string[];
   x: number;
   width: number;
   header?: boolean;
@@ -121,6 +122,12 @@ export function __wrapInlineTextForTest(text: string, width: number, fontSize = 
 
 export function __layoutKindsForTest(markdown: string): string[] {
   return layoutMarkdown(normalizeMarkdown(markdown)).map((line) => line.kind ?? "text");
+}
+
+export function __tableRowHeightsForTest(markdown: string): number[] {
+  return layoutMarkdown(normalizeMarkdown(markdown))
+    .filter((line) => line.kind === "tableRow")
+    .map((line) => line.lineHeight);
 }
 
 export function __splitReplyImageContentForTest(markdown: string): ReplyImageContent {
@@ -241,7 +248,9 @@ function splitReplyImageContent(markdown: string): ReplyImageContent {
 function isFooterNotice(text: string): boolean {
   return (
     (text.includes("生活体验数据来自 CollegesChat 问卷") && text.includes("常识建议仅供参考")) ||
-    (text.includes("数据来自 CollegesChat 问卷") && text.includes("常识建议仅供参考"))
+    (text.includes("数据来自 CollegesChat 问卷") && text.includes("常识建议仅供参考")) ||
+    (text.includes("掌上高考") && text.includes("第三方聚合数据") && text.includes("最终") && (text.includes("省考试院") || text.includes("学校招生网"))) ||
+    (text.includes("招生数据") && text.includes("最终") && (text.includes("省考试院") || text.includes("学校招生网")))
   );
 }
 
@@ -294,14 +303,16 @@ function addPipeTable(target: VisualLine[], lines: string[]): void {
   const columnCount = Math.max(...rows.map((row) => row.length));
   const tableWidth = CONTENT_WIDTH - TEXT_WRAP_GUTTER;
   const widths = computeTableColumnWidths(rows, columnCount, tableWidth, 18);
-  const rowHeight = 40;
   const startX = CONTENT_X;
 
   rows.forEach((row, rowIndex) => {
+    const fontSize = rowIndex === 0 ? 18 : 17;
     let cellX = startX;
     const cells = widths.map((width, index) => {
+      const text = row[index] ?? "";
       const cell: TableCell = {
-        text: row[index] ?? "",
+        text,
+        lines: fitTableCellLines(text || "-", fontSize, Math.max(18, width - 16)),
         x: cellX,
         width,
         header: rowIndex === 0
@@ -315,8 +326,8 @@ function addPipeTable(target: VisualLine[], lines: string[]): void {
       cells,
       x: startX,
       y: 0,
-      fontSize: rowIndex === 0 ? 18 : 17,
-      lineHeight: rowHeight,
+      fontSize,
+      lineHeight: tableRowHeight(cells, fontSize),
       color: "#243044",
       weight: rowIndex === 0 ? 800 : 500,
       marginTop: rowIndex === 0 ? (target.length === 0 ? 0 : 16) : 0
@@ -617,12 +628,19 @@ function renderTableRow(line: VisualLine): string {
   const background = cells[0]?.header ? "#f7f2e9" : "#ffffff";
   return cells
     .map((cell) => {
-      const text = fitText(cell.text || "-", line.fontSize, Math.max(18, cell.width - 16));
+      const textLines = cell.lines?.length ? cell.lines : fitTableCellLines(cell.text || "-", line.fontSize, Math.max(18, cell.width - 16));
       const fill = cell.header ? "#172033" : "#243044";
       const weight = cell.header ? 800 : line.weight;
+      const lineGap = line.fontSize + 7;
+      const textY = rowTop + 23;
+      const texts = textLines
+        .map((text, index) =>
+          `<text x="${round(cell.x + 8)}" y="${round(textY + index * lineGap)}" font-family="${FONT_FAMILY}" font-size="${line.fontSize}" font-weight="${weight}" fill="${fill}">${escapeXml(text)}</text>`
+        )
+        .join("");
       return `<g>
   <rect x="${round(cell.x)}" y="${round(rowTop)}" width="${round(cell.width)}" height="${line.lineHeight}" fill="${background}" stroke="#eee6da" stroke-width="1"/>
-  <text x="${round(cell.x + 8)}" y="${line.y}" font-family="${FONT_FAMILY}" font-size="${line.fontSize}" font-weight="${weight}" fill="${fill}">${escapeXml(text)}</text>
+  ${texts}
 </g>`;
     })
     .join("");
@@ -686,6 +704,9 @@ function renderSourceQr(sourceQr: SourceQr, footerNotice: string | null, top: nu
   const noticeSvg = footerNotice
     ? renderFooterNotice(footerNotice, textX, qrY + 86, WIDTH - CONTENT_X - textX, false)
     : "";
+  const sourceDescription = footerNotice && (footerNotice.includes("掌上高考") || footerNotice.includes("招生数据"))
+    ? "包含查询条件、招生数据表和来源快照"
+    : "包含本次回答引用的资料和来源摘要";
 
   return `<g>
   <line x1="${CONTENT_X}" y1="${top}" x2="${WIDTH - CONTENT_X}" y2="${top}" stroke="#eee6da" stroke-width="2"/>
@@ -693,7 +714,7 @@ function renderSourceQr(sourceQr: SourceQr, footerNotice: string | null, top: nu
   <rect x="${qrX}" y="${qrY}" width="${SOURCE_QR_SIZE}" height="${SOURCE_QR_SIZE}" fill="#ffffff"/>
   ${moduleRects}
   <text x="${textX}" y="${qrY + 26}" font-family="${FONT_FAMILY}" font-size="26" font-weight="800" fill="#182235">扫码查看本回答资料</text>
-  <text x="${textX}" y="${qrY + 62}" font-family="${FONT_FAMILY}" font-size="21" font-weight="500" fill="#5f6b7a">包含问卷片段、院校画像和评论摘要</text>
+  <text x="${textX}" y="${qrY + 62}" font-family="${FONT_FAMILY}" font-size="21" font-weight="500" fill="#5f6b7a">${escapeXml(sourceDescription)}</text>
   ${noticeSvg}
 </g>`;
 }
@@ -728,6 +749,20 @@ function fitText(text: string, fontSize: number, maxWidth: number): string {
     result += char;
   }
   return `${result || clean.slice(0, 1)}...`;
+}
+
+function fitTableCellLines(text: string, fontSize: number, maxWidth: number, maxLines = 2): string[] {
+  const clean = text.trim() || "-";
+  const wrapped = wrapPlainText(clean, fontSize, maxWidth);
+  if (wrapped.length <= maxLines) return wrapped;
+  const visible = wrapped.slice(0, maxLines);
+  visible[maxLines - 1] = fitText(wrapped.slice(maxLines - 1).join(""), fontSize, maxWidth);
+  return visible;
+}
+
+function tableRowHeight(cells: TableCell[], fontSize: number): number {
+  const lineCount = Math.max(1, ...cells.map((cell) => cell.lines?.length ?? 1));
+  return Math.max(40, 14 + lineCount * (fontSize + 7));
 }
 
 function measureText(text: string, fontSize: number): number {

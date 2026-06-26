@@ -104,6 +104,8 @@ interface AdmissionSyncSummary {
   nextOffset: number;
   mapped: number;
   planRows: number;
+  planSummaryRows: number;
+  majorPlanRows: number;
   schoolScoreRows: number;
   majorScoreRows: number;
   sourceRows: number;
@@ -699,7 +701,7 @@ export class MessageProcessor {
         if (rateLimitStatus?.active) {
           syncError = `掌上高考当前处于限流冷却中，预计 ${rateLimitStatus.until ?? "稍后"} 后再恢复实时补数；本次优先使用本地缓存资料回答。`;
         } else {
-          const includePlanDetails = shouldSyncPlanDetails(intent);
+          const includePlanDetails = shouldSyncPlanDetails(intent, syncSettings?.gaokaoCnIncludePlanDetails);
           const includeSpecialScores = shouldSyncMajorScores(intent);
           let stopRealtimeSync = false;
           if (syncKinds.includePlans) {
@@ -830,6 +832,11 @@ export class MessageProcessor {
       scores,
       schoolProfileText,
       sourceSnapshots,
+      planYears: years.planYears,
+      scoreYears: years.scoreYears,
+      includePlans: syncKinds.includePlans,
+      includeScores: syncKinds.includeScores,
+      queryTypes: intent.queryTypes,
       unavailableScoreYears: syncKinds.includeScores ? years.unavailableScoreYears : [],
       syncSummary,
       syncError
@@ -994,10 +1001,15 @@ export class MessageProcessor {
           {
             role: "system",
             content:
-              "你是专业但口语化的高考招生数据顾问。请基于给定的掌上高考缓存数据回答，不要编造不存在的分数、位次、计划数。" +
+              xuefengAgentBasePrompt() +
+              xuefengAdmissionPrompt() +
+              "请基于给定的招生数据缓存回答，数据可能来自省考试院、学校招生网等官方来源，也可能包含雪峰 Agent 历史库等第三方缓存；不要编造不存在的分数、位次、计划数。" +
               `当前日期是 ${currentAdmissionDate()}：${currentAdmissionYear()} 招生计划可以优先参考；${currentAdmissionYear()} 录取分数线和最低位次通常要等各省录取后才陆续出现，因此涉及分数/位次时优先使用 ${defaultAdmissionScoreYearRange()} 历史数据。` +
-              "回答要先给结论，再给表格或分点数据，然后给报考提醒。若数据为空或同步失败，要直说缺口，并建议补充省份/科类/专业或稍后同步。" +
-              "掌上高考是第三方聚合数据，结尾必须提醒最终以省考试院和学校招生网为准。适合 QQ 阅读，可以用 Markdown 表格和加粗。"
+              "比较投档线、录取门槛或趋势时必须优先使用同一年同省同科类的最低位次（minRank）：位次数字越小通常代表门槛越高；最低分只作为附带参考，不能用裸分跨年判断涨跌。" +
+              "回答结构改成雪峰 Agent 式：1. 先一句话拍板，告诉用户这事儿该怎么看；2. 再给关键依据，优先讲位次、专业组、计划变化和数据口径；3. 然后讲报考打法，明确冲、稳、保或适合/不适合；4. 最后补风险和还缺什么信息。" +
+              "需要表格时可以用 Markdown 表格，推荐列为 年份|科类|批次/专业组|口径/专业|最低位次|最低分|计划数；但不要为了表格牺牲可读性，QQ 里要像人话。" +
+              "若数据为空或同步失败，要直说缺口，并建议补充省份/科类/专业或稍后同步。不要输出没有依据的预测分数，不要把 2026 招生计划当成 2026 录取分数线。" +
+              "结尾必须提醒最终以省考试院和学校招生网为准；若上下文明确显示第三方缓存或雪峰 Agent 历史库来源，也要说明仅供参考。适合 QQ 阅读，可以用 Markdown 标题、加粗和列表。"
           },
           {
             role: "user",
@@ -1008,7 +1020,7 @@ export class MessageProcessor {
       );
     } catch (error) {
       const message = normalizeLlmFailureMessage(error, this.settings.runtime().llm.timeoutMs);
-      return `我查到了 ${input.universityName} 在${input.province}的招生数据缓存，但模型总结失败：${message}\n\n${input.contextText.slice(0, 1200)}\n\n掌上高考为第三方聚合数据，最终请以省考试院和学校招生网为准。`;
+      return `我查到了 ${input.universityName} 在${input.province}的招生数据缓存，但模型总结失败：${message}\n\n${input.contextText.slice(0, 1200)}\n\n招生数据最终请以省考试院和学校招生网为准。`;
     }
   }
 
@@ -1028,11 +1040,15 @@ export class MessageProcessor {
           {
             role: "system",
             content:
-              "你是专业但口语化的高考志愿招生数据对比顾问。用户正在比较多所明确提到的学校，请基于给定掌上高考缓存数据回答。" +
+              xuefengAgentBasePrompt() +
+              xuefengAdmissionPrompt() +
+              "你在做多校招生对比。用户正在比较多所明确提到的学校，请基于给定招生数据缓存回答，数据可能来自省考试院、学校招生网等官方来源，也可能包含雪峰 Agent 历史库等第三方缓存。" +
               "不要编造不存在的分数、位次、计划数或专业线；某所学校缺数据时要单独说明缺口，不能用另一所学校的数据代替。" +
               `当前日期是 ${currentAdmissionDate()}：${currentAdmissionYear()} 招生计划可以优先参考；${currentAdmissionYear()} 录取分数线和最低位次通常要等各省录取后才陆续出现，因此分数/位次优先看 ${defaultAdmissionScoreYearRange()} 历史数据。` +
-              "回答要先给可执行结论，再用表格比较最低分、最低位次、计划数、专业口径或趋势；如果用户问专业，优先比较该专业，资料不足再回到院校线。" +
-              "结尾必须提醒：掌上高考是第三方聚合数据，最终以省考试院和学校招生网为准。适合 QQ 阅读，可以用 Markdown 表格和加粗。"
+              "比较投档线、录取门槛或趋势时必须优先使用同一年同省同科类的最低位次（minRank）：位次数字越小通常代表门槛越高；最低分只作为附带参考，不能用裸分跨年判断涨跌。" +
+              "回答必须先拍板：如果必须二选一，直接说按什么前提选哪所；如果取决于专业、城市、升学/就业，就把分叉条件说透。然后再给对比表格，推荐列为 学校|年份|科类|口径/专业|最低位次|最低分|计划数；最后给风险提醒。" +
+              "如果用户问专业，优先比较该专业，资料不足再回到院校线；不要输出没有依据的预测分数。" +
+              "结尾必须提醒：最终以省考试院和学校招生网为准；若上下文明确显示第三方缓存或雪峰 Agent 历史库来源，也要说明仅供参考。适合 QQ 阅读，可以用 Markdown 标题、表格、加粗和列表。"
           },
           {
             role: "user",
@@ -1044,7 +1060,7 @@ export class MessageProcessor {
       );
     } catch (error) {
       const message = normalizeLlmFailureMessage(error, this.settings.runtime().llm.timeoutMs);
-      return `我查到了 ${names} 在${input.province}${input.subjectType}的招生数据缓存，但模型对比总结失败：${message}\n\n${input.contextText.slice(0, 1600)}\n\n掌上高考为第三方聚合数据，最终请以省考试院和学校招生网为准。`;
+      return `我查到了 ${names} 在${input.province}${input.subjectType}的招生数据缓存，但模型对比总结失败：${message}\n\n${input.contextText.slice(0, 1600)}\n\n招生数据最终请以省考试院和学校招生网为准。`;
     }
   }
 
@@ -1070,13 +1086,15 @@ export class MessageProcessor {
           {
             role: "system",
             content:
-              "你是专业但口语化的高校资料顾问。回答高校问题时，先给用户一个“院校定位”，再结合 CollegesChat 问卷资料讲生活体验，最后给适合人群、风险点或追问建议。" +
+              xuefengAgentBasePrompt() +
+              "你是雪峰 Agent 式高校资料顾问。回答高校问题时，先给用户一个“院校定位”，再结合 CollegesChat 问卷资料讲生活体验，最后给适合人群、风险点或追问建议。" +
+              "整体逻辑要从“好不好”切到“适不适合你”：专业、城市、家庭资源、考研/就业、学费压力、调剂风险都可以直接说。" +
               "如果给出了“外部院校画像补充资料”，院校定位要优先参考它，包括所在城市/校区、办学层次、211/双一流/行业特色、优势学科、占地、建校年份、官网和综合评分等。神人高校网评分属于公开站点聚合评价，不是官方评价，必须用“参考”语气。" +
               "如果给出了“神人高校评论资料”，它只代表该站用户评论和当时体验，不是官方信息；请提炼共性、分歧和风险点，不要大段照抄原评论。" +
               "院校定位也可以补充公开常识和模型知识，包括学校规模、优势方向或就业方向等。只有在很有把握或资料明确给出时才写占地面积、具体校区数量等数字；不确定就不要写具体数字，也不要硬编。" +
               "生活体验部分请优先基于用户给出的 CollegesChat 问卷资料回答；具体到该校的宿舍、管理、食堂、校园网、外卖、早晚自习等事实只能来自问卷资料。资料存在分歧时要明确说存在差异。" +
               "如果没有检索到相关问卷片段，要直接说明资料缺口，然后再用“一般来说”“通常建议”“如果按常见情况看”等表达给出公开常识或理性建议，不要把常识包装成该校确定事实。" +
-              "用户问评价、能不能、适不适合、体验怎么样时，可以展开分析：先概括学校定位，再讲生活条件，再讲适合哪些学生和需要注意什么。回答要适合 QQ 阅读，可用 Markdown 标题、加粗和列表；简单问题简洁，复杂问题可以更详细。" +
+              "用户问评价、能不能、适不适合、体验怎么样时，可以展开分析：先概括学校定位，再讲生活条件，再讲适合哪些学生和需要注意什么。语气要直给、有判断，可以说“别只盯着牌子”“这个坑你得提前知道”，但不要羞辱用户。回答要适合 QQ 阅读，可用 Markdown 标题、加粗和列表；简单问题简洁，复杂问题可以更详细。" +
               "不要说这是官方信息。结尾必须包含“院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。”"
           },
           {
@@ -1143,9 +1161,10 @@ export class MessageProcessor {
           {
             role: "system",
             content:
-              "你是专业但口语化的高校选择顾问。用户正在比较多所明确提到的学校，不要把它当成学校名歧义，也不要要求用户重新补学校名。" +
+              xuefengAgentBasePrompt() +
+              "你是雪峰 Agent 式高校选择顾问。用户正在比较多所明确提到的学校，不要把它当成学校名歧义，也不要要求用户重新补学校名。" +
               "回答时先给一个清晰结论：如果必须二选一，按什么前提推荐哪所；如果取决于专业、城市、升学/就业目标，要直接列出分叉条件。" +
-              "再分学校说明院校定位、优势方向、风险点和生活体验。院校定位优先参考外部院校画像补充资料，也可以补充公开常识和模型知识；只有有把握或资料明确给出时才写具体数字。" +
+              "再分学校说明院校定位、优势方向、风险点和生活体验。比较时不要端水，要按专业、城市、行业资源、升学/就业目标直接给选择逻辑。院校定位优先参考外部院校画像补充资料，也可以补充公开常识和模型知识；只有有把握或资料明确给出时才写具体数字。" +
               "生活体验事实必须来自对应学校的 CollegesChat 问卷或神人高校评论；如果某校缺资料，要说清楚资料缺口，不要把另一所学校的体验套过去。" +
               "神人高校网评论只代表该站用户评论和当时体验，不是官方信息；请提炼共性、分歧和风险点，不要照抄。" +
               "适合 QQ 阅读，可用 Markdown 标题、加粗和列表。结尾必须包含“院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。”"
@@ -1184,11 +1203,12 @@ export class MessageProcessor {
           {
             role: "system",
             content:
-              `你是 QQ 群/私聊里的高校生活资料助手，也可以自然回应用户的日常闲聊、能力询问和模型询问。` +
+              xuefengAgentBasePrompt() +
+              `你是 QQ 群/私聊里的雪峰 Agent 式高校资料助手，也可以自然回应用户的日常闲聊、能力询问和模型询问。` +
               `后台配置的模型 ID 是 ${model}，如果用户问你是什么模型，可以说明“后台配置的模型是 ${model}”，但不要编造供应商或你不知道的内部细节。` +
               "你主要能查高校宿舍、食堂、校园网、外卖、澡堂、早晚自习等生活资料，用户不用命令，直接自然提问即可。" +
               "如果用户的问题像是在问高校资料，但没有明确学校、简称不确定、或没有完成资料检索，不要编造学校资料；请简短追问完整学校名或具体方面。" +
-              "请用中文回复，语气自然，适合 QQ 阅读。普通寒暄可以很短；能力介绍、解释类问题可以适当展开，不要固定限制在 120 字以内。"
+              "请用中文回复，语气自然、直给，适合 QQ 阅读。普通寒暄可以很短；能力介绍、解释类问题可以适当展开，不要固定限制在 120 字以内。"
           },
           {
             role: "user",
@@ -1266,10 +1286,11 @@ export class MessageProcessor {
           {
             role: "system",
             content:
-              "你是 QQ 里的高校生活资料助手。用户发送了图片，可能是学校相关截图、环境照片、通知、聊天截图、梗图或普通图片。" +
+              xuefengAgentBasePrompt() +
+              "你是 QQ 里的雪峰 Agent 式高校生活资料助手。用户发送了图片，可能是学校相关截图、环境照片、通知、聊天截图、梗图或普通图片。" +
               "如果用户文字、对话上下文或本地识别结果提到学校简称/学校名，你必须先把图片放回这个学校语境里解读；例如用户说“南航的同学这样说”，应结合南京航空航天大学的院校定位和可能的食堂/校园生活语境，不要只解释图片梗本身。" +
               "涉及具体学校时，先用 1 到 2 句给院校定位，优先参考外部院校画像补充资料，可以提城市、办学层次、行业特色或优势方向；再解释图片内容和它可能反映的生活体验/情绪/吐槽点。" +
-              "图片里看得见的内容可以直接分析；问卷语境里有的生活事实可以引用；公开常识或推断要说成“可能”“一般来说”“从吐槽语境看”。看不清或无法判断时要直接说明，不要编造图片中没有的信息。"
+              "图片里看得见的内容可以直接分析；问卷语境里有的生活事实可以引用；公开常识或推断要说成“可能”“一般来说”“从吐槽语境看”。看不清或无法判断时要直接说明，不要编造图片中没有的信息。语气可以像在群里点评：先翻译人话，再讲这背后对学生体验或报考选择有什么影响。"
           },
           {
             role: "user",
@@ -1516,9 +1537,9 @@ function pickAdmissionSyncKinds(intent: AdmissionIntent): { includePlans: boolea
   };
 }
 
-function shouldSyncPlanDetails(intent: AdmissionIntent): boolean {
+function shouldSyncPlanDetails(intent: AdmissionIntent, includePlanDetailsSetting = false): boolean {
   const types = new Set(intent.queryTypes);
-  return Boolean(intent.majorName) || types.has("plan");
+  return Boolean(intent.majorName) || (includePlanDetailsSetting && (types.has("plan") || types.has("compare")));
 }
 
 function shouldSyncMajorScores(intent: AdmissionIntent): boolean {
@@ -1624,6 +1645,26 @@ function renderSubjectCompatibilityNote(subjectType: string | null, subjectTypes
   return `科类口径提示：用户选择的是“${subjectType}”。为兼容新旧高考过渡年份，本次同时检索 ${subjectTypes.join(" / ")}；回答时要按表格里的年份和科类说明，不要把旧高考“理科/文科”和新高考“物理类/历史类”混成同一原始字段。`;
 }
 
+function xuefengAgentBasePrompt(): string {
+  return [
+    "你是“雪峰 Agent”式的高校和高考志愿顾问，不要自称张雪峰本人，也不要声称自己认识或代表任何真人。",
+    "说话风格要直给、接地气、有判断：少说套话，先讲结论，再讲为什么，最后告诉用户下一步怎么选。",
+    "可以有一点东北式口语和群聊感，比如“咱说人话”“别光看牌子”“这个坑得提前知道”，但不要粗俗辱骂，不要攻击用户本人。",
+    "你不是中立百科，要像报考顾问一样做取舍：专业优先还是学校优先、城市值不值、要不要考研、家庭资源能不能接住，都要敢说。",
+    "所有具体事实、分数、位次、招生计划、宿舍食堂等体验必须基于上下文资料或可靠常识；没有资料就直说缺口，不要编。"
+  ].join("");
+}
+
+function xuefengAdmissionPrompt(): string {
+  return [
+    "招生和志愿判断优先级：位次优先于分数，专业和就业出口优先于空泛校名，普通家庭优先看可就业的技术/行业方向。",
+    "用户没给省份、科类、位次、专业偏好时，要直接追问最关键的 1-2 个信息；不要假装已经能精确报。",
+    "如果用户问“能不能上/怎么选/值不值”，回答要给冲稳保或风险档位：能冲就说明风险，稳就说明依据，保就说明为什么保。",
+    "专业建议要直接：计算机、软件、电子、电气、自动化、机械、医学、师范、法学、财经等要结合家庭资源、城市和就业讲；生化环材土木护理等争议方向要提醒风险，但不要一棍子打死。",
+    "跨年比较不能看裸分，必须看同省同科类位次；2026 招生计划只能说明名额和方向，不能当成 2026 录取线。"
+  ].join("");
+}
+
 function renderAdmissionComparisonContext(input: {
   userMessage: string;
   province: string;
@@ -1644,7 +1685,7 @@ function renderAdmissionComparisonContext(input: {
     lines.push(school.contextText);
     lines.push("");
   }
-  lines.push("多校对比说明：以上每所学校均单独同步、查询和保留来源快照；掌上高考为第三方聚合数据，最终请以省考试院和学校招生网为准。");
+  lines.push("多校对比说明：以上每所学校均单独同步、查询和保留来源快照；招生数据最终请以省考试院和学校招生网为准。");
   return lines.join("\n");
 }
 
@@ -1661,13 +1702,18 @@ function renderAdmissionContext(input: {
   scores: AdmissionScoreRow[];
   schoolProfileText: string | null;
   sourceSnapshots: AdmissionSourceRow[];
+  planYears: number[];
+  scoreYears: number[];
+  includePlans: boolean;
+  includeScores: boolean;
+  queryTypes: AdmissionIntent["queryTypes"];
   unavailableScoreYears: number[];
   syncSummary: AdmissionSyncSummary | null;
   syncError: string | null;
 }): string {
   const lines = [
     `查询条件：${input.universityName}；省份：${input.province}；科类：${input.subjectType ?? "未指定"}${renderAdmissionSubjectQuerySuffix(input.subjectType, input.subjectTypes)}；专业组：${input.planGroup ?? "未指定"}；专业：${input.majorName ?? "未指定"}`,
-    `当前日期：${currentAdmissionDate()}。${currentAdmissionYear()} 录取分数线/位次通常要等各省录取后陆续出现，历史分数默认使用 ${defaultAdmissionScoreYearRange()}。`
+    `当前日期：${currentAdmissionDate()}。${currentAdmissionYear()} 录取分数线/位次通常要等各省录取后陆续出现；投档线和录取门槛请优先看当年同省同科类最低位次，历史参考默认使用 ${defaultAdmissionScoreYearRange()}。`
   ];
   const compatibilityNote = renderSubjectCompatibilityNote(input.subjectType, input.subjectTypes);
   if (compatibilityNote) lines.push(compatibilityNote);
@@ -1680,12 +1726,12 @@ function renderAdmissionContext(input: {
   if (input.syncError) lines.push(`实时同步提示：${input.syncError}`);
   if (input.unavailableScoreYears.length) {
     lines.push(
-      `分数年份提示：用户请求了 ${input.unavailableScoreYears.join("、")} 年录取分数/位次，但当前日期 ${currentAdmissionDate()} 通常尚未能完整获取当年录取结果；本次优先使用 ${defaultAdmissionScoreYearRange()} 历史分数作为参考。`
+      `分数年份提示：用户请求了 ${input.unavailableScoreYears.join("、")} 年录取分数/位次，但当前日期 ${currentAdmissionDate()} 通常尚未能完整获取当年录取结果；本次优先使用 ${defaultAdmissionScoreYearRange()} 历史位次作为投档线主参考，最低分只作附带参考。`
     );
   }
   if (input.syncSummary) {
     lines.push(
-      `实时同步结果：已请求掌上高考；本批 ${input.syncSummary.total}/${input.syncSummary.candidateTotal || input.syncSummary.total} 所，offset ${input.syncSummary.offset} → ${input.syncSummary.nextOffset}，映射 ${input.syncSummary.mapped}，计划 ${input.syncSummary.planRows}，院校线 ${input.syncSummary.schoolScoreRows}，专业线 ${input.syncSummary.majorScoreRows}，来源快照 ${input.syncSummary.sourceRows}，跳过学校 ${input.syncSummary.skipped}，跳过已有接口 ${input.syncSummary.skippedRequests}，错误 ${input.syncSummary.errorCount}。`
+      `实时同步结果：已请求掌上高考；本批 ${input.syncSummary.total}/${input.syncSummary.candidateTotal || input.syncSummary.total} 所，offset ${input.syncSummary.offset} → ${input.syncSummary.nextOffset}，映射 ${input.syncSummary.mapped}，计划 ${input.syncSummary.planRows}（汇总 ${input.syncSummary.planSummaryRows}，专业计划 ${input.syncSummary.majorPlanRows}），院校线 ${input.syncSummary.schoolScoreRows}，专业线 ${input.syncSummary.majorScoreRows}，来源快照 ${input.syncSummary.sourceRows}，跳过学校 ${input.syncSummary.skipped}，跳过已有接口 ${input.syncSummary.skippedRequests}，错误 ${input.syncSummary.errorCount}。`
     );
     if (input.syncSummary.requestBudgetExhausted) {
       lines.push(`实时同步节流：本批已用 ${input.syncSummary.sourceRequests}/${input.syncSummary.sourceRequestBudget ?? "不限"} 次源站请求预算，已主动暂停继续补数；后续定时同步会从当前 offset 继续。`);
@@ -1694,21 +1740,23 @@ function renderAdmissionContext(input: {
   if (!input.plans.length && !input.scores.length && !input.syncError) {
     lines.push(
       input.syncSummary
-        ? "数据状态：本次同步正常完成，但当前学校/省份/科类/年份/专业条件没有返回可入库的计划或分数。常见原因是掌上高考暂未开放该年份数据、该校当年未在该省该科类招生，或源站字段与当前条件不完全一致。"
+        ? "数据状态：本次同步正常完成，但当前学校/省份/科类/年份/专业条件没有返回可入库的计划或分数。常见原因是源站暂未开放该年份数据、该校当年未在该省该科类招生，或源站字段与当前条件不完全一致。"
         : "数据状态：本地暂未检索到当前条件的招生计划或录取分数。"
     );
   }
+  const coverageSuggestion = renderAdmissionCoverageSuggestion(input);
+  if (coverageSuggestion) lines.push(coverageSuggestion);
 
   const referenceTable = renderAdmissionReferenceTable(input.plans, input.scores);
   if (referenceTable) {
     lines.push("\n报考参考表：");
-    lines.push("年份 | 数据类型 | 科类 | 批次/专业组 | 专业/口径 | 最低分 | 最低位次 | 平均分 | 平均位次 | 最高分 | 省控线 | 线差 | 计划数 | 抓取时间");
+    lines.push("年份 | 数据类型 | 科类 | 批次/专业组 | 专业/口径 | 最低位次 | 最低分 | 平均位次 | 平均分 | 最高分 | 省控线 | 线差 | 计划数 | 来源 | 抓取时间");
     lines.push(...referenceTable);
   }
 
   lines.push("\n招生计划：");
   if (input.plans.length) {
-    lines.push("年份 | 科类 | 批次/专业组 | 专业 | 计划数 | 专业数 | 学费 | 学制 | 校区 | 选科要求 | 抓取时间");
+    lines.push("年份 | 科类 | 批次/专业组 | 专业 | 计划数 | 专业数 | 学费 | 学制 | 校区 | 选科要求 | 来源 | 抓取时间");
     for (const row of input.plans.slice(0, 30)) {
       lines.push(
         [
@@ -1722,6 +1770,7 @@ function renderAdmissionContext(input: {
           row.duration ?? "-",
           row.campus ?? "-",
           row.selectionRequirements ?? "-",
+          renderAdmissionSourceLabel(row.source),
           formatDateTimeShort(row.fetchedAt)
         ].join(" | ")
       );
@@ -1730,13 +1779,14 @@ function renderAdmissionContext(input: {
     lines.push("暂无匹配的招生计划缓存。");
   }
 
-  const scoreTrendSummary = renderScoreTrendSummary(input.scores);
+  const scoreTrendSummary = renderScoreTrendSummary(input.scores, input.plans);
   if (scoreTrendSummary) lines.push(`\n分数趋势摘要：\n${scoreTrendSummary}`);
 
   lines.push("\n录取分数/位次：");
   if (input.scores.length) {
-    lines.push("年份 | 类型 | 科类 | 批次/专业组 | 专业 | 最低分 | 最低位次 | 平均分 | 平均位次 | 最高分 | 省控线 | 线差 | 计划数 | 抓取时间");
+    lines.push("年份 | 类型 | 科类 | 批次/专业组 | 专业 | 最低位次 | 最低分 | 平均位次 | 平均分 | 最高分 | 省控线 | 线差 | 计划数 | 来源 | 抓取时间");
     for (const row of input.scores.slice(0, 50)) {
+      const planCount = planCountForScore(row, input.plans) ?? "-";
       lines.push(
         [
           row.year,
@@ -1744,14 +1794,15 @@ function renderAdmissionContext(input: {
           row.subjectType ?? "-",
           [row.batch, row.planGroup].filter(Boolean).join(" ") || "-",
           row.majorName ?? "-",
-          row.minScore ?? "-",
           row.minRank ?? "-",
-          row.avgScore ?? "-",
+          row.minScore ?? "-",
           row.avgRank ?? "-",
+          row.avgScore ?? "-",
           row.maxScore ?? "-",
           row.controlScore ?? "-",
           row.diffScore ?? "-",
-          row.planCount ?? "-",
+          planCount,
+          renderAdmissionSourceLabel(row.source),
           formatDateTimeShort(row.fetchedAt)
         ].join(" | ")
       );
@@ -1771,9 +1822,9 @@ function renderAdmissionContext(input: {
   lines.push("\n资料页追溯：");
   lines.push("使用的数据表：admission_plans、admission_scores、admission_sources。");
   if (input.schoolProfileText) lines.push("院校基础信息补充表：school_profiles。");
-  lines.push(`掌上高考来源记录：${sourceIds.length ? sourceIds.slice(0, 24).join("、") : "本次没有匹配到来源记录"}`);
+  lines.push(`招生来源记录：${sourceIds.length ? sourceIds.slice(0, 24).join("、") : "本次没有匹配到来源记录"}`);
   if (input.sourceSnapshots.length) {
-    lines.push("掌上高考来源快照：");
+    lines.push("招生来源快照：");
     for (const snapshot of input.sourceSnapshots.slice(0, 8)) {
       lines.push(renderAdmissionSourceSnapshotLine(snapshot));
     }
@@ -1783,7 +1834,7 @@ function renderAdmissionContext(input: {
   }
   lines.push(`抓取时间：${fetchedTimes.length ? fetchedTimes.slice(0, 12).join("、") : "暂无"}`);
   lines.push(`原始数据行摘要：${renderRawSnapshotSummary(input.plans, input.scores)}`);
-  lines.push("\n来源：掌上高考公开聚合数据；最终请以省考试院和学校招生网为准。");
+  lines.push("\n来源提醒：招生数据最终请以省考试院和学校招生网为准。");
   return lines.join("\n");
 }
 
@@ -1799,6 +1850,64 @@ function renderMajorFallbackNotice(majorName: string, planMajorFallback: boolean
     scoreMajorFallback ? "录取分数/位次" : null
   ].filter(Boolean);
   return `专业匹配提示：用户请求了“${majorName}”，但${tables.join("、")}没有检索到完全匹配的专业记录；下方对应表格已回退展示当前学校/省份/科类/年份的通用记录。回答时必须明确这些不是“${majorName}”的精确专业数据，不能把院校线或其他专业计划当成该专业结论。`;
+}
+
+function renderAdmissionCoverageSuggestion(input: {
+  universityName: string;
+  province: string;
+  subjectType: string | null;
+  subjectTypes: string[];
+  planGroup: string | null;
+  majorName: string | null;
+  plans: AdmissionPlanRow[];
+  scores: AdmissionScoreRow[];
+  planYears: number[];
+  scoreYears: number[];
+  includePlans: boolean;
+  includeScores: boolean;
+  queryTypes: AdmissionIntent["queryTypes"];
+  syncSummary: AdmissionSyncSummary | null;
+  syncError: string | null;
+}): string | null {
+  const missingPlan = input.includePlans && input.plans.length === 0;
+  const missingScore = input.includeScores && input.scores.length === 0;
+  const sourceReturnedNoRows = Boolean(
+    input.syncSummary &&
+      ((input.includePlans && input.syncSummary.planRows === 0) ||
+        (input.includeScores && input.syncSummary.schoolScoreRows + input.syncSummary.majorScoreRows === 0))
+  );
+  if (!missingPlan && !missingScore && !sourceReturnedNoRows && !input.syncError) return null;
+  if (!missingPlan && !missingScore) return null;
+
+  const queryTypes = new Set(input.queryTypes);
+  const tableHints: string[] = [];
+  const sourceKinds: string[] = [];
+  if (missingPlan) {
+    tableHints.push(`招生计划 admission_plans（年份 ${formatAdmissionYears(input.planYears)}）`);
+    sourceKinds.push("plan-school-summary");
+    if (input.majorName) sourceKinds.push("plan-major");
+  }
+  if (missingScore) {
+    tableHints.push(`录取分数/位次 admission_scores（年份 ${formatAdmissionYears(input.scoreYears)}）`);
+    sourceKinds.push("score-school");
+    if (input.majorName || queryTypes.has("major_score")) sourceKinds.push("score-major");
+  }
+
+  const subjectText = input.subjectTypes.length
+    ? input.subjectTypes.join(" / ")
+    : input.subjectType ?? "未指定";
+  const lines = [
+    "补数建议：当前回答缺少可直接命中的招生缓存，后台可优先补这个覆盖缺口。",
+    `补数条件：学校=${input.universityName}；省份=${input.province}；科类=${subjectText}；专业组=${input.planGroup ?? "未指定"}；专业=${input.majorName ?? "未指定"}`,
+    `建议同步表：${tableHints.join("；")}。`,
+    `建议检查招生来源接口：${Array.from(new Set(sourceKinds)).join("、")}。`,
+    "WebUI 操作：进入“招生数据”的手动同步，填入学校/省份/科类/年份，并按缺口勾选招生计划、院校线或专业线；若已有来源快照但无入库行，优先查看来源快照里的请求参数和 item_count。"
+  ];
+  return lines.join("\n");
+}
+
+function formatAdmissionYears(years: number[]): string {
+  return years.length ? years.join("、") : "未指定";
 }
 
 function renderAdmissionReferenceTable(plans: AdmissionPlanRow[], scores: AdmissionScoreRow[]): string[] {
@@ -1819,7 +1928,7 @@ function renderAdmissionReferenceTable(plans: AdmissionPlanRow[], scores: Admiss
     .sort((left, right) => right.year - left.year || scoreTrendPriority(left) - scoreTrendPriority(right))
     .slice(0, 16);
   for (const row of scoreRows) {
-    const planCount = row.planCount ?? findMatchingPlanCount(row, plans) ?? "-";
+    const planCount = planCountForScore(row, plans) ?? "-";
     pushLine(
       ["score", row.year, row.scoreType, row.subjectType, row.batch, row.planGroup, row.majorName],
       [
@@ -1828,14 +1937,15 @@ function renderAdmissionReferenceTable(plans: AdmissionPlanRow[], scores: Admiss
         row.subjectType ?? "-",
         [row.batch, row.planGroup].filter(Boolean).join(" ") || "-",
         row.majorName ?? "院校线",
-        row.minScore ?? "-",
         row.minRank ?? "-",
-        row.avgScore ?? "-",
+        row.minScore ?? "-",
         row.avgRank ?? "-",
+        row.avgScore ?? "-",
         row.maxScore ?? "-",
         row.controlScore ?? "-",
         row.diffScore ?? "-",
         planCount,
+        renderAdmissionSourceLabel(row.source),
         formatDateTimeShort(row.fetchedAt)
       ]
     );
@@ -1864,6 +1974,7 @@ function renderAdmissionReferenceTable(plans: AdmissionPlanRow[], scores: Admiss
         "-",
         "-",
         row.planCount ?? row.schoolPlanCount ?? "-",
+        renderAdmissionSourceLabel(row.source),
         formatDateTimeShort(row.fetchedAt)
       ]
     );
@@ -1872,17 +1983,35 @@ function renderAdmissionReferenceTable(plans: AdmissionPlanRow[], scores: Admiss
   return lines.slice(0, 24);
 }
 
+function renderAdmissionSourceLabel(source: string): string {
+  const labels: Record<string, string> = {
+    gaokao_cn: "掌上高考缓存",
+    xuefeng_agent: "雪峰Agent历史库",
+    jiangsu_eea: "江苏考试院官方",
+    jiangsu_school_official: "高校招生网官方"
+  };
+  return labels[source] ?? source;
+}
+
 function findMatchingPlanCount(score: AdmissionScoreRow, plans: AdmissionPlanRow[]): number | null {
   const sameYear = plans.filter((plan) => plan.year === score.year && admissionRowsSameBucket(score, plan));
   const majorName = normalizeComparableMajor(score.majorName);
   if (majorName) {
     const exactMajor = sameYear.find((plan) => normalizeComparableMajor(plan.majorName) === majorName && typeof plan.planCount === "number");
     if (exactMajor?.planCount !== null && exactMajor?.planCount !== undefined) return exactMajor.planCount;
+    return null;
   }
   const summary = sameYear.find((plan) => !plan.majorName && typeof plan.schoolPlanCount === "number");
   if (summary?.schoolPlanCount !== null && summary?.schoolPlanCount !== undefined) return summary.schoolPlanCount;
-  const anyPlan = sameYear.find((plan) => typeof plan.planCount === "number");
-  return anyPlan?.planCount ?? null;
+  return null;
+}
+
+function planCountForScore(score: AdmissionScoreRow, plans: AdmissionPlanRow[]): number | null {
+  return rowNumberOrNull(score.planCount) ?? findMatchingPlanCount(score, plans);
+}
+
+function rowNumberOrNull(value: number | null): number | null {
+  return typeof value === "number" ? value : null;
 }
 
 function admissionRowsSameBucket(score: AdmissionScoreRow, plan: AdmissionPlanRow): boolean {
@@ -1897,7 +2026,7 @@ function normalizeComparableMajor(value: string | null): string | null {
   return value.replace(/[（）()\s]/gu, "").toLowerCase();
 }
 
-function renderScoreTrendSummary(scores: AdmissionScoreRow[]): string | null {
+function renderScoreTrendSummary(scores: AdmissionScoreRow[], plans: AdmissionPlanRow[]): string | null {
   const rankedRows = scores
     .filter((row) => row.minRank !== null || row.minScore !== null)
     .slice()
@@ -1918,9 +2047,9 @@ function renderScoreTrendSummary(scores: AdmissionScoreRow[]): string | null {
   const maxScores = yearly.map((row) => row.maxScore).filter((value): value is number => typeof value === "number");
   const controlScores = yearly.map((row) => row.controlScore).filter((value): value is number => typeof value === "number");
   const diffScores = yearly.map((row) => row.diffScore).filter((value): value is number => typeof value === "number");
-  const plans = yearly.map((row) => row.planCount).filter((value): value is number => typeof value === "number");
+  const planCounts = yearly.map((row) => planCountForScore(row, plans)).filter((value): value is number => typeof value === "number");
   const lines = [
-    `代表记录：${yearly.map((row) => renderScoreTrendRecord(row)).join("；")}`
+    `代表记录：${yearly.map((row) => renderScoreTrendRecord(row, plans)).join("；")}`
   ];
   if (ranks.length) lines.push(`最低位次区间：${Math.min(...ranks)}-${Math.max(...ranks)}，位次数字越小通常代表录取门槛越高。`);
   if (scoresOnly.length) lines.push(`最低分区间：${Math.min(...scoresOnly)}-${Math.max(...scoresOnly)}。`);
@@ -1928,7 +2057,7 @@ function renderScoreTrendSummary(scores: AdmissionScoreRow[]): string | null {
   if (maxScores.length) lines.push(`最高分区间：${Math.min(...maxScores)}-${Math.max(...maxScores)}。`);
   if (controlScores.length) lines.push(`省控线区间：${Math.min(...controlScores)}-${Math.max(...controlScores)}。`);
   if (diffScores.length) lines.push(`线差区间：${Math.min(...diffScores)}-${Math.max(...diffScores)}。`);
-  if (plans.length) lines.push(`计划数范围：${Math.min(...plans)}-${Math.max(...plans)}。`);
+  if (planCounts.length) lines.push(`计划数范围：${Math.min(...planCounts)}-${Math.max(...planCounts)}。`);
   const latest = yearly[0];
   const previous = yearly[1];
   if (latest && previous && latest.minRank !== null && previous.minRank !== null) {
@@ -1945,15 +2074,17 @@ function scoreTrendPriority(row: AdmissionScoreRow): number {
   return typePenalty + rankPenalty;
 }
 
-function renderScoreTrendRecord(row: AdmissionScoreRow): string {
+function renderScoreTrendRecord(row: AdmissionScoreRow, plans: AdmissionPlanRow[]): string {
+  const planCount = planCountForScore(row, plans);
   const parts = [
     `${row.year}${row.scoreType === "major" ? "专业线" : "院校线"}${row.majorName ? `/${row.majorName}` : ""}`,
-    row.minScore !== null ? `最低${row.minScore}分` : null,
     row.minRank !== null ? `位次${row.minRank}` : null,
+    row.minScore !== null ? `最低${row.minScore}分` : null,
     row.avgScore !== null ? `平均${row.avgScore}分` : null,
     row.maxScore !== null ? `最高${row.maxScore}分` : null,
     row.controlScore !== null ? `省控线${row.controlScore}` : null,
-    row.diffScore !== null ? `线差${row.diffScore}` : null
+    row.diffScore !== null ? `线差${row.diffScore}` : null,
+    planCount !== null ? `计划${planCount}` : null
   ].filter(Boolean);
   return parts.join(" ");
 }
@@ -1966,6 +2097,8 @@ function summarizeAdmissionSync(result: Partial<GaokaoCnSyncResult>): AdmissionS
     nextOffset: toSafeCount(result.nextOffset),
     mapped: toSafeCount(result.mapped),
     planRows: toSafeCount(result.planRows),
+    planSummaryRows: toSafeCount(result.planSummaryRows),
+    majorPlanRows: toSafeCount(result.majorPlanRows),
     schoolScoreRows: toSafeCount(result.schoolScoreRows),
     majorScoreRows: toSafeCount(result.majorScoreRows),
     sourceRows: toSafeCount(result.sourceRows),
@@ -1988,6 +2121,8 @@ function summarizeAdmissionSyncResults(results: GaokaoCnSyncResult[]): Admission
     nextOffset: Math.max(...summaries.map((item) => item.nextOffset)),
     mapped: Math.max(...summaries.map((item) => item.mapped)),
     planRows: summaries.reduce((sum, item) => sum + item.planRows, 0),
+    planSummaryRows: summaries.reduce((sum, item) => sum + item.planSummaryRows, 0),
+    majorPlanRows: summaries.reduce((sum, item) => sum + item.majorPlanRows, 0),
     schoolScoreRows: summaries.reduce((sum, item) => sum + item.schoolScoreRows, 0),
     majorScoreRows: summaries.reduce((sum, item) => sum + item.majorScoreRows, 0),
     sourceRows: summaries.reduce((sum, item) => sum + item.sourceRows, 0),
@@ -2042,7 +2177,21 @@ function renderAdmissionSourceSnapshotLine(snapshot: AdmissionSourceRow): string
 function summarizeSourceRequest(requestJson: string): string {
   try {
     const data = JSON.parse(requestJson) as Record<string, unknown>;
-    return pickObjectEntries(data, ["uri", "school_id", "local_province_id", "local_type_id", "year", "page", "size"]).join(", ") || requestJson.slice(0, 180);
+    return (
+      pickObjectEntries(data, [
+        "uri",
+        "school_id",
+        "local_province_id",
+        "local_type_id",
+        "province",
+        "subjectType",
+        "batch",
+        "year",
+        "page",
+        "size",
+        "title"
+      ]).join(", ") || requestJson.slice(0, 180)
+    );
   } catch {
     return requestJson.slice(0, 180);
   }
@@ -2053,7 +2202,7 @@ function summarizeSourceResponse(responseJson: string | null, error: string | nu
   if (!responseJson) return "无响应正文";
   try {
     const data = JSON.parse(responseJson) as Record<string, unknown>;
-    const summary = pickObjectEntries(data, ["code", "message", "location"]);
+    const summary = pickObjectEntries(data, ["code", "message", "location", "title", "rowCount"]);
     const itemCount = countResponseItems(data);
     if (itemCount !== null) summary.push(`item_count=${itemCount}`);
     return summary.join(", ") || responseJson.slice(0, 220);
@@ -2206,18 +2355,16 @@ function normalizeImageContentType(contentType: string | null, url: string): str
 
 function renderGreetingReply(): string {
   return [
-    "你好，我可以帮你查高校生活资料。",
-    "不用命令，直接像聊天一样问就行，例如：",
-    "安大宿舍怎么样",
-    "西电能点外卖吗",
-    "南航校园网咋样"
+    "来了，直接问就行。",
+    "想看学校值不值、宿舍食堂咋样、分数位次怎么卡、专业该不该冲，都可以一句话甩过来。",
+    "比如：南航宿舍怎么样，或者江苏物理类多少位能不能冲南理。"
   ].join("\n");
 }
 
 function renderCasualFallback(hasContext: boolean): string {
   if (hasContext) {
-    return "我没太理解你想继续查哪个方面。可以直接说想查的学校和具体方面，比如宿舍、食堂、校园网、外卖或澡堂。";
+    return "这句我没抓准你要继续看哪块。你直接说学校加问题就行，比如宿舍、食堂、专业、分数位次，咱别绕。";
   }
 
-  return "模型回复暂时失败了。你可以直接用自然语言问学校资料、招生计划、分数线，或者普通聊天也可以。";
+  return "模型这下没接上。你直接问学校资料、招生计划、分数线，或者普通聊天也行，我按人话给你拆。";
 }

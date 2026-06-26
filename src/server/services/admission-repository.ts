@@ -1,6 +1,6 @@
 import type { AppDatabase, SqlValue } from "../db.js";
 import { defaultAdmissionPlanYears, defaultAdmissionScoreYears } from "./admission-calendar.js";
-import { defaultAdmissionSubjectTypeNamesForProvinceYear, gaokaoProvinceNames } from "./admission-regions.js";
+import { defaultAdmissionSubjectTypeNamesForProvinceYear, GAOKAO_PROVINCES, GAOKAO_SUBJECT_TYPES, gaokaoProvinceNames } from "./admission-regions.js";
 
 export const ADMISSION_SOURCE = "gaokao_cn";
 
@@ -102,8 +102,12 @@ export interface AdmissionSourceRow {
 
 export interface AdmissionSourceQuery {
   universityId?: number;
+  sourceSchoolId?: string | null;
   sourceKind?: string | null;
   status?: string | null;
+  year?: number | null;
+  provinceName?: string | null;
+  subjectType?: string | null;
   limit?: number;
 }
 
@@ -133,6 +137,7 @@ export interface AdmissionSyncJobRow {
 
 export interface AdmissionQuery {
   universityId?: number;
+  universityIds?: number[];
   provinceName?: string | null;
   subjectType?: string | null;
   subjectTypes?: string[] | null;
@@ -171,6 +176,7 @@ export interface AdmissionSourceCoverageCheck {
 
 export interface AdmissionScoreRow {
   id: number;
+  source: string;
   scoreType: "school" | "major";
   universityId: number;
   universityName: string;
@@ -198,6 +204,7 @@ export interface AdmissionScoreRow {
 
 export interface AdmissionPlanRow {
   id: number;
+  source: string;
   universityId: number;
   universityName: string;
   sourceSchoolId: string;
@@ -237,8 +244,10 @@ export interface AdmissionCoverageStats {
   ambiguousUniversities: number;
   mappingIssueUniversities: number;
   planUniversities: number;
+  majorPlanUniversities: number;
   scoreUniversities: number;
   planRows: number;
+  majorPlanRows: number;
   scoreRows: number;
   schoolScoreRows: number;
   majorScoreRows: number;
@@ -251,7 +260,7 @@ export interface AdmissionCoverageStats {
   scoreYears: AdmissionCoverageYear[];
 }
 
-export type AdmissionCoverageGapKind = "plan" | "school_score" | "major_score";
+export type AdmissionCoverageGapKind = "plan" | "major_plan" | "school_score" | "major_score";
 
 export interface AdmissionCoverageGap {
   kind: AdmissionCoverageGapKind;
@@ -301,7 +310,7 @@ export interface AdmissionMappingIssue {
   updatedAt: string;
 }
 
-const NORMALIZATION_VERSION = "2026-06-26-v5";
+const NORMALIZATION_VERSION = "2026-06-26-v6";
 
 export class AdmissionRepository {
   constructor(private readonly database: AppDatabase) {
@@ -516,8 +525,10 @@ export class AdmissionRepository {
       ambiguousUniversities,
       mappingIssueUniversities: unmatchedUniversities + ambiguousUniversities,
       planUniversities: scalar("SELECT COUNT(DISTINCT university_id) AS count FROM admission_plans WHERE source = ?", [source]),
+      majorPlanUniversities: scalar("SELECT COUNT(DISTINCT university_id) AS count FROM admission_plans WHERE source = ? AND major_name IS NOT NULL", [source]),
       scoreUniversities: scalar("SELECT COUNT(DISTINCT university_id) AS count FROM admission_scores WHERE source = ?", [source]),
       planRows: scalar("SELECT COUNT(*) AS count FROM admission_plans WHERE source = ?", [source]),
+      majorPlanRows: scalar("SELECT COUNT(*) AS count FROM admission_plans WHERE source = ? AND major_name IS NOT NULL", [source]),
       scoreRows: scalar("SELECT COUNT(*) AS count FROM admission_scores WHERE source = ?", [source]),
       schoolScoreRows: scalar("SELECT COUNT(*) AS count FROM admission_scores WHERE source = ? AND score_type = 'school'", [source]),
       majorScoreRows: scalar("SELECT COUNT(*) AS count FROM admission_scores WHERE source = ? AND score_type = 'major'", [source]),
@@ -548,6 +559,16 @@ export class AdmissionRepository {
             source,
             totalMappedUniversities,
             table: "admission_plans",
+            year,
+            provinceName,
+            subjectType
+          }));
+          gaps.push(this.coverageGapFor({
+            kind: "major_plan",
+            source,
+            totalMappedUniversities,
+            table: "admission_plans",
+            majorOnly: true,
             year,
             provinceName,
             subjectType
@@ -603,7 +624,7 @@ export class AdmissionRepository {
   }): AdmissionCoverageMissingUniversity[] {
     const source = input.source ?? ADMISSION_SOURCE;
     const provinceName = normalizeProvinceName(input.provinceName);
-    const table = input.kind === "plan" ? "admission_plans" : "admission_scores";
+    const table = input.kind === "plan" || input.kind === "major_plan" ? "admission_plans" : "admission_scores";
     const scoreType = input.kind === "school_score" ? "school" : input.kind === "major_score" ? "major" : null;
     const coverageWhere = [
       `${table}.source = m.source`,
@@ -621,6 +642,9 @@ export class AdmissionRepository {
     if (scoreType) {
       coverageWhere.push(`${table}.score_type = ?`);
       coverageParams.push(scoreType);
+    }
+    if (input.kind === "major_plan") {
+      coverageWhere.push(`${table}.major_name IS NOT NULL`);
     }
     return this.database.db
       .prepare(
@@ -774,6 +798,15 @@ export class AdmissionRepository {
       );
   }
 
+  deletePlansForSource(input: { source?: string; sourceSchoolId: string; year: number; provinceName: string }): number {
+    const source = input.source ?? ADMISSION_SOURCE;
+    const provinceName = normalizeProvinceName(input.provinceName);
+    const result = this.database.db
+      .prepare("DELETE FROM admission_plans WHERE source = ? AND source_school_id = ? AND year = ? AND province_name = ?")
+      .run(source, input.sourceSchoolId, input.year, provinceName);
+    return Number(result.changes ?? 0);
+  }
+
   upsertScore(input: AdmissionScoreInput): void {
     const fetchedAt = input.fetchedAt ?? new Date().toISOString();
     const source = input.source ?? ADMISSION_SOURCE;
@@ -912,6 +945,10 @@ export class AdmissionRepository {
       where.push("s.university_id = ?");
       params.push(query.universityId);
     }
+    if (query.sourceSchoolId) {
+      where.push("s.source_school_id = ?");
+      params.push(query.sourceSchoolId);
+    }
     if (query.sourceKind) {
       where.push("s.source_kind = ?");
       params.push(query.sourceKind);
@@ -919,6 +956,29 @@ export class AdmissionRepository {
     if (query.status) {
       where.push("s.status = ?");
       params.push(query.status);
+    }
+    if (query.year && Number.isFinite(query.year)) {
+      appendSourceRequestJsonMatch(where, params, "year", String(Math.floor(query.year)));
+    }
+    const provinceName = normalizeProvinceName(query.provinceName);
+    const provinceId = sourceRequestProvinceId(query.provinceName);
+    if (provinceId || provinceName) {
+      appendSourceRequestJsonAnyMatch(where, params, [
+        ["local_province_id", provinceId],
+        ["local_province_name", provinceName],
+        ["provinceName", provinceName],
+        ["province", provinceName]
+      ]);
+    }
+    const subjectType = normalizeSubjectType(query.subjectType);
+    const subjectTypeId = sourceRequestSubjectTypeId(query.subjectType);
+    if (subjectTypeId || subjectType) {
+      appendSourceRequestJsonAnyMatch(where, params, [
+        ["local_type_id", subjectTypeId],
+        ["local_type_name", subjectType],
+        ["subjectType", subjectType],
+        ["subject", subjectType]
+      ]);
     }
     return this.database.db
       .prepare(
@@ -997,7 +1057,7 @@ export class AdmissionRepository {
     const params: Array<string | number> = [];
     appendCommonWhere(where, params, query, "s");
     const sql = `
-      SELECT s.id, s.score_type AS scoreType, s.university_id AS universityId, u.name AS universityName,
+      SELECT s.id, s.source, s.score_type AS scoreType, s.university_id AS universityId, u.name AS universityName,
         s.source_school_id AS sourceSchoolId, s.year, s.province_name AS provinceName,
         s.subject_type AS subjectType, s.batch, s.plan_group AS planGroup, s.major_name AS majorName,
         s.min_score AS minScore, s.min_rank AS minRank, s.avg_score AS avgScore, s.avg_rank AS avgRank,
@@ -1026,7 +1086,7 @@ export class AdmissionRepository {
     const params: Array<string | number> = [];
     appendCommonWhere(where, params, query, "p");
     const sql = `
-      SELECT p.id, p.university_id AS universityId, u.name AS universityName,
+      SELECT p.id, p.source, p.university_id AS universityId, u.name AS universityName,
         p.source_school_id AS sourceSchoolId, p.year, p.province_name AS provinceName,
         p.subject_type AS subjectType, p.batch, p.plan_group AS planGroup, p.major_name AS majorName,
         p.plan_count AS planCount, p.school_plan_count AS schoolPlanCount, p.major_count AS majorCount,
@@ -1222,6 +1282,7 @@ export class AdmissionRepository {
     totalMappedUniversities: number;
     table: "admission_plans" | "admission_scores";
     scoreType?: "school" | "major";
+    majorOnly?: boolean;
     year: number;
     provinceName: string;
     subjectType?: string | null;
@@ -1237,6 +1298,9 @@ export class AdmissionRepository {
     if (input.scoreType) {
       where.push("score_type = ?");
       params.push(input.scoreType);
+    }
+    if (input.majorOnly) {
+      where.push("major_name IS NOT NULL");
     }
     const row = this.database.db
       .prepare(`
@@ -1363,6 +1427,12 @@ function appendCommonWhere(where: string[], params: Array<string | number>, quer
   if (query.universityId) {
     where.push(`${alias}.university_id = ?`);
     params.push(query.universityId);
+  } else if (query.universityIds?.length) {
+    const ids = Array.from(new Set(query.universityIds.filter((id) => Number.isFinite(id) && id > 0).map((id) => Math.floor(id))));
+    if (ids.length) {
+      where.push(`${alias}.university_id IN (${ids.map(() => "?").join(",")})`);
+      params.push(...ids);
+    }
   }
   if (query.provinceName) {
     where.push(`${alias}.province_name = ?`);
@@ -1405,12 +1475,46 @@ function appendCommonWhere(where: string[], params: Array<string | number>, quer
     params.push(query.scoreType);
   }
   if (query.majorName) {
-    const terms = expandMajorQueryTerms(query.majorName);
-    if (terms.length) {
-      where.push(`(${terms.map(() => `${alias}.major_name LIKE ?`).join(" OR ")})`);
-      params.push(...terms.map((term) => `%${term}%`));
+    const termGroups = expandMajorQueryTermGroups(query.majorName);
+    if (termGroups.length) {
+      where.push(`(${termGroups.map((group) => `(${group.map(() => `${alias}.major_name LIKE ?`).join(" AND ")})`).join(" OR ")})`);
+      params.push(...termGroups.flat().map((term) => `%${term}%`));
     }
   }
+}
+
+function appendSourceRequestJsonMatch(where: string[], params: Array<string | number>, key: string, value: string): void {
+  const cleanValue = clean(value);
+  if (!cleanValue) return;
+  where.push(`(s.request_json LIKE ? OR s.request_json LIKE ?)`);
+  params.push(`%"${key}":"${cleanValue}"%`, `%"${key}":${cleanValue}%`);
+}
+
+function appendSourceRequestJsonAnyMatch(
+  where: string[],
+  params: Array<string | number>,
+  candidates: Array<[string, string | null | undefined]>
+): void {
+  const clauses: string[] = [];
+  for (const [key, value] of candidates) {
+    const cleanValue = clean(value);
+    if (!cleanValue) continue;
+    clauses.push(`(s.request_json LIKE ? OR s.request_json LIKE ?)`);
+    params.push(`%"${key}":"${cleanValue}"%`, `%"${key}":${cleanValue}%`);
+  }
+  if (clauses.length) where.push(`(${clauses.join(" OR ")})`);
+}
+
+function sourceRequestProvinceId(value: string | null | undefined): string | null {
+  const normalized = normalizeProvinceName(value);
+  if (!normalized) return null;
+  return GAOKAO_PROVINCES.find(([, name]) => normalizeProvinceName(name) === normalized)?.[0] ?? null;
+}
+
+function sourceRequestSubjectTypeId(value: string | null | undefined): string | null {
+  const normalized = normalizeSubjectType(value);
+  if (!normalized) return null;
+  return GAOKAO_SUBJECT_TYPES.find((item) => normalizeSubjectType(item.name) === normalized)?.id ?? null;
 }
 
 export function normalizeProvinceName(value: string | null | undefined): string {
@@ -1447,9 +1551,9 @@ export function normalizeBatchName(value: string | null | undefined): string | n
   if (/高校专项/u.test(text)) return "高校专项计划本科批";
   if (/提前/u.test(text) && /本科/u.test(text)) return "本科提前批";
   if (/提前/u.test(text) && /(高职|专科)/u.test(text)) return "专科提前批";
-  if (/本科(?:第?一|Ⅰ|I)批|第?一批本科|本一批|一本/u.test(text)) return "本科一批";
-  if (/本科(?:第?二|Ⅱ|II)批|第?二批本科|本二批|二本/u.test(text)) return "本科二批";
-  if (/本科(?:普通|普通类)?批|普通(?:类)?本科批|本科批次|本科普通(?:类)?批|普通本科/u.test(text)) return "本科批";
+  if (/本科(?:第?一|Ⅰ|I)批|第?一批本科|^第?一批$|^一批$|本一批|一本/u.test(text)) return "本科一批";
+  if (/本科(?:第?二|Ⅱ|II)批|第?二批本科|^第?二批$|^二批$|本二批|二本/u.test(text)) return "本科二批";
+  if (/本科(?:普通|普通类)?批|普通(?:类)?本科批|本科批次|本科普通(?:类)?批|普通本科|^本科[AB]段?$|^本科批[AB]段?$/u.test(text)) return "本科批";
   if (/平行录取第?[一1]段|普通类?一段|一段|常规批第?[一1]段/u.test(text)) return "普通类一段";
   if (/平行录取第?[二2]段|普通类?二段|二段|常规批第?[二2]段/u.test(text)) return "普通类二段";
   if (/普通类?常规批|常规批|普通批/u.test(text)) return "普通类常规批";
@@ -1476,10 +1580,37 @@ export function normalizeMajorName(value: string | null | undefined): string | n
   text = text
     .replace(/[()]/gu, (match) => (match === "(" ? "（" : "）"))
     .replace(/\s+/gu, "");
-  text = text.replace(/（[^）]*(?:培养|颁发|具体详见|详见学校招生章程|详见招生章程)[^）]*）/gu, "");
+  text = text.replace(/（[^）]*(?:颁发|具体详见|详见学校招生章程|详见招生章程|复合型人才|培养[^）]*(?:人才|双学士|招生章程))[^）]*）/gu, "");
   text = text.replace(/（[^）]*(?:认同并执行|加分项目|少数民族加分|校区就读|办学地点|色盲|色弱|外语语种|英语语种|入学后)[^）]*）/gu, "");
   text = text.replace(/，?具体详见学校招生章程$/u, "");
+  text = text.replace(/[，,]?(?:不招|不录取)[^，,（）]*(?:色盲|色弱)[^，,（）]*$/u, "");
+  text = text.replace(/[，,]?(?:只招|限招|建议|要求)[^，,（）]*(?:英语语种|外语语种)[^，,（）]*$/u, "");
+  text = text.replace(/[，,]?(?:办学地点|就读地点|校区|入学后)[^，,（）]*$/u, "");
   return clean(text);
+}
+
+function expandMajorQueryTermGroups(value: string): string[][] {
+  const qualifierGroups = expandMajorQualifierQueryGroups(value);
+  if (qualifierGroups.length) return qualifierGroups;
+  return expandMajorQueryTerms(value).map((term) => [term]);
+}
+
+function expandMajorQualifierQueryGroups(value: string): string[][] {
+  const normalized = normalizeMajorName(value) ?? clean(value);
+  if (!normalized) return [];
+  const qualifierTerms = extractMajorQualifierTerms(normalized);
+  if (!qualifierTerms.length) return [];
+  const base = stripMajorQualifierWords(normalized);
+  if (!base || base === normalized) return [];
+  const baseTerms = expandMajorQueryTerms(base);
+  const groups: string[][] = [];
+  for (const baseTerm of baseTerms) {
+    for (const qualifierTerm of qualifierTerms) {
+      groups.push([baseTerm, qualifierTerm]);
+    }
+  }
+  groups.push([normalized]);
+  return dedupeTermGroups(groups);
 }
 
 function expandPlanGroupQueryTerms(value: string): string[] {
@@ -1520,6 +1651,48 @@ function expandMajorQueryTerms(value: string): string[] {
   }
 
   return Array.from(terms).slice(0, 24);
+}
+
+function extractMajorQualifierTerms(value: string): string[] {
+  const compact = compactMajorKey(value);
+  const terms = new Set<string>();
+  const add = (...items: string[]) => items.forEach((item) => terms.add(item));
+  if (/中外|合作办学/u.test(compact)) add("中外合作", "合作办学");
+  if (/拔尖/u.test(compact)) add("拔尖");
+  if (/试验班|实验班/u.test(compact)) add("试验班", "实验班");
+  if (/本硕博|本硕|本博|硕博/u.test(compact)) add("本硕", "本博", "硕博");
+  if (/5\+3|5＋3|五加三|一体化/u.test(compact)) add("5+3", "5＋3", "一体化");
+  if (/八年|8年/u.test(compact)) add("八年", "8年");
+  if (/卓越/u.test(compact)) add("卓越");
+  if (/双学士/u.test(compact)) add("双学士");
+  if (/基地/u.test(compact)) add("基地");
+  if (/师范/u.test(compact)) add("师范");
+  if (/定向/u.test(compact)) add("定向");
+  if (/公费/u.test(compact)) add("公费");
+  return Array.from(terms).slice(0, 8);
+}
+
+function stripMajorQualifierWords(value: string): string | null {
+  let text = value
+    .replace(/（[^）]*(?:中外|合作办学|拔尖|试验班|实验班|本硕|本博|硕博|5\+3|5＋3|一体化|八年|8年|卓越|双学士|基地|师范|定向|公费)[^）]*）/gu, "")
+    .replace(/中外合作办学|中外合作|合作办学|拔尖学生培养基地|拔尖|试验班|实验班|本硕博|本硕|本博|硕博|5\+3一体化|5＋3一体化|5\+3|5＋3|五加三|一体化|八年制|八年|8年制|8年|卓越工程师|卓越|双学士学位|双学士|培养基地|基地|师范类|师范|定向|公费/gu, "");
+  text = text.replace(/(?:专业)?班$/u, "");
+  text = text.replace(/[（）()\s、,，/|]/gu, "");
+  return clean(text);
+}
+
+function dedupeTermGroups(groups: string[][]): string[][] {
+  const seen = new Set<string>();
+  const result: string[][] = [];
+  for (const group of groups) {
+    const cleaned = group.map((term) => clean(term)).filter((term): term is string => Boolean(term));
+    if (!cleaned.length) continue;
+    const key = cleaned.join("\u0000");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(cleaned);
+  }
+  return result;
 }
 
 function expandMajorAliasKeys(compact: string): string[] {
@@ -1608,6 +1781,10 @@ function formatPlanGroupCode(code: string): string {
 
 function makeUniqueKey(values: Array<unknown>): string {
   return values.map((value) => clean(value)?.toLowerCase() ?? "-").join("|");
+}
+
+function compactMajorKey(value: string): string {
+  return value.replace(/[（）()\s、,，/|]/gu, "").toLowerCase();
 }
 
 function clean(value: unknown): string | null {

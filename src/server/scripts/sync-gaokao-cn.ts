@@ -31,7 +31,7 @@ try {
   const options = buildSyncOptions(cli);
   const loop = optionBoolean(cli, ["loop", "all"], process.env.GAOKAO_CN_SYNC_LOOP, false);
   const maxBatches = Math.max(1, optionNumber(cli, ["max-batches"], process.env.GAOKAO_CN_MAX_BATCHES, loop ? 100 : 1));
-  const batchDelayMs = Math.max(0, optionNumber(cli, ["batch-delay-ms"], process.env.GAOKAO_CN_BATCH_DELAY_MS, loop ? 900_000 : 0));
+  const batchDelayMs = Math.max(0, optionNumber(cli, ["batch-delay-ms"], process.env.GAOKAO_CN_BATCH_DELAY_MS, loop ? 1_800_000 : 0));
   const continueOnError = optionBoolean(cli, ["continue-on-error"], process.env.GAOKAO_CN_CONTINUE_ON_ERROR, false);
   const aggregate = createAggregate();
   let offset = options.offset ?? 0;
@@ -46,7 +46,7 @@ try {
     printResult(result);
 
     if (hasRateLimitErrors(result)) {
-      console.log("[sync:gaokao-cn] Gaokao.cn rate limit detected. Stop now and retry later with --request-delay-ms=60000 or a smaller --max-source-requests value.");
+      console.log("[sync:gaokao-cn] Gaokao.cn rate limit detected. Stop now and retry later with --request-delay-ms=180000 or a smaller --max-source-requests value.");
       break;
     }
     if (result.requestBudgetExhausted) {
@@ -73,7 +73,7 @@ try {
 
   if (aggregate.batches > 1) {
     console.log(
-      `[sync:gaokao-cn] Total ${aggregate.mapped}/${aggregate.total} mapped in ${aggregate.batches} batches. Plans: ${aggregate.planRows}. School scores: ${aggregate.schoolScoreRows}. Major scores: ${aggregate.majorScoreRows}. Sources: ${aggregate.sourceRows}. Source requests: ${aggregate.sourceRequests}. Skipped existing requests: ${aggregate.skippedRequests}. Errors: ${aggregate.errors}.`
+      `[sync:gaokao-cn] Total ${aggregate.mapped}/${aggregate.total} mapped in ${aggregate.batches} batches. Plans: ${aggregate.planRows} (summaries ${aggregate.planSummaryRows}, major plans ${aggregate.majorPlanRows}). School scores: ${aggregate.schoolScoreRows}. Major scores: ${aggregate.majorScoreRows}. Sources: ${aggregate.sourceRows}. Source requests: ${aggregate.sourceRequests}. Skipped existing requests: ${aggregate.skippedRequests}. Errors: ${aggregate.errors}.`
     );
   }
 } finally {
@@ -85,6 +85,11 @@ function buildSyncOptions(cliOptions: CliOptions): GaokaoCnSyncOptions {
   const scoresOnly = cliOptions.flags.has("scores-only");
   const noPlans = optionBoolean(cliOptions, ["no-plans"], undefined, false);
   const noScores = optionBoolean(cliOptions, ["no-scores"], undefined, false);
+  const includePlanDetails = cliOptions.flags.has("plan-details")
+    ? true
+    : optionBoolean(cliOptions, ["no-plan-details"], undefined, false)
+      ? false
+      : envBoolean(process.env.GAOKAO_CN_INCLUDE_PLAN_DETAILS, false);
   const includePlans = plansOnly ? true : scoresOnly || noPlans ? false : envBoolean(process.env.GAOKAO_CN_INCLUDE_PLANS, true);
   const includeScores = scoresOnly ? true : plansOnly || noScores ? false : envBoolean(process.env.GAOKAO_CN_INCLUDE_SCORES, true);
 
@@ -115,13 +120,14 @@ function buildSyncOptions(cliOptions: CliOptions): GaokaoCnSyncOptions {
       optionBoolean(cliOptions, ["no-special-scores"], undefined, false)
         ? false
         : envBoolean(process.env.GAOKAO_CN_INCLUDE_SPECIAL_SCORES, true),
+    includePlanDetails,
     eligibleOnly:
       optionBoolean(cliOptions, ["no-eligible-only"], undefined, false)
         ? false
         : envBoolean(process.env.GAOKAO_CN_ELIGIBLE_ONLY, true),
-    requestDelayMs: optionNumber(cliOptions, ["request-delay-ms", "delay-ms"], process.env.GAOKAO_CN_REQUEST_DELAY_MS, 60000),
-    rateLimitCooldownMinutes: optionNumber(cliOptions, ["rate-limit-cooldown-minutes", "cooldown-minutes"], process.env.GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES, 720),
-    maxSourceRequests: optionNumber(cliOptions, ["max-source-requests", "request-budget"], process.env.GAOKAO_CN_MAX_REQUESTS_PER_RUN, 4),
+    requestDelayMs: optionNumber(cliOptions, ["request-delay-ms", "delay-ms"], process.env.GAOKAO_CN_REQUEST_DELAY_MS, 180000),
+    rateLimitCooldownMinutes: optionNumber(cliOptions, ["rate-limit-cooldown-minutes", "cooldown-minutes"], process.env.GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES, 1440),
+    maxSourceRequests: optionNumber(cliOptions, ["max-source-requests", "request-budget"], process.env.GAOKAO_CN_MAX_REQUESTS_PER_RUN, 1),
     skipExisting: optionBoolean(cliOptions, ["skip-existing"], process.env.GAOKAO_CN_SKIP_EXISTING, true)
   };
 }
@@ -222,6 +228,8 @@ function createAggregate() {
     total: 0,
     mapped: 0,
     planRows: 0,
+    planSummaryRows: 0,
+    majorPlanRows: 0,
     schoolScoreRows: 0,
     majorScoreRows: 0,
     sourceRows: 0,
@@ -236,6 +244,8 @@ function appendAggregate(aggregate: ReturnType<typeof createAggregate>, result: 
   aggregate.total += result.total;
   aggregate.mapped += result.mapped;
   aggregate.planRows += result.planRows;
+  aggregate.planSummaryRows += result.planSummaryRows;
+  aggregate.majorPlanRows += result.majorPlanRows;
   aggregate.schoolScoreRows += result.schoolScoreRows;
   aggregate.majorScoreRows += result.majorScoreRows;
   aggregate.sourceRows += result.sourceRows;
@@ -246,7 +256,7 @@ function appendAggregate(aggregate: ReturnType<typeof createAggregate>, result: 
 
 function printResult(result: GaokaoCnSyncResult): void {
   console.log(
-    `Synced ${result.mapped}/${result.total} Gaokao.cn mappings at offset ${result.offset}/${result.candidateTotal}, next offset ${result.nextOffset}. Plans: ${result.planRows}. School scores: ${result.schoolScoreRows}. Major scores: ${result.majorScoreRows}. Sources: ${result.sourceRows}. Source requests: ${result.sourceRequests}/${result.sourceRequestBudget ?? "unlimited"}. Skipped existing requests: ${result.skippedRequests}. Budget exhausted: ${result.requestBudgetExhausted ? "yes" : "no"}. Errors: ${result.errors.length}.`
+    `Synced ${result.mapped}/${result.total} Gaokao.cn mappings at offset ${result.offset}/${result.candidateTotal}, next offset ${result.nextOffset}. Plans: ${result.planRows} (summaries ${result.planSummaryRows}, major plans ${result.majorPlanRows}). School scores: ${result.schoolScoreRows}. Major scores: ${result.majorScoreRows}. Sources: ${result.sourceRows}. Source requests: ${result.sourceRequests}/${result.sourceRequestBudget ?? "unlimited"}. Skipped existing requests: ${result.skippedRequests}. Budget exhausted: ${result.requestBudgetExhausted ? "yes" : "no"}. Errors: ${result.errors.length}.`
   );
   if (result.errors.length) {
     for (const error of result.errors.slice(0, 20)) {
@@ -278,6 +288,8 @@ function renderContinuationCommand(options: GaokaoCnSyncOptions, nextOffset: num
   if (options.includePlans === true && options.includeScores === false) args.push("--plans-only");
   if (options.includePlans === false && options.includeScores === true) args.push("--scores-only");
   if (options.includeSpecialScores === false) args.push("--no-special-scores");
+  if (options.includePlanDetails === true) args.push("--plan-details");
+  if (options.includePlanDetails === false) args.push("--no-plan-details");
   if (options.eligibleOnly === false) args.push("--no-eligible-only");
   if (options.skipExisting) args.push("--skip-existing");
   return `npm run sync:gaokao-cn -- ${args.join(" ")}`;
@@ -298,10 +310,11 @@ function describeBatch(options: GaokaoCnSyncOptions): string {
     options.subjectTypes?.length ? `subjects=${options.subjectTypes.join(",")}` : "subjects=auto",
     options.planYears?.length && options.includePlans !== false ? `planYears=${options.planYears.join(",")}` : null,
     options.scoreYears?.length && options.includeScores !== false ? `scoreYears=${options.scoreYears.join(",")}` : null,
-    `requestDelayMs=${options.requestDelayMs ?? 60000}`,
-    `cooldownMinutes=${options.rateLimitCooldownMinutes ?? 720}`,
-    `maxSourceRequests=${options.maxSourceRequests ?? 4}`,
+    `requestDelayMs=${options.requestDelayMs ?? 180000}`,
+    `cooldownMinutes=${options.rateLimitCooldownMinutes ?? 1440}`,
+    `maxSourceRequests=${options.maxSourceRequests ?? 1}`,
     options.skipExisting ? "skipExisting=on" : null,
+    options.includePlanDetails === true ? "planDetails=on" : "planDetails=off",
     options.includePlans === false ? "plans=off" : null,
     options.includeScores === false ? "scores=off" : null
   ]
@@ -322,15 +335,17 @@ Common:
   --subjects=理科,文科          限制科类；留空按省份和年份自动选择。
   --plan-years=2026             招生计划年份，默认当前计划年份。
   --score-years=2025,2024,2023  分数线年份，默认近三年历史年份。
-  --request-delay-ms=60000      每次请求掌上高考之间的最小间隔；默认 60000，生产环境最低会抬到 10000。
-  --batch-delay-ms=900000       loop 多批同步时，每批之间的等待时间；默认 900000。
-  --rate-limit-cooldown-minutes=720
-                                遇到 1069 后，本进程内暂停请求源站多久；默认 720。
-  --max-source-requests=4       每批最多启动多少次掌上高考源站请求；0 表示不限。默认 4。
+  --request-delay-ms=180000     每次请求掌上高考之间的最小间隔；默认 180000，生产环境最低会抬到 180000。
+  --batch-delay-ms=1800000      loop 多批同步时，每批之间的等待时间；默认 1800000。
+  --rate-limit-cooldown-minutes=1440
+                                遇到 1069 后，本进程内暂停请求源站多久；默认 1440。
+  --max-source-requests=1       每批最多启动多少次掌上高考源站请求；生产环境低于 1 会按 1 执行。默认 1。
   --skip-existing               跳过本地已有覆盖的计划/分数接口，默认开启；如需强制重抓可传 --skip-existing=false。
 
 Mode:
   --plans-only                  只抓招生计划。
+  --plan-details                同步专业招生计划明细；默认关闭，按需打开。
+  --no-plan-details             不同步专业招生计划明细。
   --scores-only                 只抓分数线和位次。
   --no-special-scores           不抓专业分。
   --no-eligible-only            不过滤疑似非普通高校候选。
@@ -343,7 +358,7 @@ Environment variables remain supported:
   GAOKAO_CN_SUBJECT_TYPES, GAOKAO_CN_PLAN_YEARS, GAOKAO_CN_SCORE_YEARS,
   GAOKAO_CN_REQUEST_DELAY_MS, GAOKAO_CN_BATCH_DELAY_MS,
   GAOKAO_CN_MAX_REQUESTS_PER_RUN, GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES,
-  GAOKAO_CN_SKIP_EXISTING.
+  GAOKAO_CN_INCLUDE_PLAN_DETAILS, GAOKAO_CN_SKIP_EXISTING.
 `);
 }
 

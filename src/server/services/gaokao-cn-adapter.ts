@@ -13,9 +13,9 @@ const SITE_BASE = "https://www.gaokao.cn";
 const DEFAULT_LIMIT = 10;
 const DEFAULT_PAGE_SIZE = 80;
 const MAX_PAGES = 8;
-const DEFAULT_REQUEST_DELAY_MS = process.env.NODE_ENV === "test" ? 0 : 60000;
-const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES = 720;
-const DEFAULT_MAX_SOURCE_REQUESTS = process.env.NODE_ENV === "test" ? 0 : 4;
+const DEFAULT_REQUEST_DELAY_MS = process.env.NODE_ENV === "test" ? 0 : 180000;
+const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES = 1440;
+const DEFAULT_MAX_SOURCE_REQUESTS = process.env.NODE_ENV === "test" ? 0 : 1;
 const GLOBAL_RATE_LIMIT_COOLDOWN_KEY = "sync.internal.gaokaoCn.rateLimitCooldownUntil";
 
 export type GaokaoCnProgressReporter = (message: string) => void;
@@ -48,6 +48,8 @@ export interface GaokaoCnSyncResult {
   nextOffset: number;
   mapped: number;
   planRows: number;
+  planSummaryRows: number;
+  majorPlanRows: number;
   schoolScoreRows: number;
   majorScoreRows: number;
   sourceRows: number;
@@ -215,6 +217,8 @@ export class GaokaoCnAdapter {
       nextOffset: 0,
       mapped: 0,
       planRows: 0,
+      planSummaryRows: 0,
+      majorPlanRows: 0,
       schoolScoreRows: 0,
       majorScoreRows: 0,
       sourceRows: 0,
@@ -261,6 +265,8 @@ export class GaokaoCnAdapter {
           result.mapped += 1;
           const partial = await this.syncMappedUniversity(university, mapped.sourceSchoolId, options, requestContext);
           result.planRows += partial.planRows;
+          result.planSummaryRows += partial.planSummaryRows;
+          result.majorPlanRows += partial.majorPlanRows;
           result.schoolScoreRows += partial.schoolScoreRows;
           result.majorScoreRows += partial.majorScoreRows;
           result.sourceRows += partial.sourceRows;
@@ -273,7 +279,7 @@ export class GaokaoCnAdapter {
             break;
           }
           this.report(
-            `Saved admission data for ${university.name}: plans ${partial.planRows}, school scores ${partial.schoolScoreRows}, major scores ${partial.majorScoreRows}, skipped requests ${partial.skippedRequests}.`
+            `Saved admission data for ${university.name}: plan summaries ${partial.planSummaryRows}, major plans ${partial.majorPlanRows}, school scores ${partial.schoolScoreRows}, major scores ${partial.majorScoreRows}, skipped requests ${partial.skippedRequests}.`
           );
         } catch (error) {
           const message = getErrorMessage(error);
@@ -385,12 +391,21 @@ export class GaokaoCnAdapter {
     sourceSchoolId: string,
     options: GaokaoCnSyncOptions,
     requestContext: GaokaoRequestContext
-  ): Promise<Pick<GaokaoCnSyncResult, "planRows" | "schoolScoreRows" | "majorScoreRows" | "sourceRows" | "skippedRequests" | "requestBudgetExhausted">> {
+  ): Promise<Pick<GaokaoCnSyncResult, "planRows" | "planSummaryRows" | "majorPlanRows" | "schoolScoreRows" | "majorScoreRows" | "sourceRows" | "skippedRequests" | "requestBudgetExhausted">> {
     const provinces = normalizeProvinceFilter(options.provinces);
     const scoreYears = normalizeYears(options.scoreYears, defaultAdmissionScoreYears());
     const planYears = normalizeYears(options.planYears, defaultAdmissionPlanYears());
     const explicitSubjectTypes = normalizeSubjectFilter(options.subjectTypes);
-    const result = { planRows: 0, schoolScoreRows: 0, majorScoreRows: 0, sourceRows: 0, skippedRequests: 0, requestBudgetExhausted: false };
+    const result = {
+      planRows: 0,
+      planSummaryRows: 0,
+      majorPlanRows: 0,
+      schoolScoreRows: 0,
+      majorScoreRows: 0,
+      sourceRows: 0,
+      skippedRequests: 0,
+      requestBudgetExhausted: false
+    };
     const includePlans = options.includePlans !== false;
     const includeScores = options.includeScores !== false;
     const includePlanDetails = options.includePlanDetails !== false;
@@ -422,6 +437,7 @@ export class GaokaoCnAdapter {
               if (!this.hasRequestBudget(requestContext)) return { ...result, requestBudgetExhausted: true };
               summary = await this.fetchPlanSummary(university, sourceSchoolId, year, province.id, subject.id, requestContext);
               result.planRows += summary.rows;
+              result.planSummaryRows += summary.rows;
               result.sourceRows += summary.sourceRows;
               if (summary.requestBudgetExhausted) return { ...result, requestBudgetExhausted: true };
             }
@@ -443,6 +459,7 @@ export class GaokaoCnAdapter {
                 if (!this.hasRequestBudget(requestContext)) return { ...result, requestBudgetExhausted: true };
                 detail = await this.fetchPlanDetails(university, sourceSchoolId, year, province.id, subject.id, requestContext);
                 result.planRows += detail.rows;
+                result.majorPlanRows += detail.rows;
                 result.sourceRows += detail.sourceRows;
                 if (detail.requestBudgetExhausted) return { ...result, requestBudgetExhausted: true };
               }
@@ -1127,8 +1144,8 @@ function createRequestContext(requestDelayMs?: number, rateLimitCooldownMinutes?
 
 function clampRequestDelayMs(value?: number): number {
   if (value === undefined || !Number.isFinite(value)) return DEFAULT_REQUEST_DELAY_MS;
-  const minDelay = process.env.NODE_ENV === "test" ? 0 : 10_000;
-  return Math.max(minDelay, Math.min(300_000, Math.floor(value)));
+  const minDelay = process.env.NODE_ENV === "test" ? 0 : DEFAULT_REQUEST_DELAY_MS;
+  return Math.max(minDelay, Math.min(60 * 60 * 1000, Math.floor(value)));
 }
 
 function clampRateLimitCooldownMinutes(value?: number): number {
@@ -1138,7 +1155,8 @@ function clampRateLimitCooldownMinutes(value?: number): number {
 
 function clampMaxSourceRequests(value?: number): number {
   if (value === undefined || !Number.isFinite(value)) return DEFAULT_MAX_SOURCE_REQUESTS;
-  return Math.max(0, Math.min(500, Math.floor(value)));
+  const minRequests = process.env.NODE_ENV === "test" ? 0 : 1;
+  return Math.max(minRequests, Math.min(500, Math.floor(value)));
 }
 
 function parseFutureDate(value: string): Date | null {
