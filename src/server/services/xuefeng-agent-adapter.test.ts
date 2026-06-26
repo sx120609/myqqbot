@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -98,6 +98,31 @@ describe("XuefengAgentAdapter", () => {
       majorScoreRows: 1,
       sourceRows: 1
     });
+    database.close();
+  });
+
+  it("can prepare the cached SQLite without creating an admission sync job", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "myqqbot-xuefeng-cache-test-"));
+    tempDirs.push(dir);
+    const cacheDir = join(dir, "xuefeng-agent");
+    mkdirSync(cacheDir, { recursive: true });
+    const sourceDbPath = join(cacheDir, "admission_clean.db");
+    createSourceDb(sourceDbPath);
+
+    const database = new AppDatabase(join(dir, "bot.sqlite"));
+    const universities = new UniversityRepository(database);
+    const admissions = new AdmissionRepository(database);
+    const adapter = new XuefengAgentAdapter(dir, database, universities, admissions);
+
+    const result = await adapter.ensureSourceDb();
+    const jobs = database.db.prepare("SELECT COUNT(*) AS count FROM admission_sync_jobs").get() as { count: number };
+
+    expect(result).toMatchObject({
+      dbPath: sourceDbPath,
+      dbExists: true,
+      downloaded: false
+    });
+    expect(jobs.count).toBe(0);
     database.close();
   });
 });

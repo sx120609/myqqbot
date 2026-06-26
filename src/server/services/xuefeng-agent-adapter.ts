@@ -35,6 +35,22 @@ export interface XuefengAgentSyncOptions {
   offset?: number;
 }
 
+export interface XuefengAgentSourceOptions {
+  dbPath?: string;
+  gzPath?: string;
+  url?: string;
+  force?: boolean;
+}
+
+export interface XuefengAgentSourceResult {
+  path: string;
+  dbPath: string;
+  gzPath: string;
+  downloaded: boolean;
+  dbExists: boolean;
+  gzExists: boolean;
+}
+
 export interface XuefengAgentSyncResult {
   source: typeof XUEFENG_AGENT_SOURCE;
   total: number;
@@ -86,6 +102,66 @@ export class XuefengAgentAdapter {
     private readonly admissions: AdmissionRepository,
     private readonly progress?: XuefengAgentProgressReporter
   ) {}
+
+  cacheStatus(options: XuefengAgentSourceOptions = {}): Omit<XuefengAgentSourceResult, "path" | "downloaded"> {
+    const cacheDir = join(this.dataDir, "xuefeng-agent");
+    const dbPath = options.dbPath ? resolve(options.dbPath) : join(cacheDir, "admission_clean.db");
+    const gzPath = options.gzPath ? resolve(options.gzPath) : join(cacheDir, "admission_clean.db.gz");
+    return {
+      dbPath,
+      gzPath,
+      dbExists: existsSync(dbPath),
+      gzExists: existsSync(gzPath)
+    };
+  }
+
+  async ensureSourceDb(options: XuefengAgentSourceOptions = {}): Promise<XuefengAgentSourceResult> {
+    const status = this.cacheStatus(options);
+    if (options.dbPath) {
+      if (!status.dbExists) {
+        throw new Error(`本地雪峰 Agent SQLite 不存在：${status.dbPath}`);
+      }
+      return {
+        path: status.dbPath,
+        dbPath: status.dbPath,
+        gzPath: status.gzPath,
+        downloaded: false,
+        dbExists: true,
+        gzExists: status.gzExists
+      };
+    }
+
+    mkdirSync(dirname(status.dbPath), { recursive: true });
+    if (options.force) {
+      safeUnlink(status.dbPath);
+      if (!options.gzPath) safeUnlink(status.gzPath);
+    }
+    if (existsSync(status.dbPath)) {
+      return {
+        path: status.dbPath,
+        dbPath: status.dbPath,
+        gzPath: status.gzPath,
+        downloaded: false,
+        dbExists: true,
+        gzExists: existsSync(status.gzPath)
+      };
+    }
+
+    let downloaded = false;
+    if (!existsSync(status.gzPath)) {
+      await this.downloadGzip(status.gzPath, options.url);
+      downloaded = true;
+    }
+    await gunzipFile(status.gzPath, status.dbPath);
+    return {
+      path: status.dbPath,
+      dbPath: status.dbPath,
+      gzPath: status.gzPath,
+      downloaded,
+      dbExists: true,
+      gzExists: true
+    };
+  }
 
   async sync(options: XuefengAgentSyncOptions = {}): Promise<XuefengAgentSyncResult> {
     const offset = normalizeOffset(options.offset);
@@ -224,19 +300,8 @@ export class XuefengAgentAdapter {
   }
 
   private async resolveSourceDb(options: XuefengAgentSyncOptions): Promise<{ path: string; downloaded: boolean }> {
-    if (options.dbPath) return { path: resolve(options.dbPath), downloaded: false };
-
-    const cacheDir = join(this.dataDir, "xuefeng-agent");
-    mkdirSync(cacheDir, { recursive: true });
-    const dbPath = join(cacheDir, "admission_clean.db");
-    if (existsSync(dbPath)) return { path: dbPath, downloaded: false };
-
-    const gzPath = options.gzPath ? resolve(options.gzPath) : join(cacheDir, "admission_clean.db.gz");
-    if (!existsSync(gzPath)) {
-      await this.downloadGzip(gzPath, options.url);
-    }
-    await gunzipFile(gzPath, dbPath);
-    return { path: dbPath, downloaded: true };
+    const db = await this.ensureSourceDb(options);
+    return { path: db.path, downloaded: db.downloaded };
   }
 
   private async downloadGzip(targetPath: string, preferredUrl?: string): Promise<void> {

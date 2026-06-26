@@ -70,6 +70,18 @@ interface NapcatWebStatus {
   message?: string;
 }
 
+interface XuefengAgentCacheStatus {
+  running: boolean;
+  startedAt: string | null;
+  finishedAt: string | null;
+  dbPath: string;
+  gzPath: string;
+  dbExists: boolean;
+  gzExists: boolean;
+  downloaded: boolean;
+  error: string | null;
+}
+
 interface University {
   id: number;
   name: string;
@@ -375,7 +387,6 @@ const NAV = [
   { id: "site", label: "站点", icon: Settings },
   { id: "natural", label: "自然语言", icon: MessageSquareText },
   { id: "data", label: "高校数据", icon: Database },
-  { id: "admissions", label: "招生数据", icon: Database },
   { id: "aliases", label: "别名", icon: ListFilter },
   { id: "debug", label: "调试", icon: Send },
   { id: "logs", label: "日志", icon: Bot },
@@ -618,7 +629,6 @@ function DashboardPage() {
         <Metric label="NapCat" value={dashboard?.onebot.connected ? "已连接" : "未连接"} tone={dashboard?.onebot.connected ? "good" : "warn"} />
         <Metric label="高校数据" value={String(dashboard?.totals.universities ?? 0)} />
         <Metric label="神人画像" value={String(dashboard?.totals.srgaoxiaoProfiles ?? 0)} />
-        <Metric label="招生映射" value={String(dashboard?.totals.admissionMappings ?? 0)} />
         <Metric label="消息日志" value={String(dashboard?.totals.messages ?? 0)} />
         <Metric label="LLM 调用" value={String(dashboard?.totals.llmCalls ?? 0)} />
       </div>
@@ -1052,6 +1062,7 @@ function AdmissionsPage() {
   const [xuefengAgentDbPath, setXuefengAgentDbPath] = useState("");
   const [xuefengAgentLimit, setXuefengAgentLimit] = useState("");
   const [xuefengAgentOffset, setXuefengAgentOffset] = useState("");
+  const [xuefengAgentCache, setXuefengAgentCache] = useState<XuefengAgentCacheStatus | null>(null);
   const [queryUniversityId, setQueryUniversityId] = useState("");
   const [querySchool, setQuerySchool] = useState("");
   const [queryProvince, setQueryProvince] = useState("江苏");
@@ -1123,7 +1134,7 @@ function AdmissionsPage() {
   };
 
   const load = async () => {
-    const [settingsData, schedulerData, coverageData, unmappedData, issueData, mappingData, jobData, failedJobData, sourceData, universityData] = await Promise.all([
+    const [settingsData, schedulerData, coverageData, unmappedData, issueData, mappingData, jobData, failedJobData, sourceData, xuefengCacheData, universityData] = await Promise.all([
       api<Record<string, string | boolean>>("/api/settings"),
       api<SyncSchedulerStatus>("/api/sync-scheduler"),
       api<AdmissionCoverage>("/api/admissions/coverage"),
@@ -1133,6 +1144,7 @@ function AdmissionsPage() {
       api<AdmissionSyncJob[]>(`/api/admissions/jobs?${buildJobsQuery().toString()}`),
       api<AdmissionSyncJob[]>("/api/admissions/jobs/failed?limit=10"),
       api<AdmissionSourceSnapshot[]>(`/api/admissions/sources?${buildSourceQuery().toString()}`),
+      api<XuefengAgentCacheStatus>("/api/data/xuefeng-agent-cache"),
       api<University[]>(`/api/universities?query=${encodeURIComponent(schoolQuery)}&limit=120`)
     ]);
     const coverageGapData = await api<AdmissionCoverageGap[]>(`/api/admissions/coverage-gaps?${buildCoverageGapQuery(settingsData).toString()}`);
@@ -1146,6 +1158,7 @@ function AdmissionsPage() {
     setJobs(jobData);
     setFailedJobs(failedJobData);
     setSources(sourceData);
+    setXuefengAgentCache(xuefengCacheData);
     setUniversities(universityData);
   };
 
@@ -1282,8 +1295,36 @@ function AdmissionsPage() {
     }
   };
 
+  const downloadXuefengAgent = async () => {
+    setStatus("雪峰 Agent 数据库开始后台下载；这一步只缓存 SQLite，不会创建同步任务。");
+    try {
+      const body: Record<string, unknown> = { background: true };
+      if (xuefengAgentUrl.trim()) body.url = xuefengAgentUrl.trim();
+      const result = await api<{
+        queued?: boolean;
+        running?: boolean;
+        message?: string;
+        status?: XuefengAgentCacheStatus;
+        dbPath?: string;
+        gzPath?: string;
+        dbExists?: boolean;
+        gzExists?: boolean;
+        downloaded?: boolean;
+        error?: string | null;
+      }>("/api/data/download-xuefeng-agent", {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+      if (result.status) setXuefengAgentCache(result.status);
+      setStatus(result.message || "雪峰 Agent 数据库下载已启动，请稍后刷新缓存状态。");
+      await load();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const syncXuefengAgent = async () => {
-    setStatus("雪峰 Agent 历史投档线导入中，首次下载数据库会需要一会儿...");
+    setStatus("雪峰 Agent 历史投档线导入中；这一步会写入本地招生表，后台任务里可以查看进度。");
     try {
       const body: Record<string, unknown> = {
         query: schoolQuery || undefined,
@@ -1681,15 +1722,24 @@ function AdmissionsPage() {
           <button className="primary" onClick={() => void syncJiangsuOfficial()}><RefreshCcw size={16} />同步江苏官方源</button>
           <button onClick={() => void syncJiangsuOfficialPlans()}><RefreshCcw size={16} />同步江苏高校官方计划</button>
         </div>
-        <p className="notice">雪峰 Agent 历史库可一次性导入 2024-2025 投档线缓存，用作掌上高考限流时的补充；最终仍以省考试院和学校招生网为准。</p>
+        <p className="notice">雪峰 Agent 历史库主要补 2024-2025 投档线/位次，用来判断专业组门槛；具体“专业组里有什么专业”仍要看招生计划明细，缺专业计划时不会用它硬推荐具体专业。</p>
         <FormGrid>
           <Input label="雪峰库下载 URL" value={xuefengAgentUrl} onChange={setXuefengAgentUrl} hint="可选；留空使用内置 GitHub 地址。国内服务器可填镜像后的 admission_clean.db.gz 地址。" />
           <Input label="本地 SQLite 路径" value={xuefengAgentDbPath} onChange={setXuefengAgentDbPath} hint="可选；已手动下载 admission_clean.db 时填写。" />
           <Input label="导入行数上限" value={xuefengAgentLimit} onChange={setXuefengAgentLimit} hint="留空全量导入；调试时可填 1000。" />
           <Input label="导入 offset" value={xuefengAgentOffset} onChange={setXuefengAgentOffset} hint="分批导入时使用；完成后会自动填入下一批 offset。" />
         </FormGrid>
+        {xuefengAgentCache && (
+          <p className="notice">
+            雪峰库缓存：{xuefengAgentCache.running ? "下载/解压中" : xuefengAgentCache.dbExists ? "SQLite 已缓存" : xuefengAgentCache.gzExists ? "压缩包已缓存，待解压" : "未缓存"}
+            {xuefengAgentCache.dbPath ? `；路径 ${xuefengAgentCache.dbPath}` : ""}
+            {xuefengAgentCache.finishedAt ? `；最近完成 ${formatTime(xuefengAgentCache.finishedAt)}` : ""}
+            {xuefengAgentCache.error ? `；错误 ${xuefengAgentCache.error}` : ""}
+          </p>
+        )}
         <div className="actions">
-          <button onClick={() => void syncXuefengAgent()}><RefreshCcw size={16} />导入雪峰 Agent 历史库</button>
+          <button className="primary" onClick={() => void downloadXuefengAgent()}><RefreshCcw size={16} />下载雪峰数据库</button>
+          <button onClick={() => void syncXuefengAgent()}><RefreshCcw size={16} />导入雪峰历史库</button>
         </div>
         {gaokaoSourceCooldownUntil(scheduler) && (
           <p className="notice">

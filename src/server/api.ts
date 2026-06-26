@@ -20,11 +20,27 @@ import type { LogStore } from "./services/log-store.js";
 import type { MessageProcessor } from "./services/message-processor.js";
 import type { SrgaoxiaoSyncService } from "./services/srgaoxiao-sync.js";
 import type { UniversityRepository } from "./services/university-repository.js";
-import { XuefengAgentAdapter, type XuefengAgentSyncOptions } from "./services/xuefeng-agent-adapter.js";
+import { XuefengAgentAdapter, type XuefengAgentSourceOptions, type XuefengAgentSyncOptions } from "./services/xuefeng-agent-adapter.js";
 
 const execShell = promisify(exec);
 const NAPCAT_RESTART_TIMEOUT_MS = 30_000;
 const COMMAND_OUTPUT_LIMIT = 8000;
+
+interface XuefengAgentDownloadState {
+  running: boolean;
+  startedAt: string | null;
+  finishedAt: string | null;
+  dbPath: string;
+  gzPath: string;
+  dbExists: boolean;
+  gzExists: boolean;
+  downloaded: boolean;
+  error: string | null;
+}
+
+let xuefengAgentDownloadPromise: Promise<void> | null = null;
+let xuefengAgentDownloadState: XuefengAgentDownloadState | null = null;
+let xuefengAgentSyncPromise: Promise<void> | null = null;
 
 export interface ApiDeps {
   config: AppConfig;
@@ -119,6 +135,112 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
     return { ok: true, ...result };
   });
 
+  app.get("/api/data/xuefeng-agent-cache", async () => {
+    const adapter = new XuefengAgentAdapter(deps.config.dataDir, deps.database, deps.universities, deps.admissions);
+    return {
+      ok: true,
+      ...mergeXuefengAgentDownloadState(adapter.cacheStatus())
+    };
+  });
+
+  app.post("/api/data/download-xuefeng-agent", async (request) => {
+    const body = request.body as {
+      dbPath?: string;
+      gzPath?: string;
+      url?: string;
+      force?: boolean;
+      background?: boolean;
+    };
+    const options: XuefengAgentSourceOptions = {
+      dbPath: cleanOptionalString(body.dbPath),
+      gzPath: cleanOptionalString(body.gzPath),
+      url: cleanOptionalString(body.url),
+      force: Boolean(body.force)
+    };
+    const adapter = new XuefengAgentAdapter(deps.config.dataDir, deps.database, deps.universities, deps.admissions);
+    if (body.background === false) {
+      const result = await adapter.ensureSourceDb(options);
+      xuefengAgentDownloadState = {
+        running: false,
+        startedAt: xuefengAgentDownloadState?.startedAt ?? new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        dbPath: result.dbPath,
+        gzPath: result.gzPath,
+        dbExists: result.dbExists,
+        gzExists: result.gzExists,
+        downloaded: result.downloaded,
+        error: null
+      };
+      return { ok: true, ...result };
+    }
+
+    if (xuefengAgentDownloadPromise) {
+      return {
+        ok: true,
+        queued: true,
+        running: true,
+        message: "雪峰 Agent 数据库正在后台下载或解压，请稍后刷新缓存状态。",
+        status: mergeXuefengAgentDownloadState(adapter.cacheStatus(options))
+      };
+    }
+
+    const cache = adapter.cacheStatus(options);
+    xuefengAgentDownloadState = {
+      running: true,
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      dbPath: cache.dbPath,
+      gzPath: cache.gzPath,
+      dbExists: cache.dbExists,
+      gzExists: cache.gzExists,
+      downloaded: false,
+      error: null
+    };
+    xuefengAgentDownloadPromise = adapter
+      .ensureSourceDb(options)
+      .then((result) => {
+        xuefengAgentDownloadState = {
+          running: false,
+          startedAt: xuefengAgentDownloadState?.startedAt ?? new Date().toISOString(),
+          finishedAt: new Date().toISOString(),
+          dbPath: result.dbPath,
+          gzPath: result.gzPath,
+          dbExists: result.dbExists,
+          gzExists: result.gzExists,
+          downloaded: result.downloaded,
+          error: null
+        };
+      })
+      .catch((error) => {
+        const latest = adapter.cacheStatus(options);
+        xuefengAgentDownloadState = {
+          running: false,
+          startedAt: xuefengAgentDownloadState?.startedAt ?? new Date().toISOString(),
+          finishedAt: new Date().toISOString(),
+          dbPath: latest.dbPath,
+          gzPath: latest.gzPath,
+          dbExists: latest.dbExists,
+          gzExists: latest.gzExists,
+          downloaded: false,
+          error: error instanceof Error ? error.message : String(error)
+        };
+        console.error("[api] Background Xuefeng Agent DB download failed:", error);
+      })
+      .finally(() => {
+        xuefengAgentDownloadPromise = null;
+      });
+
+    return {
+      ok: true,
+      queued: true,
+      running: true,
+      message: cache.dbExists
+        ? "雪峰 Agent SQLite 已存在，本次会在后台快速校验缓存。"
+        : "雪峰 Agent 数据库下载已在后台启动；这一步只缓存 SQLite，不会创建招生同步任务。",
+      status: mergeXuefengAgentDownloadState(cache)
+    };
+  });
+
   app.post("/api/data/sync-gaokao-cn", async (request, reply) => {
     const body = request.body as {
       query?: string;
@@ -195,9 +317,23 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
     };
     const adapter = new XuefengAgentAdapter(deps.config.dataDir, deps.database, deps.universities, deps.admissions);
     if (body.background) {
-      void adapter.sync(options).catch((error) => {
-        console.error("[api] Background Xuefeng Agent sync failed:", error);
-      });
+      if (xuefengAgentSyncPromise) {
+        return {
+          ok: true,
+          queued: true,
+          running: true,
+          message: "雪峰 Agent 导入任务已经在运行，本次没有重复创建新任务。"
+        };
+      }
+      xuefengAgentSyncPromise = adapter
+        .sync(options)
+        .then(() => undefined)
+        .catch((error) => {
+          console.error("[api] Background Xuefeng Agent sync failed:", error);
+        })
+        .finally(() => {
+          xuefengAgentSyncPromise = null;
+        });
       return {
         ok: true,
         queued: true,
@@ -1024,6 +1160,38 @@ function cleanApiString(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   const text = String(value).trim();
   return text || null;
+}
+
+function cleanOptionalString(value: unknown): string | undefined {
+  return cleanApiString(value) ?? undefined;
+}
+
+function mergeXuefengAgentDownloadState(cache: {
+  dbPath: string;
+  gzPath: string;
+  dbExists: boolean;
+  gzExists: boolean;
+}): XuefengAgentDownloadState {
+  const state = xuefengAgentDownloadState;
+  if (!state || state.dbPath !== cache.dbPath || state.gzPath !== cache.gzPath) {
+    return {
+      running: false,
+      startedAt: null,
+      finishedAt: null,
+      dbPath: cache.dbPath,
+      gzPath: cache.gzPath,
+      dbExists: cache.dbExists,
+      gzExists: cache.gzExists,
+      downloaded: false,
+      error: null
+    };
+  }
+  return {
+    ...state,
+    running: Boolean(xuefengAgentDownloadPromise) || state.running,
+    dbExists: cache.dbExists || state.dbExists,
+    gzExists: cache.gzExists || state.gzExists
+  };
 }
 
 function buildJiangsuOfficialSyncOptions(body: {

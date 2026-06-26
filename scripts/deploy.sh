@@ -56,6 +56,8 @@ Usage:
                                   Sync all srgaoxiao school profiles once.
   scripts/deploy.sh sync-gaokao-cn [--limit=10 ...]
                                   Sync Gaokao.cn admission plans and score lines.
+  scripts/deploy.sh download-xuefeng-agent [--url=...]
+                                  Download and cache the Xuefeng Agent SQLite database only.
   scripts/deploy.sh sync-xuefeng-agent [--limit=10000 ...]
                                   Import Xuefeng Agent historical admission score data.
                                   Uses gh.lizmt.cn mirror first by default; override with --url if needed.
@@ -707,6 +709,17 @@ sync_xuefeng_agent_command() {
   fi
 }
 
+download_xuefeng_agent_command() {
+  ensure_linux_and_node
+  resolve_app_dir
+  cd "$APP_DIR"
+  if [ -f dist/server/scripts/download-xuefeng-agent.js ]; then
+    node dist/server/scripts/download-xuefeng-agent.js "$@"
+  else
+    npm run download:xuefeng-agent -- "$@"
+  fi
+}
+
 sync_jiangsu_official_command() {
   ensure_linux_and_node
   resolve_app_dir
@@ -765,6 +778,9 @@ main() {
       ;;
     sync-gaokao-cn)
       sync_gaokao_cn_command "$@"
+      ;;
+    download-xuefeng-agent)
+      download_xuefeng_agent_command "$@"
       ;;
     sync-xuefeng-agent)
       sync_xuefeng_agent_command "$@"

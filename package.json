@@ -14,6 +14,7 @@
     "sync:data": "tsx src/server/scripts/sync-data.ts",
     "sync:srgaoxiao": "tsx src/server/scripts/sync-srgaoxiao.ts",
     "sync:gaokao-cn": "tsx src/server/scripts/sync-gaokao-cn.ts",
+    "download:xuefeng-agent": "tsx src/server/scripts/download-xuefeng-agent.ts",
     "sync:xuefeng-agent": "tsx src/server/scripts/sync-xuefeng-agent.ts",
     "sync:jiangsu-official": "tsx src/server/scripts/sync-jiangsu-official.ts",
     "sync:jiangsu-official-plans": "tsx src/server/scripts/sync-jiangsu-official-plans.ts"

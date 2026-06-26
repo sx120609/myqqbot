@@ -29,7 +29,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -73,6 +74,69 @@ describe("MessageProcessor", () => {
     expect(JSON.stringify(vi.mocked(llm.chat).mock.calls[1][0])).not.toContain("学校候选提示");
   });
 
+  it("blocks admission questions when the product is scoped to university life info", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        site: {
+          publicBaseUrl: "http://127.0.0.1:8787",
+          filingNumber: ""
+        },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 900,
+          timeoutMs: 45000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: false,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5,
+          admissionQaEnabled: false
+        }
+      })
+    } as SettingsStore;
+    const nlu = {
+      analyze: vi.fn()
+    } as unknown as NaturalLanguageService;
+    const llm = {
+      chat: vi.fn().mockResolvedValueOnce(routeJson("admission", {
+        schoolNames: ["南京大学"],
+        province: "江苏",
+        subjectType: "物理类",
+        queryTypes: ["score", "rank"]
+      }))
+    } as unknown as LlmClient;
+    const logs = {
+      message: vi.fn()
+    } as unknown as LogStore;
+
+    const processor = new MessageProcessor(
+      settings,
+      { getUniversity: vi.fn() } as unknown as UniversityRepository,
+      nlu,
+      llm,
+      logs
+    );
+
+    const result = await processor.process({
+      platform: "debug",
+      text: "南京大学江苏物理类多少位能上",
+      messageType: "private",
+      userId: "u1",
+      conversationKey: "private:u1"
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.reason).toBe("招生问答已关闭");
+    expect(result.reply).toContain("当前只做院校介绍和校园生活资料");
+    expect(nlu.analyze).not.toHaveBeenCalled();
+    expect(vi.mocked(llm.chat)).toHaveBeenCalledTimes(1);
+  });
+
   it("does not use local school candidates when the LLM route omits school names", async () => {
     const settings = {
       runtime: () => ({
@@ -89,7 +153,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -154,7 +219,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -247,7 +313,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -363,7 +430,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -429,7 +497,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -505,7 +574,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -573,7 +643,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -647,7 +718,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: false,
           requireMentionInGroup: true,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -719,7 +791,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: true,
           contextTtlMinutes: 10,
-          cooldownSeconds: 0
+          cooldownSeconds: 0,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -804,7 +877,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -885,7 +959,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -1054,7 +1129,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -1407,7 +1483,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -1570,7 +1647,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -1676,7 +1754,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         },
         sync: {
           gaokaoCnRequestDelayMs: 0,
@@ -1792,7 +1871,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -1930,7 +2010,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -2079,7 +2160,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -2270,7 +2352,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -2428,7 +2511,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         },
         sync: {
           gaokaoCnMaxRequestsPerRun: 4,
@@ -2568,7 +2652,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -2654,7 +2739,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;
@@ -2738,7 +2824,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         },
         sync: {
           gaokaoCnRequestDelayMs: 9000,
@@ -2864,7 +2951,8 @@ describe("MessageProcessor", () => {
           groupNaturalEnabled: true,
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
-          cooldownSeconds: 5
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
         }
       })
     } as SettingsStore;

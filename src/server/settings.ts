@@ -35,6 +35,7 @@ export interface RuntimeSettings {
     requireMentionInGroup: boolean;
     contextTtlMinutes: number;
     cooldownSeconds: number;
+    admissionQaEnabled: boolean;
   };
   sync: {
     collegesAutoEnabled: boolean;
@@ -97,6 +98,7 @@ const DEFAULTS: Record<string, string> = {
   "nl.requireMentionInGroup": "false",
   "nl.contextTtlMinutes": "10",
   "nl.cooldownSeconds": "5",
+  "nl.admissionQaEnabled": process.env.NL_ADMISSION_QA_ENABLED ?? "false",
   "sync.collegesAutoEnabled": "false",
   "sync.collegesIntervalHours": "24",
   "sync.srgaoxiaoAutoEnabled": "false",
@@ -181,7 +183,8 @@ export class SettingsStore {
         groupNaturalEnabled: this.getBoolean("nl.groupNaturalEnabled", true),
         requireMentionInGroup: this.getBoolean("nl.requireMentionInGroup", false),
         contextTtlMinutes: this.getNumber("nl.contextTtlMinutes", 10),
-        cooldownSeconds: this.getNumber("nl.cooldownSeconds", 5)
+        cooldownSeconds: this.getNumber("nl.cooldownSeconds", 5),
+        admissionQaEnabled: this.getBoolean("nl.admissionQaEnabled", false)
       },
       sync: {
         collegesAutoEnabled: this.getBoolean("sync.collegesAutoEnabled", false),

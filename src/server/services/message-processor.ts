@@ -180,15 +180,27 @@ export class MessageProcessor {
     }
 
     let routeIntent = await this.analyzeMessageRouteWithLlm(input, context);
-    routeIntent = this.mergeAdmissionFollowUp(routeIntent, context, input.text);
+    if (runtime.naturalLanguage.admissionQaEnabled) {
+      routeIntent = this.mergeAdmissionFollowUp(routeIntent, context, input.text);
+    }
     const shouldReply = routeIntent?.shouldReply || input.messageType === "private" || input.mentionedBot;
+    if (!routeIntent || routeIntent.route === "ignore" || !shouldReply) {
+      return this.finish(input, { handled: false, reason: "模型判断无需回复", analysis: { routeIntent, schoolAnalysis: emptyMessageAnalysis() } });
+    }
+
+    if (routeIntent.route === "admission" && !runtime.naturalLanguage.admissionQaEnabled) {
+      return this.finish(input, {
+        handled: true,
+        reason: "招生问答已关闭",
+        reply: renderAdmissionDisabledReply(),
+        analysis: { routeIntent, schoolAnalysis: emptyMessageAnalysis() }
+      });
+    }
+
     const analysis =
-      routeIntent && shouldReply && routeIntent.route !== "ignore" && shouldResolveUniversitiesLocally(routeIntent)
+      shouldResolveUniversitiesLocally(routeIntent)
         ? this.nlu.analyze(routeIntent.schoolNames.join(" "), context?.universityId)
         : emptyMessageAnalysis();
-    if (!routeIntent || routeIntent.route === "ignore" || !shouldReply) {
-      return this.finish(input, { handled: false, reason: "模型判断无需回复", analysis: { routeIntent, schoolAnalysis: analysis } });
-    }
 
     if (input.images?.length) {
       const cooldownKey = `${input.conversationKey}:${input.userId}:image`;
@@ -373,16 +385,16 @@ export class MessageProcessor {
               "你是 QQBot 的入口路由器。你的任务是理解用户自然语言，判断这条消息应该进入哪个处理分支。" +
               "这是唯一入口：程序不会再用关键词或低置信度模板抢先决定回复类型。" +
               "不要使用固定关键词思维；要根据整句语义、上下文、是否在群聊被提及、是否包含图片来判断。" +
-              "route 只能是 admission、university_info、casual、ignore。" +
-              "admission 表示高校招生数据查询，例如招生计划、招生人数、历年录取分、最低位次、专业录取分、报考趋势、录取对比。" +
-              "university_info 表示高校资料/校园生活/院校评价/学校对比，例如宿舍、食堂、校园网、外卖、澡堂、管理、学校怎么样、两校怎么选。" +
+              "route 只能是 university_info、casual、ignore。" +
+              "本机器人当前不处理高校招生数据、招生计划、分数线、最低位次、专业录取分、专业组投档线、志愿冲稳保等分数类/报考类问题；这类消息请归为 casual，并让后续普通回复说明当前只做院校介绍和校园生活资料。" +
+              "university_info 表示高校资料/校园生活/院校评价/学校对比，例如学校介绍、院校定位、宿舍、食堂、校园网、外卖、澡堂、管理、学校怎么样、两校生活体验怎么选。" +
               "casual 表示应该正常闲聊、看图闲聊、解释图片、或回答能力/模型/使用方式问题。ignore 表示群聊里没有必要回复的旁观消息。" +
               "私聊或明确 @ 机器人时，除非是明显垃圾内容，否则 shouldReply 通常为 true；未 @ 的群聊普通路人闲聊 shouldReply 可为 false。" +
               "如果消息含图片且需要回复，请仍然选择最接近的 route；后续图片理解会按你的 route 和学校/主题字段组织资料。" +
               "只输出一个 JSON 对象，不要 Markdown，不要解释。字段：" +
               "route:string, shouldReply:boolean, confidence:number, schoolNames:string[], province:string|null, subjectType:string|null, years:number[], planGroup:string|null, majorName:string|null, queryTypes:string[], topicKey:string|null, topicLabel:string|null, needsFollowUp:boolean, followUpQuestion:string|null, reason:string。" +
               "confidence 只用于调试记录，程序不会因为低置信度拒绝回复。" +
-              "queryTypes 只能使用 plan, score, rank, major_score, trend, compare。subjectType 可用 物理类、历史类、理科、文科、综合改革 或 null。planGroup 用于院校专业组/专业组代码，例如 03组、第03专业组、9001-L005；没有则为 null。" +
+              "招生字段 province、subjectType、years、planGroup、majorName、queryTypes 当前只保留兼容旧结构；默认返回 null 或空数组。" +
               `topicKey 如果是高校生活资料，请从这些 key 中选一个或返回 general：${topicOptions}。`
           },
           {
@@ -392,7 +404,7 @@ export class MessageProcessor {
               `消息场景：${input.messageType === "group" ? "群聊" : "私聊"}；是否 @ 机器人：${input.mentionedBot ? "是" : "否"}。\n` +
               `是否包含图片：${input.images?.length ? `是，${input.images.length} 张` : "否"}。\n` +
               "程序不会提供本地关键词候选。请你直接从用户原话和上下文中理解是否涉及学校、涉及哪些学校、属于哪类请求。\n" +
-              `当前日期：${today}。${currentYear} 年招生计划通常可查；${currentYear} 录取分数线和位次要等各省录取后才陆续出现。\n\n` +
+              `当前日期：${today}。产品范围已经收窄为院校介绍和校园生活资料，不做 ${currentYear} 年招生计划、分数线、位次或志愿填报判断。\n\n` +
               `用户消息：${input.text}`
           }
         ],
@@ -1206,7 +1218,8 @@ export class MessageProcessor {
               xuefengAgentBasePrompt() +
               `你是 QQ 群/私聊里的雪峰 Agent 式高校资料助手，也可以自然回应用户的日常闲聊、能力询问和模型询问。` +
               `后台配置的模型 ID 是 ${model}，如果用户问你是什么模型，可以说明“后台配置的模型是 ${model}”，但不要编造供应商或你不知道的内部细节。` +
-              "你主要能查高校宿舍、食堂、校园网、外卖、澡堂、早晚自习等生活资料，用户不用命令，直接自然提问即可。" +
+              "你当前只做院校介绍、院校定位和校园生活资料总结，重点是宿舍、食堂、校园网、外卖、澡堂、早晚自习、管理、城市体验、适合什么人。用户不用命令，直接自然提问即可。" +
+              "如果用户问分数线、位次、招生计划、专业组、志愿冲稳保、能不能录取等分数类/报考类问题，要明确说明当前不做这类查询，并引导用户改问学校介绍或校园生活体验。" +
               "如果用户的问题像是在问高校资料，但没有明确学校、简称不确定、或没有完成资料检索，不要编造学校资料；请简短追问完整学校名或具体方面。" +
               "请用中文回复，语气自然、直给，适合 QQ 阅读。普通寒暄可以很短；能力介绍、解释类问题可以适当展开，不要固定限制在 120 字以内。"
           },
@@ -1647,11 +1660,11 @@ function renderSubjectCompatibilityNote(subjectType: string | null, subjectTypes
 
 function xuefengAgentBasePrompt(): string {
   return [
-    "你是“雪峰 Agent”式的高校和高考志愿顾问，不要自称张雪峰本人，也不要声称自己认识或代表任何真人。",
+    "你是“雪峰 Agent”式的院校选择和校园生活顾问，不要自称张雪峰本人，也不要声称自己认识或代表任何真人。",
     "说话风格要直给、接地气、有判断：少说套话，先讲结论，再讲为什么，最后告诉用户下一步怎么选。",
     "可以有一点东北式口语和群聊感，比如“咱说人话”“别光看牌子”“这个坑得提前知道”，但不要粗俗辱骂，不要攻击用户本人。",
-    "你不是中立百科，要像报考顾问一样做取舍：专业优先还是学校优先、城市值不值、要不要考研、家庭资源能不能接住，都要敢说。",
-    "所有具体事实、分数、位次、招生计划、宿舍食堂等体验必须基于上下文资料或可靠常识；没有资料就直说缺口，不要编。"
+    "你不是中立百科，要像学校选择顾问一样做取舍：专业倾向、学校层次、城市值不值、要不要考研、家庭资源能不能接住、生活体验能不能接受，都要敢说。",
+    "所有具体事实、学校层次、城市、校区、宿舍食堂、校园网、管理等体验必须基于上下文资料或可靠常识；没有资料就直说缺口，不要编。"
   ].join("");
 }
 
@@ -1661,6 +1674,7 @@ function xuefengAdmissionPrompt(): string {
     "用户没给省份、科类、位次、专业偏好时，要直接追问最关键的 1-2 个信息；不要假装已经能精确报。",
     "如果用户问“能不能上/怎么选/值不值”，回答要给冲稳保或风险档位：能冲就说明风险，稳就说明依据，保就说明为什么保。",
     "专业建议要直接：计算机、软件、电子、电气、自动化、机械、医学、师范、法学、财经等要结合家庭资源、城市和就业讲；生化环材土木护理等争议方向要提醒风险，但不要一棍子打死。",
+    "涉及院校专业组时，只有拿到该专业组下的专业计划明细，才能推荐具体专业；如果上下文只有专业组投档线/位次，就只能判断这个组的门槛和风险，必须明确缺少组内专业清单。",
     "跨年比较不能看裸分，必须看同省同科类位次；2026 招生计划只能说明名额和方向，不能当成 2026 录取线。"
   ].join("");
 }
@@ -1720,6 +1734,7 @@ function renderAdmissionContext(input: {
   if (input.schoolProfileText) {
     lines.push(`掌上高考院校基础信息：\n${input.schoolProfileText}`);
   }
+  lines.push(renderPlanGroupMajorCoverageNote(input));
   if (input.majorName && (input.planMajorFallback || input.scoreMajorFallback)) {
     lines.push(renderMajorFallbackNotice(input.majorName, input.planMajorFallback, input.scoreMajorFallback));
   }
@@ -1842,6 +1857,33 @@ function renderAdmissionSubjectQuerySuffix(subjectType: string | null, subjectTy
   if (!subjectTypes.length) return "";
   if (subjectTypes.length === 1 && subjectTypes[0] === subjectType) return "";
   return `；实际检索科类：${subjectTypes.join(" / ")}`;
+}
+
+function renderPlanGroupMajorCoverageNote(input: {
+  plans: AdmissionPlanRow[];
+  scores: AdmissionScoreRow[];
+  planGroup: string | null;
+  majorName: string | null;
+}): string {
+  const majorPlanRows = input.plans.filter((row) => Boolean(row.majorName)).length;
+  const planGroupsWithMajorPlans = Array.from(
+    new Set(
+      input.plans
+        .filter((row) => row.majorName && row.planGroup)
+        .map((row) => row.planGroup as string)
+    )
+  );
+  if (majorPlanRows) {
+    const groupText = planGroupsWithMajorPlans.length ? `，覆盖专业组 ${planGroupsWithMajorPlans.slice(0, 8).join("、")}` : "";
+    return `专业组内专业清单：已检索到 ${majorPlanRows} 条专业计划明细${groupText}；只能在表格列出的专业和计划数范围内给具体专业建议，没有出现在表里的专业不要当作该组确定包含。`;
+  }
+
+  const hasGroupedScore = input.scores.some((row) => Boolean(row.planGroup));
+  const hasGroupedPlanSummary = input.plans.some((row) => Boolean(row.planGroup));
+  if (input.planGroup || input.majorName || hasGroupedScore || hasGroupedPlanSummary) {
+    return "专业组内专业清单缺口：当前没有检索到专业计划明细，只能看到专业组投档线/位次或计划汇总；回答时只能判断专业组门槛、风险和补数方向，不得编造该组下面有哪些专业，也不要推荐具体组内专业。后台应优先同步专业计划 admission_plans。";
+  }
+  return "专业组内专业清单：本次没有锁定具体专业组；若用户要按专业组选专业，需要先同步专业计划明细。";
 }
 
 function renderMajorFallbackNotice(majorName: string, planMajorFallback: boolean, scoreMajorFallback: boolean): string {
@@ -2356,15 +2398,19 @@ function normalizeImageContentType(contentType: string | null, url: string): str
 function renderGreetingReply(): string {
   return [
     "来了，直接问就行。",
-    "想看学校值不值、宿舍食堂咋样、分数位次怎么卡、专业该不该冲，都可以一句话甩过来。",
-    "比如：南航宿舍怎么样，或者江苏物理类多少位能不能冲南理。"
+    "想看学校值不值、宿舍食堂咋样、校园网和管理怎么样、适合什么人，都可以一句话甩过来。",
+    "比如：南航宿舍怎么样，或者中国药科大学整体适合什么人。"
   ].join("\n");
+}
+
+function renderAdmissionDisabledReply(): string {
+  return "这类分数线、位次、招生计划、专业组和志愿冲稳保问题我现在先不做了。当前只做院校介绍和校园生活资料：比如学校定位、宿舍食堂、校园网、管理、城市体验、适合什么人。你可以直接问“某某大学怎么样”或“某某大学宿舍食堂如何”。";
 }
 
 function renderCasualFallback(hasContext: boolean): string {
   if (hasContext) {
-    return "这句我没抓准你要继续看哪块。你直接说学校加问题就行，比如宿舍、食堂、专业、分数位次，咱别绕。";
+    return "这句我没抓准你要继续看哪块。你直接说学校加问题就行，比如学校定位、宿舍、食堂、校园网、管理，咱别绕。";
   }
 
-  return "模型这下没接上。你直接问学校资料、招生计划、分数线，或者普通聊天也行，我按人话给你拆。";
+  return "模型这下没接上。你直接问学校介绍、宿舍食堂、校园网、管理体验，或者普通聊天也行，我按人话给你拆。";
 }
