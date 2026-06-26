@@ -2,6 +2,7 @@ import { exec } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import type { FastifyInstance } from "fastify";
+import QRCode from "qrcode";
 import type { AppConfig } from "./config.js";
 import type { AppDatabase } from "./db.js";
 import type { OneBotGateway } from "./onebot.js";
@@ -487,6 +488,27 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
 
   app.get("/api/onebot/napcat/status", async () => getNapcatLauncherStatus(deps.settings.runtime().onebot));
 
+  app.get("/api/onebot/napcat/qrcode.png", async (_request, reply) => {
+    try {
+      const qrcodeUrl = await getNapcatLoginQrUrl(deps.settings.runtime().onebot);
+      const image = await QRCode.toBuffer(qrcodeUrl, {
+        type: "png",
+        errorCorrectionLevel: "M",
+        margin: 1,
+        width: 260
+      });
+      return reply
+        .header("cache-control", "no-store, max-age=0")
+        .type("image/png")
+        .send(image);
+    } catch (error) {
+      return reply.code(400).send({
+        ok: false,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
   app.get("/api/onebot/napcat/open", async (_request, reply) => {
     const settings = deps.settings.runtime().onebot;
     const url = buildNapcatWebPanelUrl(settings.napcatWebUrl, settings.napcatWebKey);
@@ -608,7 +630,7 @@ async function getNapcatLauncherStatus(settings: NapcatLauncherSettings): Promis
   }
 
   try {
-    const data = await callNapcatLauncherApi<NapcatLoginStatus>(settings, "/QQLogin/CheckLoginStatus");
+    const data = await getNapcatLoginStatus(settings);
     return {
       configured: true,
       reachable: true,
@@ -628,6 +650,24 @@ async function getNapcatLauncherStatus(settings: NapcatLauncherSettings): Promis
       message: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+async function getNapcatLoginQrUrl(settings: NapcatLauncherSettings): Promise<string> {
+  const status = await getNapcatLoginStatus(settings);
+  if (status.isLogin) throw new Error("NapCat QQ 当前已在线，不需要扫码。");
+  if (status.qrcodeurl) return status.qrcodeurl;
+  try {
+    await callNapcatLauncherApi<unknown>(settings, "/QQLogin/RefreshQRcode");
+  } catch {
+    // Some launcher states reject refresh while a QR session is being prepared. Read status once more below.
+  }
+  const refreshed = await getNapcatLoginStatus(settings);
+  if (refreshed.qrcodeurl) return refreshed.qrcodeurl;
+  throw new Error(refreshed.loginError || "NapCat 暂时没有返回扫码二维码。");
+}
+
+async function getNapcatLoginStatus(settings: NapcatLauncherSettings): Promise<NapcatLoginStatus> {
+  return callNapcatLauncherApi<NapcatLoginStatus>(settings, "/QQLogin/CheckLoginStatus");
 }
 
 async function callNapcatLauncherApi<T>(settings: NapcatLauncherSettings, path: string): Promise<T> {

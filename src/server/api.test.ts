@@ -260,6 +260,67 @@ describe("OneBot operation API", () => {
       await app.close();
     }
   });
+
+  it("renders NapCat login QR code through the MyQQBot backend", async () => {
+    const app = Fastify();
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/login")) {
+        expect(JSON.parse(String(init?.body))).toHaveProperty("hash");
+        return jsonResponse({ code: 0, data: { Credential: "credential" }, message: "success" });
+      }
+      if (url.endsWith("/api/QQLogin/CheckLoginStatus")) {
+        expect(init?.headers).toMatchObject({ authorization: "Bearer credential" });
+        return jsonResponse({
+          code: 0,
+          data: { isLogin: false, isOffline: false, qrcodeurl: "https://example.com/qq-login-token" },
+          message: "success"
+        });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await registerApi(app, {
+        config: { server: { publicBaseUrl: "http://localhost:8787" } },
+        database: {},
+        settings: {
+          runtime: () => ({
+            onebot: {
+              napcatRestartCommand: "",
+              napcatWebUrl: "http://127.0.0.1:6099",
+              napcatWebKey: "secret"
+            }
+          })
+        },
+        universities: {},
+        admissions: {},
+        sync: {},
+        answerSources: {},
+        srgaoxiaoSync: {},
+        gaokaoCn: {},
+        autoSync: {},
+        llm: {},
+        logs: {},
+        processor: {},
+        onebot: {
+          status: () => ({ connected: false })
+        }
+      } as never);
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/onebot/napcat/qrcode.png"
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["content-type"]).toMatch(/^image\/png/u);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+      await app.close();
+    }
+  });
 });
 
 describe("admission API", () => {

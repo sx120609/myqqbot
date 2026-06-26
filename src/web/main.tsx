@@ -5,12 +5,12 @@ import {
   Bot,
   Brain,
   Database,
-  ExternalLink,
   ListFilter,
   Lock,
   LogOut,
   MessageSquareText,
   PlugZap,
+  QrCode,
   RefreshCcw,
   Save,
   Search,
@@ -516,6 +516,7 @@ function LoginPage({ auth, onLoggedIn }: { auth: AuthStatus; onLoggedIn: () => v
 function DashboardPage() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [napcatWeb, setNapcatWeb] = useState<NapcatWebStatus | null>(null);
+  const [napcatQrStamp, setNapcatQrStamp] = useState(0);
   const [settings, setSettings] = useState<Record<string, string | boolean>>({});
   const [status, setStatus] = useState("");
   const [napcatStatus, setNapcatStatus] = useState("");
@@ -524,7 +525,11 @@ function DashboardPage() {
 
   const load = async () => setDashboard(await api<Dashboard>("/api/dashboard"));
   const loadSettings = async () => setSettings(await api<Record<string, string | boolean>>("/api/settings"));
-  const loadNapcatWebStatus = async () => setNapcatWeb(await api<NapcatWebStatus>("/api/onebot/napcat/status"));
+  const applyNapcatWebStatus = (data: NapcatWebStatus) => {
+    setNapcatWeb(data);
+    if (data.qrcodeUrl && !data.isLogin) setNapcatQrStamp(Date.now());
+  };
+  const loadNapcatWebStatus = async () => applyNapcatWebStatus(await api<NapcatWebStatus>("/api/onebot/napcat/status"));
   useEffect(() => {
     void load();
     void loadSettings();
@@ -599,13 +604,12 @@ function DashboardPage() {
       });
       await loadSettings();
       const data = await api<NapcatWebStatus>("/api/onebot/napcat/status");
-      setNapcatWeb(data);
+      applyNapcatWebStatus(data);
       setNapcatStatus(formatNapcatWebStatus(data));
     } catch (error) {
       setNapcatStatus(error instanceof Error ? error.message : String(error));
     }
   };
-  const openNapcatWeb = () => window.open("/api/onebot/napcat/open", "_blank", "noopener,noreferrer");
 
   return (
     <section>
@@ -634,6 +638,8 @@ function DashboardPage() {
               label="启动器地址"
               value={String(settings["onebot.napcatWebUrl"] ?? "")}
               onChange={(v) => updateNapcatSetting("onebot.napcatWebUrl", v)}
+              autoComplete="url"
+              name="napcat-launcher-url"
               hint="默认 http://127.0.0.1:6099；可填完整 /webui 地址。"
             />
             <Input
@@ -641,12 +647,18 @@ function DashboardPage() {
               value={String(settings["onebot.napcatWebKey"] ?? "")}
               onChange={(v) => updateNapcatSetting("onebot.napcatWebKey", v)}
               type="password"
+              autoComplete="new-password"
+              ignorePasswordManagers
+              name="napcat-webui-key"
               hint="NapCat 启动器 WebUI 的 key，会打码保存。"
             />
             <Input
               label="兜底重启命令"
               value={String(settings["onebot.napcatRestartCommand"] ?? "")}
               onChange={(v) => updateNapcatSetting("onebot.napcatRestartCommand", v)}
+              autoComplete="off"
+              ignorePasswordManagers
+              name="napcat-restart-command"
               hint="可选；只有没填 WebUI Key 时才使用。"
             />
           </FormGrid>
@@ -658,12 +670,22 @@ function DashboardPage() {
             <button onClick={saveNapcatSettings} disabled={savingNapcat}>
               <Save size={16} />{savingNapcat ? "保存中..." : "保存配置"}
             </button>
-            <button onClick={openNapcatWeb} disabled={!String(settings["onebot.napcatWebUrl"] ?? "").trim()}>
-              <ExternalLink size={16} />打开扫码页
+            <button onClick={checkNapcatWebStatus} disabled={!String(settings["onebot.napcatWebKey"] ?? "").trim()}>
+              <QrCode size={16} />刷新二维码
             </button>
           </div>
           {napcatWeb?.qrcodeUrl && !napcatWeb.isLogin && (
-            <p className="notice ops-status">二维码已就绪，可打开扫码页重新登录。登录页地址不会在这里直接暴露 key。</p>
+            <div className="napcat-qr-panel">
+              <img
+                className="napcat-qr-image"
+                src={`/api/onebot/napcat/qrcode.png?t=${napcatQrStamp || Date.now()}`}
+                alt="NapCat QQ 登录二维码"
+              />
+              <div>
+                <strong>扫码登录 NapCat QQ</strong>
+                <p className="notice">二维码由 MyQQBot 后端从 NapCat 启动器获取并本地渲染，不会跳转到 127.0.0.1。</p>
+              </div>
+            </div>
           )}
           {napcatStatus && <p className="notice ops-status">{napcatStatus}</p>}
         </Panel>
@@ -2144,11 +2166,39 @@ function FormGrid({ children }: { children: React.ReactNode }) {
   return <div className="form-grid">{children}</div>;
 }
 
-function Input({ label, value, onChange, type = "text", hint }: { label: string; value: string; onChange: (value: string) => void; type?: string; hint?: string }) {
+function Input({
+  label,
+  value,
+  onChange,
+  type = "text",
+  hint,
+  autoComplete,
+  ignorePasswordManagers = false,
+  name
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  type?: string;
+  hint?: string;
+  autoComplete?: string;
+  ignorePasswordManagers?: boolean;
+  name?: string;
+}) {
   return (
     <label className="field">
       <span>{label}</span>
-      <input type={type} value={value} onChange={(e) => onChange(e.target.value)} />
+      <input
+        type={type}
+        name={name}
+        value={value}
+        autoComplete={autoComplete}
+        data-lpignore={ignorePasswordManagers ? "true" : undefined}
+        data-1p-ignore={ignorePasswordManagers ? "true" : undefined}
+        data-form-type={ignorePasswordManagers ? "other" : undefined}
+        spellCheck={false}
+        onChange={(e) => onChange(e.target.value)}
+      />
       {hint && <small>{hint}</small>}
     </label>
   );
