@@ -3,11 +3,12 @@ import type { AppConfig } from "./config.js";
 import type { AppDatabase } from "./db.js";
 import type { OneBotGateway } from "./onebot.js";
 import type { SettingsStore } from "./settings.js";
+import { ADMISSION_SOURCE } from "./services/admission-repository.js";
 import type { AdmissionRepository } from "./services/admission-repository.js";
 import type { AutoSyncScheduler } from "./services/auto-sync-scheduler.js";
 import type { AnswerSourceRecord, AnswerSourceStore } from "./services/answer-source-store.js";
 import type { DataSyncService } from "./services/data-sync.js";
-import type { GaokaoCnAdapter } from "./services/gaokao-cn-adapter.js";
+import { renderGaokaoSchoolProfile, type GaokaoCnAdapter, type GaokaoSchool } from "./services/gaokao-cn-adapter.js";
 import type { LlmClient } from "./services/llm-client.js";
 import type { LogStore } from "./services/log-store.js";
 import type { MessageProcessor } from "./services/message-processor.js";
@@ -70,6 +71,13 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
 
   app.get("/api/sync-scheduler", async () => deps.autoSync.status());
 
+  app.post("/api/sync-scheduler/gaokao-cn/reset", async (request) => {
+    const body = request.body as { target?: "plan" | "score" | "all" };
+    const target = body.target === "plan" || body.target === "score" || body.target === "all" ? body.target : "all";
+    deps.autoSync.resetGaokaoCnProgress(target);
+    return { ok: true, status: deps.autoSync.status() };
+  });
+
   app.post("/api/settings/test-llm", async () => {
     const text = await deps.llm.testConnection();
     return { ok: true, text };
@@ -100,7 +108,7 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
     return { ok: true, ...result };
   });
 
-  app.post("/api/data/sync-gaokao-cn", async (request) => {
+  app.post("/api/data/sync-gaokao-cn", async (request, reply) => {
     const body = request.body as {
       query?: string;
       limit?: number;
@@ -113,8 +121,23 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       includePlans?: boolean;
       includeScores?: boolean;
       includeSpecialScores?: boolean;
+      includePlanDetails?: boolean;
       eligibleOnly?: boolean;
+      requestDelayMs?: number;
+      maxSourceRequests?: number;
+      skipExisting?: boolean;
     };
+    const syncSettings = deps.settings.runtime().sync;
+    const rateLimitStatus = deps.gaokaoCn.rateLimitStatus?.();
+    if (rateLimitStatus?.active) {
+      const message = `掌上高考当前处于限流冷却中，预计 ${rateLimitStatus.until ?? "稍后"} 后再恢复同步；本次没有请求源站。`;
+      return reply.code(429).send({
+        ok: false,
+        code: "GAOKAO_CN_RATE_LIMIT_COOLDOWN",
+        cooldownUntil: rateLimitStatus.until,
+        message
+      });
+    }
     const result = await deps.gaokaoCn.sync({
       query: body.query,
       limit: body.limit,
@@ -127,7 +150,12 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       includePlans: body.includePlans,
       includeScores: body.includeScores,
       includeSpecialScores: body.includeSpecialScores,
-      eligibleOnly: body.eligibleOnly
+      includePlanDetails: body.includePlanDetails,
+      eligibleOnly: body.eligibleOnly,
+      requestDelayMs: body.requestDelayMs,
+      rateLimitCooldownMinutes: syncSettings.gaokaoCnRateLimitCooldownMinutes,
+      maxSourceRequests: body.maxSourceRequests ?? syncSettings.gaokaoCnMaxRequestsPerRun,
+      skipExisting: body.skipExisting
     });
     return { ok: true, ...result };
   });
@@ -138,6 +166,32 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
   });
 
   app.get("/api/admissions/coverage", async () => deps.admissions.coverageStats());
+
+  app.get("/api/admissions/coverage-gaps", async (request) => {
+    const query = request.query as { planYears?: string; scoreYears?: string; provinces?: string; subjectTypes?: string; limit?: string };
+    return deps.admissions.coverageGaps({
+      planYears: parseNumberList(query.planYears),
+      scoreYears: parseNumberList(query.scoreYears),
+      provinces: parseStringList(query.provinces),
+      subjectTypes: parseStringList(query.subjectTypes),
+      limit: Number(query.limit ?? 24)
+    });
+  });
+
+  app.get("/api/admissions/coverage-gaps/missing", async (request) => {
+    const query = request.query as { kind?: string; year?: string; province?: string; subjectType?: string; limit?: string };
+    const kind = query.kind === "plan" || query.kind === "school_score" || query.kind === "major_score" ? query.kind : null;
+    if (!kind) throw new Error("kind must be plan, school_score or major_score");
+    if (!query.year) throw new Error("year is required");
+    if (!query.province?.trim()) throw new Error("province is required");
+    return deps.admissions.coverageMissingUniversities({
+      kind,
+      year: Number(query.year),
+      provinceName: query.province,
+      subjectType: query.subjectType,
+      limit: Number(query.limit ?? 80)
+    });
+  });
 
   app.get("/api/admissions/unmapped", async (request) => {
     const query = request.query as { query?: string; limit?: string };
@@ -159,20 +213,44 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
 
   app.put("/api/admissions/mappings/:universityId", async (request) => {
     const params = request.params as { universityId: string };
-    const body = request.body as { sourceSchoolId?: string; sourceSchoolName?: string; sourceUrl?: string };
+    const body = request.body as { sourceSchoolId?: string; sourceSchoolName?: string; sourceUrl?: string; sourceSchool?: Partial<GaokaoSchool> };
     const university = deps.universities.getUniversity(Number(params.universityId));
     if (!university) throw new Error("university not found");
     if (!body.sourceSchoolId) throw new Error("sourceSchoolId is required");
+    const sourceSchoolId = String(body.sourceSchoolId).trim();
+    const sourceSchoolName = body.sourceSchoolName?.trim() || university.name;
+    const sourceUrl = body.sourceUrl || `https://www.gaokao.cn/school/${encodeURIComponent(sourceSchoolId)}`;
+    const sourceSchool = normalizeManualGaokaoSchoolCandidate(body.sourceSchool, sourceSchoolId, sourceSchoolName);
+    const payloadJson = JSON.stringify(sourceSchool ?? { manual: true, sourceSchoolId, sourceSchoolName });
     deps.admissions.upsertMapping({
       universityId: university.id,
-      sourceSchoolId: body.sourceSchoolId,
-      sourceSchoolName: body.sourceSchoolName || university.name,
-      matchedName: body.sourceSchoolName || university.name,
+      sourceSchoolId,
+      sourceSchoolName,
+      matchedName: sourceSchoolName,
       matchStatus: "manual",
       confidence: 1,
-      sourceUrl: body.sourceUrl || `https://www.gaokao.cn/school/${encodeURIComponent(body.sourceSchoolId)}`,
-      payloadJson: JSON.stringify({ manual: true, sourceSchoolId: body.sourceSchoolId, sourceSchoolName: body.sourceSchoolName || university.name })
+      sourceUrl,
+      payloadJson
     });
+    if (sourceSchool) {
+      deps.universities.upsertSchoolProfile({
+        universityId: university.id,
+        source: ADMISSION_SOURCE,
+        sourceSchoolId,
+        sourceUrl,
+        payloadJson,
+        profileText: renderGaokaoSchoolProfile(sourceSchool, sourceSchoolId, sourceUrl)
+      });
+      deps.admissions.insertSource({
+        sourceKind: "school-profile",
+        universityId: university.id,
+        sourceSchoolId,
+        sourceUrl,
+        requestJson: JSON.stringify({ school_id: sourceSchoolId, source: "manual-mapping" }),
+        responseJson: JSON.stringify({ code: "0000", data: { item: [sourceSchool] } }),
+        status: "success"
+      });
+    }
     return { ok: true };
   });
 
@@ -183,6 +261,7 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       subject?: string;
       years?: string;
       batch?: string;
+      planGroup?: string;
       scoreType?: string;
       major?: string;
       limit?: string;
@@ -196,6 +275,7 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       subjectTypes: parseStringList(query.subject),
       years: parseNumberList(query.years),
       batch: query.batch,
+      planGroup: query.planGroup,
       scoreType,
       majorName: query.major,
       limit: Number(query.limit ?? 80)
@@ -345,11 +425,12 @@ export function renderAnswerSourcePage(record: AnswerSourceRecord, filingNumber:
 function renderAdmissionSourceSections(contextText: string): string {
   const sections = splitAdmissionContext(contextText);
   if (!sections.length) return renderSection("掌上高考招生数据", contextText);
-  return sections.map((section) => renderSection(section.title, section.content)).join("");
+  return sections.map((section) => renderAdmissionSection(section.title, section.content)).join("");
 }
 
 function splitAdmissionContext(contextText: string): Array<{ title: string; content: string }> {
   const markers = [
+    { pattern: /^报考参考表：\s*$/u, title: "报考参考表" },
     { pattern: /^招生计划：\s*$/u, title: "招生计划" },
     { pattern: /^分数趋势摘要：\s*$/u, title: "分数趋势摘要" },
     { pattern: /^录取分数\/位次：\s*$/u, title: "录取分数与最低位次" },
@@ -397,6 +478,116 @@ function renderSection(title: string, content: string): string {
   `;
 }
 
+function renderAdmissionSection(title: string, content: string): string {
+  if (title === "资料页追溯") return renderAdmissionTraceSection(title, content);
+  return `
+    <section class="source-section">
+      <h2>${escapeHtml(title)}</h2>
+      ${renderContentBlocks(content)}
+    </section>
+  `;
+}
+
+function renderAdmissionTraceSection(title: string, content: string): string {
+  const lines = content.split(/\r?\n/u);
+  const snapshotLines = lines.filter((line) => /^#\d+；/u.test(line.trim()));
+  const remaining = lines.filter((line) => !/^#\d+；/u.test(line.trim()) && line.trim() !== "掌上高考来源快照：");
+  const cards = snapshotLines.map(renderAdmissionSourceCard).join("");
+  return `
+    <section class="source-section">
+      <h2>${escapeHtml(title)}</h2>
+      ${renderContentBlocks(remaining.join("\n").trim())}
+      ${cards ? `<div class="source-cards">${cards}</div>` : ""}
+    </section>
+  `;
+}
+
+function renderContentBlocks(content: string): string {
+  const lines = content.split(/\r?\n/u);
+  const blocks: string[] = [];
+  let textLines: string[] = [];
+  let tableLines: string[] = [];
+  const flushText = () => {
+    const text = textLines.join("\n").trim();
+    if (text) blocks.push(`<pre>${escapeHtml(text)}</pre>`);
+    textLines = [];
+  };
+  const flushTable = () => {
+    if (tableLines.length >= 2) blocks.push(renderPipeTable(tableLines));
+    else textLines.push(...tableLines);
+    tableLines = [];
+  };
+
+  for (const line of lines) {
+    if (isPipeTableLine(line)) {
+      flushText();
+      tableLines.push(line);
+      continue;
+    }
+    flushTable();
+    textLines.push(line);
+  }
+  flushTable();
+  flushText();
+  return blocks.join("");
+}
+
+function renderPipeTable(lines: string[]): string {
+  const rows = lines.map(parsePipeRow).filter((row) => row.length > 1);
+  if (rows.length < 2) return `<pre>${escapeHtml(lines.join("\n"))}</pre>`;
+  const [header, ...bodyRows] = rows;
+  return `
+    <div class="table-scroll">
+      <table class="source-table">
+        <thead><tr>${header.map((cell) => `<th>${escapeHtml(cell)}</th>`).join("")}</tr></thead>
+        <tbody>${bodyRows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderAdmissionSourceCard(line: string): string {
+  const parts = line.split("；").map((part) => part.trim()).filter(Boolean);
+  const id = parts[0] ?? "#-";
+  const kind = parts[1] ?? "unknown";
+  const status = parts[2] ?? "-";
+  const details = new Map<string, string>();
+  for (const part of parts.slice(3)) {
+    const index = part.indexOf("=");
+    if (index <= 0) continue;
+    details.set(part.slice(0, index), part.slice(index + 1));
+  }
+  const rows = [
+    ["抓取时间", details.get("抓取")],
+    ["来源 URL", details.get("URL")],
+    ["请求参数", details.get("请求")],
+    ["响应摘要", details.get("响应")]
+  ].filter((row): row is [string, string] => Boolean(row[1]));
+  return `
+    <article class="source-card">
+      <div class="source-card-head">
+        <strong>${escapeHtml(id)}</strong>
+        <span>${escapeHtml(kind)}</span>
+        <em class="${status === "success" ? "source-status success" : "source-status"}">${escapeHtml(status)}</em>
+      </div>
+      <dl>${rows.map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>
+    </article>
+  `;
+}
+
+function isPipeTableLine(line: string): boolean {
+  return line.includes("|") && line.split("|").length >= 4;
+}
+
+function parsePipeRow(line: string): string[] {
+  return line
+    .replace(/^\s*\|/u, "")
+    .replace(/\|\s*$/u, "")
+    .split("|")
+    .map((cell) => cell.trim())
+    .filter(Boolean);
+}
+
 function renderPublicHtml(input: { title: string; body: string; filingNumber: string }): string {
   const filing = input.filingNumber.trim();
   return `<!doctype html>
@@ -422,6 +613,22 @@ function renderPublicHtml(input: { title: string; body: string; filingNumber: st
     dt{color:#687385;font-size:13px;margin-bottom:4px}
     dd{margin:0;line-height:1.65;overflow-wrap:anywhere}
     pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7;font:inherit;color:#243044}
+    pre+pre,.table-scroll+pre,pre+.table-scroll{margin-top:12px}
+    .table-scroll{overflow-x:auto;margin:10px 0 0;border:1px solid #e5ded3;border-radius:8px;background:#fff}
+    .source-table{width:100%;border-collapse:collapse;min-width:680px;font-size:14px}
+    .source-table th,.source-table td{padding:9px 10px;border-bottom:1px solid #eee6da;text-align:left;vertical-align:top;line-height:1.55}
+    .source-table th{background:#f7f2e9;color:#172033;font-weight:700;white-space:nowrap}
+    .source-table tr:last-child td{border-bottom:0}
+    .source-cards{display:grid;gap:10px;margin-top:14px}
+    .source-card{border:1px solid #e5ded3;border-radius:8px;background:#fff;padding:12px}
+    .source-card-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;color:#172033}
+    .source-card-head span{color:#687385}
+    .source-status{font-style:normal;font-size:12px;border-radius:999px;padding:2px 8px;background:#fff1f1;color:#a33a3a}
+    .source-status.success{background:#eaf7f2;color:#256f6b}
+    .source-card dl{display:grid;gap:8px;margin:0}
+    .source-card dl div{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px}
+    .source-card dt{margin:0;color:#687385}
+    .source-card dd{margin:0;overflow-wrap:anywhere}
     .muted{color:#687385;line-height:1.7}
     footer{padding:18px;text-align:center;color:#7a6f65;font-size:13px}
     @media (max-width:720px){.meta{grid-template-columns:1fr}.page{padding:14px}.hero,.source-section{padding:16px}}
@@ -436,6 +643,34 @@ function renderPublicHtml(input: { title: string; body: string; filingNumber: st
 
 function normalizeBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/g, "");
+}
+
+function normalizeManualGaokaoSchoolCandidate(
+  input: Partial<GaokaoSchool> | undefined,
+  sourceSchoolId: string,
+  fallbackName: string
+): GaokaoSchool | null {
+  const schoolId = cleanApiString(input?.school_id) ?? sourceSchoolId;
+  const name = cleanApiString(input?.name) ?? fallbackName;
+  if (!schoolId || !name) return null;
+  return {
+    school_id: schoolId,
+    name,
+    province_name: cleanApiString(input?.province_name),
+    city_name: cleanApiString(input?.city_name),
+    level_name: cleanApiString(input?.level_name),
+    type_name: cleanApiString(input?.type_name),
+    nature_name: cleanApiString(input?.nature_name),
+    f211: input?.f211 ?? null,
+    f985: input?.f985 ?? null,
+    dual_class_name: cleanApiString(input?.dual_class_name)
+  };
+}
+
+function cleanApiString(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text || null;
 }
 
 function parseStringList(value: string[] | string | undefined): string[] | undefined {

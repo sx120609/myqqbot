@@ -51,10 +51,21 @@ export interface RuntimeSettings {
     gaokaoCnScoreYears: string;
     gaokaoCnPlanYears: string;
     gaokaoCnRetryLimit: number;
+    gaokaoCnRequestDelayMs: number;
+    gaokaoCnMaxRequestsPerRun: number;
+    gaokaoCnBatchesPerRun: number;
+    gaokaoCnBatchDelayMs: number;
+    gaokaoCnRateLimitCooldownMinutes: number;
+    gaokaoCnSkipExisting: boolean;
   };
 }
 
 const LEGACY_GAOKAO_PROVINCES_DEFAULT = "江苏,浙江,安徽,河南,山东,四川,广东";
+const DEFAULT_GAOKAO_CN_LIMIT = "1";
+const DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS = "60000";
+const DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN = "4";
+const DEFAULT_GAOKAO_CN_BATCH_DELAY_MS = "900000";
+const DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES = "720";
 
 const DEFAULTS: Record<string, string> = {
   "onebot.accessToken": process.env.ONEBOT_ACCESS_TOKEN ?? "",
@@ -84,14 +95,20 @@ const DEFAULTS: Record<string, string> = {
   "sync.gaokaoCnIntervalHours": "24",
   "sync.gaokaoCnPlanIntervalHours": String(defaultAdmissionPlanIntervalHours()),
   "sync.gaokaoCnScoreIntervalHours": String(defaultAdmissionScoreIntervalHours()),
-  "sync.gaokaoCnLimit": "10",
+  "sync.gaokaoCnLimit": DEFAULT_GAOKAO_CN_LIMIT,
   "sync.gaokaoCnQuery": "",
   "sync.gaokaoCnProvinces": "",
   "sync.gaokaoCnSubjectTypes": "",
   "sync.gaokaoCnEligibleOnly": "true",
   "sync.gaokaoCnScoreYears": defaultAdmissionScoreYears().join(","),
   "sync.gaokaoCnPlanYears": defaultAdmissionPlanYears().join(","),
-  "sync.gaokaoCnRetryLimit": "1"
+  "sync.gaokaoCnRetryLimit": "1",
+  "sync.gaokaoCnRequestDelayMs": process.env.GAOKAO_CN_REQUEST_DELAY_MS ?? DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS,
+  "sync.gaokaoCnMaxRequestsPerRun": process.env.GAOKAO_CN_MAX_REQUESTS_PER_RUN ?? DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN,
+  "sync.gaokaoCnBatchesPerRun": process.env.GAOKAO_CN_BATCHES_PER_RUN ?? "1",
+  "sync.gaokaoCnBatchDelayMs": process.env.GAOKAO_CN_BATCH_DELAY_MS ?? DEFAULT_GAOKAO_CN_BATCH_DELAY_MS,
+  "sync.gaokaoCnRateLimitCooldownMinutes": process.env.GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES ?? DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES,
+  "sync.gaokaoCnSkipExisting": process.env.GAOKAO_CN_SKIP_EXISTING ?? "true"
 };
 
 export class SettingsStore {
@@ -159,14 +176,20 @@ export class SettingsStore {
           this.getNumber("sync.gaokaoCnIntervalHours", defaultAdmissionPlanIntervalHours())
         ),
         gaokaoCnScoreIntervalHours: this.getNumber("sync.gaokaoCnScoreIntervalHours", defaultAdmissionScoreIntervalHours()),
-        gaokaoCnLimit: this.getNumber("sync.gaokaoCnLimit", 10),
+        gaokaoCnLimit: this.getNumber("sync.gaokaoCnLimit", Number(DEFAULT_GAOKAO_CN_LIMIT)),
         gaokaoCnQuery: this.getString("sync.gaokaoCnQuery", ""),
         gaokaoCnProvinces: this.getString("sync.gaokaoCnProvinces", ""),
         gaokaoCnSubjectTypes: this.getString("sync.gaokaoCnSubjectTypes", ""),
         gaokaoCnEligibleOnly: this.getBoolean("sync.gaokaoCnEligibleOnly", true),
         gaokaoCnScoreYears: this.getString("sync.gaokaoCnScoreYears", defaultAdmissionScoreYears().join(",")),
         gaokaoCnPlanYears: this.getString("sync.gaokaoCnPlanYears", defaultAdmissionPlanYears().join(",")),
-        gaokaoCnRetryLimit: this.getNumber("sync.gaokaoCnRetryLimit", 1)
+        gaokaoCnRetryLimit: this.getNumber("sync.gaokaoCnRetryLimit", 1),
+        gaokaoCnRequestDelayMs: this.getNumber("sync.gaokaoCnRequestDelayMs", Number(DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS)),
+        gaokaoCnMaxRequestsPerRun: this.getNumber("sync.gaokaoCnMaxRequestsPerRun", Number(DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN)),
+        gaokaoCnBatchesPerRun: this.getNumber("sync.gaokaoCnBatchesPerRun", 1),
+        gaokaoCnBatchDelayMs: this.getNumber("sync.gaokaoCnBatchDelayMs", Number(DEFAULT_GAOKAO_CN_BATCH_DELAY_MS)),
+        gaokaoCnRateLimitCooldownMinutes: this.getNumber("sync.gaokaoCnRateLimitCooldownMinutes", Number(DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES)),
+        gaokaoCnSkipExisting: this.getBoolean("sync.gaokaoCnSkipExisting", true)
       }
     };
   }
@@ -237,6 +260,16 @@ export class SettingsStore {
       upgradeStmt.run("1600", now, "llm.maxTokens", "900");
       upgradeStmt.run("120000", now, "llm.timeoutMs", "45000");
       upgradeStmt.run("", now, "sync.gaokaoCnProvinces", LEGACY_GAOKAO_PROVINCES_DEFAULT);
+      upgradeStmt.run(DEFAULT_GAOKAO_CN_LIMIT, now, "sync.gaokaoCnLimit", "10");
+      upgradeStmt.run("1", now, "sync.gaokaoCnRetryLimit", "0");
+      upgradeStmt.run(DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS, now, "sync.gaokaoCnRequestDelayMs", "5000");
+      upgradeStmt.run(DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS, now, "sync.gaokaoCnRequestDelayMs", "12000");
+      upgradeStmt.run(DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS, now, "sync.gaokaoCnRequestDelayMs", "30000");
+      upgradeStmt.run(DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN, now, "sync.gaokaoCnMaxRequestsPerRun", "12");
+      upgradeStmt.run(DEFAULT_GAOKAO_CN_BATCH_DELAY_MS, now, "sync.gaokaoCnBatchDelayMs", "60000");
+      upgradeStmt.run(DEFAULT_GAOKAO_CN_BATCH_DELAY_MS, now, "sync.gaokaoCnBatchDelayMs", "300000");
+      upgradeStmt.run(DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES, now, "sync.gaokaoCnRateLimitCooldownMinutes", "180");
+      upgradeStmt.run(DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES, now, "sync.gaokaoCnRateLimitCooldownMinutes", "360");
     });
   }
 }

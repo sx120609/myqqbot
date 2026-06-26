@@ -392,6 +392,14 @@ th {
   font-weight: 600;
 }
 
+.row-actions {
+  white-space: nowrap;
+}
+
+.row-actions button + button {
+  margin-left: 8px;
+}
+
 tr.selected,
 tbody tr:hover {
   background: #eef6f5;

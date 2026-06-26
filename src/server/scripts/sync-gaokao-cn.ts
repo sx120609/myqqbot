@@ -1,5 +1,6 @@
 import { loadConfig } from "../config.js";
 import { AppDatabase } from "../db.js";
+import { SettingsStore } from "../settings.js";
 import { AdmissionRepository } from "../services/admission-repository.js";
 import { defaultAdmissionPlanYears, defaultAdmissionScoreYears } from "../services/admission-calendar.js";
 import { GaokaoCnAdapter, type GaokaoCnSyncOptions, type GaokaoCnSyncResult } from "../services/gaokao-cn-adapter.js";
@@ -19,16 +20,18 @@ if (cli.flags.has("help") || cli.flags.has("h")) {
 
 const config = loadConfig();
 const database = new AppDatabase(config.dbPath);
+const settings = new SettingsStore(database);
 const universities = new UniversityRepository(database);
 const admissions = new AdmissionRepository(database);
 const sync = new GaokaoCnAdapter(universities, admissions, (message) => {
   console.log(`[sync:gaokao-cn] ${message}`);
-});
+}, settings);
 
 try {
   const options = buildSyncOptions(cli);
   const loop = optionBoolean(cli, ["loop", "all"], process.env.GAOKAO_CN_SYNC_LOOP, false);
   const maxBatches = Math.max(1, optionNumber(cli, ["max-batches"], process.env.GAOKAO_CN_MAX_BATCHES, loop ? 100 : 1));
+  const batchDelayMs = Math.max(0, optionNumber(cli, ["batch-delay-ms"], process.env.GAOKAO_CN_BATCH_DELAY_MS, loop ? 900_000 : 0));
   const continueOnError = optionBoolean(cli, ["continue-on-error"], process.env.GAOKAO_CN_CONTINUE_ON_ERROR, false);
   const aggregate = createAggregate();
   let offset = options.offset ?? 0;
@@ -42,6 +45,17 @@ try {
     appendAggregate(aggregate, result);
     printResult(result);
 
+    if (hasRateLimitErrors(result)) {
+      console.log("[sync:gaokao-cn] Gaokao.cn rate limit detected. Stop now and retry later with --request-delay-ms=60000 or a smaller --max-source-requests value.");
+      break;
+    }
+    if (result.requestBudgetExhausted) {
+      console.log("[sync:gaokao-cn] Source request budget exhausted. Stop this run and continue later from the same offset with --skip-existing.");
+      if (!batchOptions.skipExisting) {
+        console.log("[sync:gaokao-cn] Warning: --skip-existing is disabled, so the next run may repeat the same covered endpoints and hit Gaokao.cn again.");
+      }
+      break;
+    }
     if (result.errors.length && !continueOnError) {
       console.log("[sync:gaokao-cn] Stopped because this batch has errors. Use --continue-on-error to keep going.");
       break;
@@ -51,11 +65,15 @@ try {
       break;
     }
     offset = result.nextOffset;
+    if (batchDelayMs > 0 && batch < maxBatches) {
+      console.log(`[sync:gaokao-cn] Waiting ${formatDuration(batchDelayMs)} before the next batch...`);
+      await delay(batchDelayMs);
+    }
   }
 
   if (aggregate.batches > 1) {
     console.log(
-      `[sync:gaokao-cn] Total ${aggregate.mapped}/${aggregate.total} mapped in ${aggregate.batches} batches. Plans: ${aggregate.planRows}. School scores: ${aggregate.schoolScoreRows}. Major scores: ${aggregate.majorScoreRows}. Sources: ${aggregate.sourceRows}. Errors: ${aggregate.errors}.`
+      `[sync:gaokao-cn] Total ${aggregate.mapped}/${aggregate.total} mapped in ${aggregate.batches} batches. Plans: ${aggregate.planRows}. School scores: ${aggregate.schoolScoreRows}. Major scores: ${aggregate.majorScoreRows}. Sources: ${aggregate.sourceRows}. Source requests: ${aggregate.sourceRequests}. Skipped existing requests: ${aggregate.skippedRequests}. Errors: ${aggregate.errors}.`
     );
   }
 } finally {
@@ -72,7 +90,7 @@ function buildSyncOptions(cliOptions: CliOptions): GaokaoCnSyncOptions {
 
   return {
     query: optionString(cliOptions, ["query", "q"], process.env.GAOKAO_CN_SYNC_QUERY),
-    limit: optionNumber(cliOptions, ["limit"], process.env.GAOKAO_CN_SYNC_LIMIT, 10),
+    limit: optionNumber(cliOptions, ["limit"], process.env.GAOKAO_CN_SYNC_LIMIT, 1),
     offset: optionNumberOptional(cliOptions, ["offset"], process.env.GAOKAO_CN_SYNC_OFFSET),
     universityId: optionNumberOptional(cliOptions, ["university-id", "university"], process.env.GAOKAO_CN_UNIVERSITY_ID),
     provinces: optionList(cliOptions, ["province", "provinces"], process.env.GAOKAO_CN_PROVINCES),
@@ -100,7 +118,11 @@ function buildSyncOptions(cliOptions: CliOptions): GaokaoCnSyncOptions {
     eligibleOnly:
       optionBoolean(cliOptions, ["no-eligible-only"], undefined, false)
         ? false
-        : envBoolean(process.env.GAOKAO_CN_ELIGIBLE_ONLY, true)
+        : envBoolean(process.env.GAOKAO_CN_ELIGIBLE_ONLY, true),
+    requestDelayMs: optionNumber(cliOptions, ["request-delay-ms", "delay-ms"], process.env.GAOKAO_CN_REQUEST_DELAY_MS, 60000),
+    rateLimitCooldownMinutes: optionNumber(cliOptions, ["rate-limit-cooldown-minutes", "cooldown-minutes"], process.env.GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES, 720),
+    maxSourceRequests: optionNumber(cliOptions, ["max-source-requests", "request-budget"], process.env.GAOKAO_CN_MAX_REQUESTS_PER_RUN, 4),
+    skipExisting: optionBoolean(cliOptions, ["skip-existing"], process.env.GAOKAO_CN_SKIP_EXISTING, true)
   };
 }
 
@@ -203,6 +225,8 @@ function createAggregate() {
     schoolScoreRows: 0,
     majorScoreRows: 0,
     sourceRows: 0,
+    sourceRequests: 0,
+    skippedRequests: 0,
     errors: 0
   };
 }
@@ -215,12 +239,14 @@ function appendAggregate(aggregate: ReturnType<typeof createAggregate>, result: 
   aggregate.schoolScoreRows += result.schoolScoreRows;
   aggregate.majorScoreRows += result.majorScoreRows;
   aggregate.sourceRows += result.sourceRows;
+  aggregate.sourceRequests += result.sourceRequests;
+  aggregate.skippedRequests += result.skippedRequests;
   aggregate.errors += result.errors.length;
 }
 
 function printResult(result: GaokaoCnSyncResult): void {
   console.log(
-    `Synced ${result.mapped}/${result.total} Gaokao.cn mappings at offset ${result.offset}/${result.candidateTotal}, next offset ${result.nextOffset}. Plans: ${result.planRows}. School scores: ${result.schoolScoreRows}. Major scores: ${result.majorScoreRows}. Sources: ${result.sourceRows}. Errors: ${result.errors.length}.`
+    `Synced ${result.mapped}/${result.total} Gaokao.cn mappings at offset ${result.offset}/${result.candidateTotal}, next offset ${result.nextOffset}. Plans: ${result.planRows}. School scores: ${result.schoolScoreRows}. Major scores: ${result.majorScoreRows}. Sources: ${result.sourceRows}. Source requests: ${result.sourceRequests}/${result.sourceRequestBudget ?? "unlimited"}. Skipped existing requests: ${result.skippedRequests}. Budget exhausted: ${result.requestBudgetExhausted ? "yes" : "no"}. Errors: ${result.errors.length}.`
   );
   if (result.errors.length) {
     for (const error of result.errors.slice(0, 20)) {
@@ -246,10 +272,14 @@ function renderContinuationCommand(options: GaokaoCnSyncOptions, nextOffset: num
   if (options.subjectTypes?.length) args.push(`--subjects=${quoteArg(options.subjectTypes.join(","))}`);
   if (options.planYears?.length) args.push(`--plan-years=${options.planYears.join(",")}`);
   if (options.scoreYears?.length) args.push(`--score-years=${options.scoreYears.join(",")}`);
+  if (options.requestDelayMs !== undefined) args.push(`--request-delay-ms=${options.requestDelayMs}`);
+  if (options.rateLimitCooldownMinutes !== undefined) args.push(`--rate-limit-cooldown-minutes=${options.rateLimitCooldownMinutes}`);
+  if (options.maxSourceRequests !== undefined) args.push(`--max-source-requests=${options.maxSourceRequests}`);
   if (options.includePlans === true && options.includeScores === false) args.push("--plans-only");
   if (options.includePlans === false && options.includeScores === true) args.push("--scores-only");
   if (options.includeSpecialScores === false) args.push("--no-special-scores");
   if (options.eligibleOnly === false) args.push("--no-eligible-only");
+  if (options.skipExisting) args.push("--skip-existing");
   return `npm run sync:gaokao-cn -- ${args.join(" ")}`;
 }
 
@@ -268,6 +298,10 @@ function describeBatch(options: GaokaoCnSyncOptions): string {
     options.subjectTypes?.length ? `subjects=${options.subjectTypes.join(",")}` : "subjects=auto",
     options.planYears?.length && options.includePlans !== false ? `planYears=${options.planYears.join(",")}` : null,
     options.scoreYears?.length && options.includeScores !== false ? `scoreYears=${options.scoreYears.join(",")}` : null,
+    `requestDelayMs=${options.requestDelayMs ?? 60000}`,
+    `cooldownMinutes=${options.rateLimitCooldownMinutes ?? 720}`,
+    `maxSourceRequests=${options.maxSourceRequests ?? 4}`,
+    options.skipExisting ? "skipExisting=on" : null,
     options.includePlans === false ? "plans=off" : null,
     options.includeScores === false ? "scores=off" : null
   ]
@@ -280,7 +314,7 @@ function printUsage(): void {
   npm run sync:gaokao-cn -- [options]
 
 Common:
-  --limit=10                    同步本批学校数，默认 10。
+  --limit=1                     同步本批学校数，默认 1。
   --offset=0                    从候选学校列表的第几个开始，适合续跑。
   --query=南航                  只同步名称匹配的学校。
   --university-id=123           只同步本地库里的某个学校 ID。
@@ -288,6 +322,12 @@ Common:
   --subjects=理科,文科          限制科类；留空按省份和年份自动选择。
   --plan-years=2026             招生计划年份，默认当前计划年份。
   --score-years=2025,2024,2023  分数线年份，默认近三年历史年份。
+  --request-delay-ms=60000      每次请求掌上高考之间的最小间隔；默认 60000，生产环境最低会抬到 10000。
+  --batch-delay-ms=900000       loop 多批同步时，每批之间的等待时间；默认 900000。
+  --rate-limit-cooldown-minutes=720
+                                遇到 1069 后，本进程内暂停请求源站多久；默认 720。
+  --max-source-requests=4       每批最多启动多少次掌上高考源站请求；0 表示不限。默认 4。
+  --skip-existing               跳过本地已有覆盖的计划/分数接口，默认开启；如需强制重抓可传 --skip-existing=false。
 
 Mode:
   --plans-only                  只抓招生计划。
@@ -300,6 +340,26 @@ Mode:
 
 Environment variables remain supported:
   GAOKAO_CN_SYNC_LIMIT, GAOKAO_CN_SYNC_OFFSET, GAOKAO_CN_PROVINCES,
-  GAOKAO_CN_SUBJECT_TYPES, GAOKAO_CN_PLAN_YEARS, GAOKAO_CN_SCORE_YEARS.
+  GAOKAO_CN_SUBJECT_TYPES, GAOKAO_CN_PLAN_YEARS, GAOKAO_CN_SCORE_YEARS,
+  GAOKAO_CN_REQUEST_DELAY_MS, GAOKAO_CN_BATCH_DELAY_MS,
+  GAOKAO_CN_MAX_REQUESTS_PER_RUN, GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES,
+  GAOKAO_CN_SKIP_EXISTING.
 `);
+}
+
+function hasRateLimitErrors(result: GaokaoCnSyncResult): boolean {
+  return result.errors.some((error) => /\b1069\b|访问太过频繁|请稍后再试|HTTP 429|too many requests|rate limit/i.test(error.message));
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest ? `${minutes}m${rest}s` : `${minutes}m`;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }

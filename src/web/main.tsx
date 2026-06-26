@@ -98,6 +98,8 @@ interface SyncSchedulerStatus {
       nextRunAt: string | null;
       cursorOffset?: number | null;
       lastResult?: GaokaoSchedulerResult | null;
+      cooldownUntil?: string | null;
+      retryAt?: string | null;
     };
     srgaoxiao: {
       enabled: boolean;
@@ -109,6 +111,8 @@ interface SyncSchedulerStatus {
       nextRunAt: string | null;
       cursorOffset?: number | null;
       lastResult?: GaokaoSchedulerResult | null;
+      cooldownUntil?: string | null;
+      retryAt?: string | null;
     };
     gaokaoCnPlan: {
       enabled: boolean;
@@ -120,6 +124,8 @@ interface SyncSchedulerStatus {
       nextRunAt: string | null;
       cursorOffset?: number | null;
       lastResult?: GaokaoSchedulerResult | null;
+      cooldownUntil?: string | null;
+      retryAt?: string | null;
     };
     gaokaoCnScore: {
       enabled: boolean;
@@ -131,12 +137,15 @@ interface SyncSchedulerStatus {
       nextRunAt: string | null;
       cursorOffset?: number | null;
       lastResult?: GaokaoSchedulerResult | null;
+      cooldownUntil?: string | null;
+      retryAt?: string | null;
     };
   };
 }
 
 interface GaokaoSchedulerResult {
   ok: boolean;
+  batchCount?: number;
   total: number;
   candidateTotal: number;
   offset: number;
@@ -146,8 +155,13 @@ interface GaokaoSchedulerResult {
   schoolScoreRows: number;
   majorScoreRows: number;
   sourceRows: number;
+  sourceRequests?: number;
+  sourceRequestBudget?: number | null;
+  requestBudgetExhausted?: boolean;
+  skippedRequests?: number;
   skipped: number;
   errorCount: number;
+  errors?: Array<{ university?: string; message?: string }>;
   savedAt: string;
 }
 
@@ -238,6 +252,27 @@ interface AdmissionCoverage {
   latestSourceFetchedAt: string | null;
   planYears: AdmissionCoverageYear[];
   scoreYears: AdmissionCoverageYear[];
+}
+
+interface AdmissionCoverageGap {
+  kind: "plan" | "school_score" | "major_score";
+  year: number;
+  provinceName: string;
+  subjectType: string | null;
+  totalMappedUniversities: number;
+  coveredUniversities: number;
+  missingUniversities: number;
+  rowCount: number;
+  coverageRatio: number;
+}
+
+interface AdmissionCoverageMissingUniversity {
+  universityId: number;
+  universityName: string;
+  sourceSchoolId: string;
+  sourceSchoolName: string;
+  matchStatus: string;
+  updatedAt: string;
 }
 
 interface AdmissionUnmappedUniversity {
@@ -818,6 +853,9 @@ function AdmissionsPage() {
   const [scheduler, setScheduler] = useState<SyncSchedulerStatus | null>(null);
   const [universities, setUniversities] = useState<University[]>([]);
   const [coverage, setCoverage] = useState<AdmissionCoverage | null>(null);
+  const [coverageGaps, setCoverageGaps] = useState<AdmissionCoverageGap[]>([]);
+  const [coverageMissingGap, setCoverageMissingGap] = useState<AdmissionCoverageGap | null>(null);
+  const [coverageMissingRows, setCoverageMissingRows] = useState<AdmissionCoverageMissingUniversity[]>([]);
   const [unmapped, setUnmapped] = useState<AdmissionUnmappedUniversity[]>([]);
   const [mappingIssues, setMappingIssues] = useState<AdmissionMappingIssue[]>([]);
   const [mappings, setMappings] = useState<AdmissionMapping[]>([]);
@@ -827,10 +865,12 @@ function AdmissionsPage() {
   const [jobStatus, setJobStatus] = useState("");
   const [jobType, setJobType] = useState("");
   const [schoolQuery, setSchoolQuery] = useState("");
-  const [syncLimit, setSyncLimit] = useState("5");
+  const [syncLimit, setSyncLimit] = useState("1");
   const [syncOffset, setSyncOffset] = useState("0");
   const [manualProvince, setManualProvince] = useState("");
   const [manualSubjectTypes, setManualSubjectTypes] = useState("");
+  const [manualPlanYears, setManualPlanYears] = useState("");
+  const [manualScoreYears, setManualScoreYears] = useState("");
   const [manualIncludePlans, setManualIncludePlans] = useState(true);
   const [manualIncludeScores, setManualIncludeScores] = useState(true);
   const [manualIncludeSpecialScores, setManualIncludeSpecialScores] = useState(true);
@@ -839,6 +879,7 @@ function AdmissionsPage() {
   const [querySubject, setQuerySubject] = useState("");
   const [queryYears, setQueryYears] = useState(DEFAULT_ADMISSION_QUERY_YEARS);
   const [queryBatch, setQueryBatch] = useState("");
+  const [queryPlanGroup, setQueryPlanGroup] = useState("");
   const [queryScoreType, setQueryScoreType] = useState("");
   const [queryMajor, setQueryMajor] = useState("");
   const [plans, setPlans] = useState<AdmissionPlan[]>([]);
@@ -880,6 +921,19 @@ function AdmissionsPage() {
     return params;
   };
 
+  const buildCoverageGapQuery = (settingsData: Record<string, string | boolean>) => {
+    const params = new URLSearchParams({ limit: "24" });
+    const planYears = String(settingsData["sync.gaokaoCnPlanYears"] ?? "");
+    const scoreYears = String(settingsData["sync.gaokaoCnScoreYears"] ?? "");
+    const provinces = String(settingsData["sync.gaokaoCnProvinces"] ?? "");
+    const subjectTypes = String(settingsData["sync.gaokaoCnSubjectTypes"] ?? "");
+    if (planYears) params.set("planYears", planYears);
+    if (scoreYears) params.set("scoreYears", scoreYears);
+    if (provinces) params.set("provinces", provinces);
+    if (subjectTypes) params.set("subjectTypes", subjectTypes);
+    return params;
+  };
+
   const load = async () => {
     const [settingsData, schedulerData, coverageData, unmappedData, issueData, mappingData, jobData, failedJobData, sourceData, universityData] = await Promise.all([
       api<Record<string, string | boolean>>("/api/settings"),
@@ -893,9 +947,11 @@ function AdmissionsPage() {
       api<AdmissionSourceSnapshot[]>(`/api/admissions/sources?${buildSourceQuery().toString()}`),
       api<University[]>(`/api/universities?query=${encodeURIComponent(schoolQuery)}&limit=120`)
     ]);
+    const coverageGapData = await api<AdmissionCoverageGap[]>(`/api/admissions/coverage-gaps?${buildCoverageGapQuery(settingsData).toString()}`);
     setSettings(settingsData);
     setScheduler(schedulerData);
     setCoverage(coverageData);
+    setCoverageGaps(coverageGapData);
     setUnmapped(unmappedData);
     setMappingIssues(issueData);
     setMappings(mappingData);
@@ -927,26 +983,87 @@ function AdmissionsPage() {
   const syncGaokao = async (singleUniversityId?: number) => {
     setStatus("掌上高考同步中，学校和省份较多时会需要一会儿...");
     try {
-      const result = await api<{ mapped: number; total: number; candidateTotal: number; offset: number; nextOffset: number; planRows: number; schoolScoreRows: number; majorScoreRows: number; errors: unknown[] }>("/api/data/sync-gaokao-cn", {
+      const skipExisting = settings["sync.gaokaoCnSkipExisting"] !== "false";
+      const result = await api<{ mapped: number; total: number; candidateTotal: number; offset: number; nextOffset: number; planRows: number; schoolScoreRows: number; majorScoreRows: number; sourceRequests?: number; sourceRequestBudget?: number | null; requestBudgetExhausted?: boolean; skippedRequests?: number; errors: unknown[] }>("/api/data/sync-gaokao-cn", {
         method: "POST",
         body: JSON.stringify({
           query: singleUniversityId ? undefined : schoolQuery,
           universityId: singleUniversityId,
-          limit: Number(syncLimit) || Number(settings["sync.gaokaoCnLimit"] ?? "5") || 5,
+          limit: Number(syncLimit) || Number(settings["sync.gaokaoCnLimit"] ?? "1") || 1,
           offset: singleUniversityId ? 0 : Number(syncOffset) || 0,
           provinces: manualProvince || String(settings["sync.gaokaoCnProvinces"] ?? ""),
           subjectTypes: manualSubjectTypes || String(settings["sync.gaokaoCnSubjectTypes"] ?? ""),
-          scoreYears: String(settings["sync.gaokaoCnScoreYears"] ?? ""),
-          planYears: String(settings["sync.gaokaoCnPlanYears"] ?? ""),
+          scoreYears: manualScoreYears || String(settings["sync.gaokaoCnScoreYears"] ?? ""),
+          planYears: manualPlanYears || String(settings["sync.gaokaoCnPlanYears"] ?? ""),
           includePlans: manualIncludePlans,
           includeScores: manualIncludeScores,
           includeSpecialScores: manualIncludeScores && manualIncludeSpecialScores,
-          eligibleOnly: settings["sync.gaokaoCnEligibleOnly"] !== "false"
+          eligibleOnly: settings["sync.gaokaoCnEligibleOnly"] !== "false",
+          requestDelayMs: Number(settings["sync.gaokaoCnRequestDelayMs"] ?? "60000") || 60000,
+          maxSourceRequests: Number(settings["sync.gaokaoCnMaxRequestsPerRun"] ?? "4") || 0,
+          skipExisting
         })
       });
-      setStatus(`同步完成：本批 ${result.total}/${result.candidateTotal || result.total} 所，offset ${result.offset} → ${result.nextOffset}，映射 ${result.mapped}，计划 ${result.planRows}，院校线 ${result.schoolScoreRows}，专业线 ${result.majorScoreRows}${result.errors.length ? `，失败 ${result.errors.length} 个，已保留当前 offset 便于重试` : ""}`);
-      if (!singleUniversityId && !result.errors.length) setSyncOffset(String(result.nextOffset));
+      const budgetText = result.requestBudgetExhausted ? `，请求预算 ${result.sourceRequests ?? 0}/${result.sourceRequestBudget ?? "不限"} 已用完，offset 保持不变` : "";
+      const skipHint = result.requestBudgetExhausted && !skipExisting ? "；当前未开启“跳过已有覆盖”，下轮可能重复抓同一批数据，建议开启后再继续" : "";
+      setStatus(`同步完成：本批 ${result.total}/${result.candidateTotal || result.total} 所，offset ${result.offset} → ${result.nextOffset}，映射 ${result.mapped}，计划 ${result.planRows}，院校线 ${result.schoolScoreRows}，专业线 ${result.majorScoreRows}，跳过已有 ${result.skippedRequests ?? 0} 个请求${budgetText}${skipHint}${result.errors.length ? `，失败 ${result.errors.length} 个，已保留当前 offset 便于重试` : ""}`);
+      if (!singleUniversityId && !result.errors.length && !result.requestBudgetExhausted) setSyncOffset(String(result.nextOffset));
       await load();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const fillSyncFromCoverageGap = (gap: AdmissionCoverageGap) => {
+    setManualProvince(gap.provinceName);
+    setManualSubjectTypes(gap.subjectType ?? "");
+    setSyncOffset("0");
+    if (gap.kind === "plan") {
+      setManualIncludePlans(true);
+      setManualIncludeScores(false);
+      setManualIncludeSpecialScores(false);
+      setManualPlanYears(String(gap.year));
+      setManualScoreYears("");
+    } else {
+      setManualIncludePlans(false);
+      setManualIncludeScores(true);
+      setManualIncludeSpecialScores(gap.kind === "major_score");
+      setManualPlanYears("");
+      setManualScoreYears(String(gap.year));
+    }
+    setStatus(`已填入 ${gap.provinceName} ${gap.subjectType ?? "自动科类"} ${gap.year} ${formatCoverageGapKind(gap.kind)} 的同步条件，可在手动同步区直接执行。`);
+  };
+
+  const loadCoverageGapMissing = async (gap: AdmissionCoverageGap) => {
+    fillSyncFromCoverageGap(gap);
+    setCoverageMissingGap(gap);
+    setStatus(`读取 ${gap.provinceName} ${gap.year} ${formatCoverageGapKind(gap.kind)} 缺口学校...`);
+    try {
+      const params = new URLSearchParams({
+        kind: gap.kind,
+        year: String(gap.year),
+        province: gap.provinceName,
+        limit: "80"
+      });
+      if (gap.subjectType) params.set("subjectType", gap.subjectType);
+      const rows = await api<AdmissionCoverageMissingUniversity[]>(`/api/admissions/coverage-gaps/missing?${params.toString()}`);
+      setCoverageMissingRows(rows);
+      setStatus(`缺口学校已读取：${rows.length} 所；同步条件已填入手动同步区。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const resetGaokaoProgress = async (target: "plan" | "score") => {
+    const label = target === "plan" ? "计划" : "分数";
+    setStatus(`重置掌上高考${label}同步进度中...`);
+    try {
+      await api("/api/sync-scheduler/gaokao-cn/reset", {
+        method: "POST",
+        body: JSON.stringify({ target })
+      });
+      await load();
+      setStatus(`掌上高考${label}同步进度已重置，下次定时同步将从 offset 0 开始。`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -961,6 +1078,7 @@ function AdmissionsPage() {
       if (querySubject) params.set("subject", querySubject);
       if (queryYears) params.set("years", queryYears);
       if (queryBatch) params.set("batch", queryBatch);
+      if (queryPlanGroup) params.set("planGroup", queryPlanGroup);
       if (queryScoreType) params.set("scoreType", queryScoreType);
       if (queryMajor) params.set("major", queryMajor);
       params.set("limit", "120");
@@ -1000,9 +1118,10 @@ function AdmissionsPage() {
     if (!manualUniversityId || !manualSchoolId) return;
     setStatus("保存学校映射中...");
     try {
+      const sourceSchool = sourceSchoolCandidates.find((row) => String(row.school_id) === manualSchoolId);
       await api(`/api/admissions/mappings/${manualUniversityId}`, {
         method: "PUT",
-        body: JSON.stringify({ sourceSchoolId: manualSchoolId, sourceSchoolName: manualSchoolName })
+        body: JSON.stringify({ sourceSchoolId: manualSchoolId, sourceSchoolName: manualSchoolName, sourceSchool })
       });
       setManualSchoolId("");
       setManualSchoolName("");
@@ -1054,6 +1173,7 @@ function AdmissionsPage() {
       <Header title="招生数据" subtitle="使用掌上高考补充分省招生计划、历年分数线和最低位次。" />
       <Panel title="覆盖进度" icon={<Activity size={18} />}>
         <div className="metrics">
+          <Metric label="源站状态" value={formatGaokaoSourceStatus(scheduler)} tone={gaokaoSourceCooldownUntil(scheduler) ? "warn" : "good"} />
           <Metric label="有效映射" value={coverageRatio(coverage?.mappedUniversities, coverage?.totalUniversities)} tone={coverage?.unmappedUniversities ? "warn" : "good"} />
           <Metric label="待尝试" value={String(coverage?.pendingUniversities ?? 0)} tone={coverage?.pendingUniversities ? "warn" : "good"} />
           <Metric label="匹配问题" value={`${coverage?.mappingIssueUniversities ?? 0} / 未匹配 ${coverage?.unmatchedUniversities ?? 0} / 歧义 ${coverage?.ambiguousUniversities ?? 0}`} tone={coverage?.mappingIssueUniversities ? "warn" : "good"} />
@@ -1071,6 +1191,49 @@ function AdmissionsPage() {
           <KeyValue label="计划年份覆盖" value={formatCoverageYears(coverage?.planYears)} />
           <KeyValue label="分数年份覆盖" value={formatCoverageYears(coverage?.scoreYears)} />
         </div>
+        <div className="table-wrap compact-table">
+          <table>
+            <thead><tr><th>最大缺口</th><th>年份</th><th>省份</th><th>科类</th><th>覆盖学校</th><th>缺口</th><th>行数</th><th></th></tr></thead>
+            <tbody>
+              {coverageGaps.map((gap) => (
+                <tr key={`${gap.kind}-${gap.year}-${gap.provinceName}-${gap.subjectType ?? "auto"}`}>
+                  <td>{formatCoverageGapKind(gap.kind)}</td>
+                  <td>{gap.year}</td>
+                  <td>{gap.provinceName}</td>
+                  <td>{gap.subjectType ?? "-"}</td>
+                  <td>{coverageRatio(gap.coveredUniversities, gap.totalMappedUniversities)}</td>
+                  <td>{gap.missingUniversities}</td>
+                  <td>{gap.rowCount}</td>
+                  <td className="row-actions">
+                    <button onClick={() => fillSyncFromCoverageGap(gap)}><Save size={14} />填入同步</button>
+                    <button onClick={() => void loadCoverageGapMissing(gap)}><Search size={14} />缺口学校</button>
+                  </td>
+                </tr>
+              ))}
+              {!coverageGaps.length && <tr><td colSpan={8}>暂无缺口统计。</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        {coverageMissingGap && (
+          <div className="table-wrap compact-table">
+            <table>
+              <thead><tr><th>缺口学校</th><th>掌上高考</th><th>ID</th><th>映射</th><th>更新时间</th><th></th></tr></thead>
+              <tbody>
+                {coverageMissingRows.map((row) => (
+                  <tr key={row.universityId}>
+                    <td>{row.universityName}</td>
+                    <td>{row.sourceSchoolName}</td>
+                    <td>{row.sourceSchoolId}</td>
+                    <td>{row.matchStatus}</td>
+                    <td>{formatTime(row.updatedAt)}</td>
+                    <td><button onClick={() => void syncGaokao(row.universityId)}><RefreshCcw size={14} />同步此校</button></td>
+                  </tr>
+                ))}
+                {!coverageMissingRows.length && <tr><td colSpan={6}>当前缺口没有可列出的已映射学校。</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        )}
         <div className="split">
           <div className="table-wrap compact-table">
             <table>
@@ -1112,23 +1275,36 @@ function AdmissionsPage() {
         <div className="toggle-row">
           <Switch label="定期同步掌上高考" checked={settings["sync.gaokaoCnAutoEnabled"] === "true"} onChange={(v) => updateSetting("sync.gaokaoCnAutoEnabled", String(v))} />
           <Switch label="仅同步中文院校候选" checked={settings["sync.gaokaoCnEligibleOnly"] !== "false"} onChange={(v) => updateSetting("sync.gaokaoCnEligibleOnly", String(v))} />
+          <Switch label="跳过已有覆盖" checked={settings["sync.gaokaoCnSkipExisting"] !== "false"} onChange={(v) => updateSetting("sync.gaokaoCnSkipExisting", String(v))} />
         </div>
+        {settings["sync.gaokaoCnSkipExisting"] === "false" && (
+          <p className="notice">当前没有开启“跳过已有覆盖”。全量补数据时如果请求预算暂停，下一轮会从同一 offset 重新抓，容易重复请求源站。</p>
+        )}
         <FormGrid>
           <Input label="计划间隔小时" value={String(settings["sync.gaokaoCnPlanIntervalHours"] ?? DEFAULT_ADMISSION_PLAN_INTERVAL_HOURS)} onChange={(v) => updateSetting("sync.gaokaoCnPlanIntervalHours", v)} />
           <Input label="分数间隔小时" value={String(settings["sync.gaokaoCnScoreIntervalHours"] ?? DEFAULT_ADMISSION_SCORE_INTERVAL_HOURS)} onChange={(v) => updateSetting("sync.gaokaoCnScoreIntervalHours", v)} />
-          <Input label="每次学校数" value={String(settings["sync.gaokaoCnLimit"] ?? "10")} onChange={(v) => updateSetting("sync.gaokaoCnLimit", v)} />
+          <Input label="每次学校数" value={String(settings["sync.gaokaoCnLimit"] ?? "1")} onChange={(v) => updateSetting("sync.gaokaoCnLimit", v)} hint="掌上高考容易限流，建议长期保持 1；需要更快时优先缩小省份和年份。" />
           <Input label="学校范围" value={String(settings["sync.gaokaoCnQuery"] ?? "")} onChange={(v) => updateSetting("sync.gaokaoCnQuery", v)} />
           <Input label="省份范围" value={String(settings["sync.gaokaoCnProvinces"] ?? "")} onChange={(v) => updateSetting("sync.gaokaoCnProvinces", v)} hint="留空同步全国省份；填省名可限制范围。" />
           <Input label="科类范围" value={String(settings["sync.gaokaoCnSubjectTypes"] ?? "")} onChange={(v) => updateSetting("sync.gaokaoCnSubjectTypes", v)} hint="留空按省份和年份自动选择：综合改革、物理/历史或理科/文科。" />
           <Input label="分数年份" value={String(settings["sync.gaokaoCnScoreYears"] ?? DEFAULT_ADMISSION_SCORE_YEARS)} onChange={(v) => updateSetting("sync.gaokaoCnScoreYears", v)} />
           <Input label="计划年份" value={String(settings["sync.gaokaoCnPlanYears"] ?? DEFAULT_ADMISSION_PLAN_YEARS)} onChange={(v) => updateSetting("sync.gaokaoCnPlanYears", v)} />
-          <Input label="失败重试次数" value={String(settings["sync.gaokaoCnRetryLimit"] ?? "1")} onChange={(v) => updateSetting("sync.gaokaoCnRetryLimit", v)} />
+          <Input label="每轮批次数" value={String(settings["sync.gaokaoCnBatchesPerRun"] ?? "1")} onChange={(v) => updateSetting("sync.gaokaoCnBatchesPerRun", v)} hint="定时任务每次触发时连续跑几批；全量补数据可设 2-5。" />
+          <Input label="批次间隔毫秒" value={String(settings["sync.gaokaoCnBatchDelayMs"] ?? "900000")} onChange={(v) => updateSetting("sync.gaokaoCnBatchDelayMs", v)} hint="每轮多批同步时，批与批之间等待多久；建议不少于 900000。" />
+          <Input label="请求间隔毫秒" value={String(settings["sync.gaokaoCnRequestDelayMs"] ?? "60000")} onChange={(v) => updateSetting("sync.gaokaoCnRequestDelayMs", v)} hint="默认 60000；生产环境最低按 10000 执行，频繁 1069 时继续调高。" />
+          <Input label="每批请求预算" value={String(settings["sync.gaokaoCnMaxRequestsPerRun"] ?? "4")} onChange={(v) => updateSetting("sync.gaokaoCnMaxRequestsPerRun", v)} hint="每批最多启动多少个掌上高考接口；0 表示不限。预算用完会保留 offset，下轮继续。" />
+          <Input label="限流冷却分钟" value={String(settings["sync.gaokaoCnRateLimitCooldownMinutes"] ?? "720")} onChange={(v) => updateSetting("sync.gaokaoCnRateLimitCooldownMinutes", v)} hint="遇到 1069 后定时任务、手动同步和 QQ 临时补数都会暂停源站请求。" />
+          <Input label="失败重试次数" value={String(settings["sync.gaokaoCnRetryLimit"] ?? "1")} onChange={(v) => updateSetting("sync.gaokaoCnRetryLimit", v)} hint="仅普通错误会延迟重试；1069 限流不会重试，只进入冷却。" />
         </FormGrid>
         <div className="scheduler-grid">
-          <KeyValue label="计划状态" value={scheduler?.jobs.gaokaoCnPlan.running ? "运行中" : scheduler?.jobs.gaokaoCnPlan.enabled ? "已启用" : "未启用"} />
+          <KeyValue label="计划状态" value={formatGaokaoSchedulerState(scheduler?.jobs.gaokaoCnPlan)} />
           <KeyValue label="计划下次" value={formatScheduleTime(scheduler?.jobs.gaokaoCnPlan.nextRunAt)} />
-          <KeyValue label="分数状态" value={scheduler?.jobs.gaokaoCnScore.running ? "运行中" : scheduler?.jobs.gaokaoCnScore.enabled ? "已启用" : "未启用"} />
+          <KeyValue label="计划冷却到" value={formatScheduleTime(scheduler?.jobs.gaokaoCnPlan.cooldownUntil)} />
+          <KeyValue label="计划待重试到" value={formatScheduleTime(scheduler?.jobs.gaokaoCnPlan.retryAt)} />
+          <KeyValue label="分数状态" value={formatGaokaoSchedulerState(scheduler?.jobs.gaokaoCnScore)} />
           <KeyValue label="分数下次" value={formatScheduleTime(scheduler?.jobs.gaokaoCnScore.nextRunAt)} />
+          <KeyValue label="分数冷却到" value={formatScheduleTime(scheduler?.jobs.gaokaoCnScore.cooldownUntil)} />
+          <KeyValue label="分数待重试到" value={formatScheduleTime(scheduler?.jobs.gaokaoCnScore.retryAt)} />
           <KeyValue label="计划最近" value={formatTime(scheduler?.jobs.gaokaoCnPlan.lastFinishedAt)} />
           <KeyValue label="分数最近" value={formatTime(scheduler?.jobs.gaokaoCnScore.lastFinishedAt)} />
           <KeyValue label="计划下一批 offset" value={String(scheduler?.jobs.gaokaoCnPlan.cursorOffset ?? 0)} />
@@ -1140,14 +1316,23 @@ function AdmissionsPage() {
         </div>
         <div className="actions">
           <button className="primary" onClick={saveSettings}><Save size={16} />保存设置</button>
+          <button onClick={() => void resetGaokaoProgress("plan")}><RefreshCcw size={16} />重置计划进度</button>
+          <button onClick={() => void resetGaokaoProgress("score")}><RefreshCcw size={16} />重置分数进度</button>
         </div>
       </Panel>
 
       <Panel title="手动同步" icon={<RefreshCcw size={18} />}>
+        {gaokaoSourceCooldownUntil(scheduler) && (
+          <p className="notice">
+            掌上高考源站正在限流冷却中，预计 {formatScheduleTime(gaokaoSourceCooldownUntil(scheduler))} 后恢复；冷却期手动同步不会继续请求源站，会优先保留当前 offset。
+          </p>
+        )}
         <FormGrid>
           <Input label="学校搜索" value={schoolQuery} onChange={setSchoolQuery} />
           <Input label="只同步省份" value={manualProvince} onChange={setManualProvince} hint="留空使用定期设置；定期省份为空时同步全国。" />
           <Input label="只同步科类" value={manualSubjectTypes} onChange={setManualSubjectTypes} hint="留空按省份和年份自动选择。" />
+          <Input label="只同步计划年份" value={manualPlanYears} onChange={setManualPlanYears} hint="留空使用定期设置。" />
+          <Input label="只同步分数年份" value={manualScoreYears} onChange={setManualScoreYears} hint="留空使用定期设置。" />
           <Input label="同步学校数" value={syncLimit} onChange={setSyncLimit} />
           <Input label="起始 offset" value={syncOffset} onChange={setSyncOffset} />
         </FormGrid>
@@ -1244,6 +1429,7 @@ function AdmissionsPage() {
           <Input label="科类" value={querySubject} onChange={setQuerySubject} />
           <Input label="年份" value={queryYears} onChange={setQueryYears} />
           <Input label="批次" value={queryBatch} onChange={setQueryBatch} />
+          <Input label="专业组" value={queryPlanGroup} onChange={setQueryPlanGroup} />
           <label className="field">
             <span>分数类型</span>
             <select value={queryScoreType} onChange={(event) => setQueryScoreType(event.target.value)}>
@@ -1627,6 +1813,15 @@ function formatCoverageYears(years?: AdmissionCoverageYear[]) {
     .join("；");
 }
 
+function formatCoverageGapKind(kind: AdmissionCoverageGap["kind"]) {
+  const labels: Record<AdmissionCoverageGap["kind"], string> = {
+    plan: "招生计划",
+    school_score: "院校线",
+    major_score: "专业线"
+  };
+  return labels[kind] ?? kind;
+}
+
 function formatAdmissionJobType(type: string) {
   const labels: Record<string, string> = {
     "sync-plan": "招生计划",
@@ -1725,7 +1920,39 @@ function formatJsonText(value?: string | null) {
 function formatGaokaoLastResult(result?: GaokaoSchedulerResult | null) {
   if (!result) return "-";
   const rows = result.planRows + result.schoolScoreRows + result.majorScoreRows;
-  return `${result.ok ? "成功" : "失败"}：${result.total}/${result.candidateTotal || result.total} 所，offset ${result.offset}→${result.nextOffset}，映射 ${result.mapped}，行 ${rows}，来源 ${result.sourceRows}，错误 ${result.errorCount}，${formatTime(result.savedAt)}`;
+  const batchText = result.batchCount && result.batchCount > 1 ? `，批次 ${result.batchCount}` : "";
+  const firstError = result.errors?.[0];
+  const errorText = firstError ? `，首个错误 ${firstError.university ?? "-"}：${formatShortText(firstError.message ?? "", 80)}` : "";
+  const budgetText = result.requestBudgetExhausted ? `，预算暂停 ${result.sourceRequests ?? 0}/${result.sourceRequestBudget ?? "不限"}` : result.sourceRequests !== undefined ? `，请求 ${result.sourceRequests}` : "";
+  return `${result.ok ? "成功" : "失败"}${batchText}：${result.total}/${result.candidateTotal || result.total} 所，offset ${result.offset}→${result.nextOffset}，映射 ${result.mapped}，行 ${rows}，来源 ${result.sourceRows}${budgetText}，跳过 ${result.skippedRequests ?? 0}，错误 ${result.errorCount}${errorText}，${formatTime(result.savedAt)}`;
+}
+
+function formatGaokaoSchedulerState(job?: SyncSchedulerStatus["jobs"]["gaokaoCnPlan"] | null) {
+  if (!job) return "-";
+  if (job.running) return "运行中";
+  if (job.cooldownUntil) return "冷却中";
+  if (job.retryAt) return "待重试";
+  return job.enabled ? "已启用" : "未启用";
+}
+
+function gaokaoSourceCooldownUntil(scheduler?: SyncSchedulerStatus | null) {
+  const values = [
+    scheduler?.jobs.gaokaoCnPlan.cooldownUntil,
+    scheduler?.jobs.gaokaoCnScore.cooldownUntil
+  ]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => new Date(value))
+    .filter((date) => !Number.isNaN(date.getTime()) && date.getTime() > Date.now());
+  if (!values.length) return null;
+  return new Date(Math.max(...values.map((date) => date.getTime()))).toISOString();
+}
+
+function formatGaokaoSourceStatus(scheduler?: SyncSchedulerStatus | null) {
+  const cooldownUntil = gaokaoSourceCooldownUntil(scheduler);
+  if (cooldownUntil) return `冷却到 ${formatScheduleTime(cooldownUntil)}`;
+  const running = scheduler?.jobs.gaokaoCnPlan.running || scheduler?.jobs.gaokaoCnScore.running;
+  if (running) return "同步中";
+  return "可请求";
 }
 
 function formatTime(value?: string | null) {

@@ -20,8 +20,9 @@ interface InlineSegment {
 }
 
 interface VisualLine {
-  kind?: "text" | "rule";
+  kind?: "text" | "rule" | "tableRow";
   segments: InlineSegment[];
+  cells?: TableCell[];
   x: number;
   y: number;
   fontSize: number;
@@ -40,6 +41,13 @@ interface LineStyle {
   indent?: number;
   hangingIndent?: number;
   prefix?: string;
+}
+
+interface TableCell {
+  text: string;
+  x: number;
+  width: number;
+  header?: boolean;
 }
 
 interface SourceQr {
@@ -111,23 +119,50 @@ export function __wrapInlineTextForTest(text: string, width: number, fontSize = 
   return wrapSegments(parseInline(text), width, width, fontSize).map(segmentsToText);
 }
 
+export function __layoutKindsForTest(markdown: string): string[] {
+  return layoutMarkdown(normalizeMarkdown(markdown)).map((line) => line.kind ?? "text");
+}
+
+export function __splitReplyImageContentForTest(markdown: string): ReplyImageContent {
+  return splitReplyImageContent(markdown);
+}
+
 function layoutMarkdown(markdown: string): VisualLine[] {
   const lines = markdown.split("\n");
   const visual: VisualLine[] = [];
   let paragraph: string[] = [];
+  let table: string[] = [];
 
   const flushParagraph = () => {
     if (!paragraph.length) return;
     addWrappedText(visual, paragraph.join(" "), bodyStyle(visual.length === 0 ? 0 : 18));
     paragraph = [];
   };
+  const flushTable = () => {
+    if (!table.length) return;
+    if (table.length >= 2) {
+      addPipeTable(visual, table);
+    } else {
+      paragraph.push(...table.map((line) => line.trim()));
+    }
+    table = [];
+  };
 
   for (const rawLine of lines) {
     const line = rawLine.trimEnd();
     if (!line.trim()) {
+      flushTable();
       flushParagraph();
       continue;
     }
+
+    if (isPipeTableLine(line)) {
+      flushParagraph();
+      table.push(line.trim());
+      continue;
+    }
+
+    flushTable();
 
     const horizontalRule = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line);
     if (horizontalRule) {
@@ -182,6 +217,7 @@ function layoutMarkdown(markdown: string): VisualLine[] {
     paragraph.push(line.trim());
   }
 
+  flushTable();
   flushParagraph();
   return positionLines(visual);
 }
@@ -246,6 +282,48 @@ function addHorizontalRule(target: VisualLine[]): void {
   });
 }
 
+function addPipeTable(target: VisualLine[], lines: string[]): void {
+  const rows = lines
+    .map(parsePipeRow)
+    .filter((row) => row.length > 1 && !isMarkdownTableSeparatorRow(row));
+  if (rows.length < 2) {
+    addWrappedText(target, lines.join(" "), bodyStyle(target.length === 0 ? 0 : 18));
+    return;
+  }
+
+  const columnCount = Math.max(...rows.map((row) => row.length));
+  const tableWidth = CONTENT_WIDTH - TEXT_WRAP_GUTTER;
+  const widths = computeTableColumnWidths(rows, columnCount, tableWidth, 18);
+  const rowHeight = 40;
+  const startX = CONTENT_X;
+
+  rows.forEach((row, rowIndex) => {
+    let cellX = startX;
+    const cells = widths.map((width, index) => {
+      const cell: TableCell = {
+        text: row[index] ?? "",
+        x: cellX,
+        width,
+        header: rowIndex === 0
+      };
+      cellX += width;
+      return cell;
+    });
+    target.push({
+      kind: "tableRow",
+      segments: [],
+      cells,
+      x: startX,
+      y: 0,
+      fontSize: rowIndex === 0 ? 18 : 17,
+      lineHeight: rowHeight,
+      color: "#243044",
+      weight: rowIndex === 0 ? 800 : 500,
+      marginTop: rowIndex === 0 ? (target.length === 0 ? 0 : 16) : 0
+    });
+  });
+}
+
 function addWrappedText(target: VisualLine[], text: string, style: LineStyle): void {
   const sourceText = text.includes("数据来自 CollegesChat")
     ? text
@@ -275,6 +353,25 @@ function addWrappedText(target: VisualLine[], text: string, style: LineStyle): v
       marginTop: index === 0 ? finalStyle.marginTop : 0
     });
   });
+}
+
+function computeTableColumnWidths(rows: string[][], columnCount: number, tableWidth: number, fontSize: number): number[] {
+  const minWidth = 58;
+  const maxWidth = 180;
+  const desired = Array.from({ length: columnCount }, (_, index) => {
+    const longest = rows.reduce((max, row) => Math.max(max, measureText(row[index] ?? "", fontSize)), 0);
+    return Math.max(minWidth, Math.min(maxWidth, longest + 18));
+  });
+  const desiredTotal = desired.reduce((sum, width) => sum + width, 0);
+  if (desiredTotal <= tableWidth) {
+    const remaining = tableWidth - desiredTotal;
+    return desired.map((width) => width + remaining / columnCount);
+  }
+  const shrinkable = desired.map((width) => Math.max(0, width - minWidth));
+  const shrinkableTotal = shrinkable.reduce((sum, width) => sum + width, 0);
+  const overflow = desiredTotal - tableWidth;
+  if (!shrinkableTotal) return Array.from({ length: columnCount }, () => tableWidth / columnCount);
+  return desired.map((width, index) => width - (overflow * shrinkable[index]) / shrinkableTotal);
 }
 
 function positionLines(lines: VisualLine[]): VisualLine[] {
@@ -475,6 +572,9 @@ function renderSvg(
         const y = line.y + 11;
         return `<line x1="${CONTENT_X}" y1="${y}" x2="${WIDTH - CONTENT_X}" y2="${y}" stroke="${line.color}" stroke-width="2"/>`;
       }
+      if (line.kind === "tableRow") {
+        return renderTableRow(line);
+      }
       const segments = line.segments
         .map((segment) => {
           const weight = segment.bold ? 800 : line.weight;
@@ -509,6 +609,39 @@ function renderSvg(
   ${lineSvg}
   ${footerSvg}
 </svg>`;
+}
+
+function renderTableRow(line: VisualLine): string {
+  const rowTop = line.y - line.fontSize - 2;
+  const cells = line.cells ?? [];
+  const background = cells[0]?.header ? "#f7f2e9" : "#ffffff";
+  return cells
+    .map((cell) => {
+      const text = fitText(cell.text || "-", line.fontSize, Math.max(18, cell.width - 16));
+      const fill = cell.header ? "#172033" : "#243044";
+      const weight = cell.header ? 800 : line.weight;
+      return `<g>
+  <rect x="${round(cell.x)}" y="${round(rowTop)}" width="${round(cell.width)}" height="${line.lineHeight}" fill="${background}" stroke="#eee6da" stroke-width="1"/>
+  <text x="${round(cell.x + 8)}" y="${line.y}" font-family="${FONT_FAMILY}" font-size="${line.fontSize}" font-weight="${weight}" fill="${fill}">${escapeXml(text)}</text>
+</g>`;
+    })
+    .join("");
+}
+
+function isPipeTableLine(line: string): boolean {
+  return line.includes("|") && parsePipeRow(line).length >= 3;
+}
+
+function parsePipeRow(line: string): string[] {
+  return line
+    .replace(/^\s*\|/u, "")
+    .replace(/\|\s*$/u, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function isMarkdownTableSeparatorRow(row: string[]): boolean {
+  return row.length > 1 && row.every((cell) => /^:?-{3,}:?$/u.test(cell.replace(/\s+/gu, "")));
 }
 
 function createSourceQr(url: string): SourceQr | null {

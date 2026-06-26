@@ -5,6 +5,7 @@ import {
   normalizeSubjectType
 } from "./admission-repository.js";
 import { defaultAdmissionPlanYears, defaultAdmissionScoreYears } from "./admission-calendar.js";
+import { defaultAdmissionSubjectTypeNamesForProvinceYear, GAOKAO_PROVINCES, GAOKAO_SUBJECT_TYPES } from "./admission-regions.js";
 import type { UniversityRepository, UniversityRow } from "./university-repository.js";
 
 const API_BASE = "https://api.zjzw.cn/web/api/";
@@ -12,6 +13,10 @@ const SITE_BASE = "https://www.gaokao.cn";
 const DEFAULT_LIMIT = 10;
 const DEFAULT_PAGE_SIZE = 80;
 const MAX_PAGES = 8;
+const DEFAULT_REQUEST_DELAY_MS = process.env.NODE_ENV === "test" ? 0 : 60000;
+const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES = 720;
+const DEFAULT_MAX_SOURCE_REQUESTS = process.env.NODE_ENV === "test" ? 0 : 4;
+const GLOBAL_RATE_LIMIT_COOLDOWN_KEY = "sync.internal.gaokaoCn.rateLimitCooldownUntil";
 
 export type GaokaoCnProgressReporter = (message: string) => void;
 
@@ -27,7 +32,12 @@ export interface GaokaoCnSyncOptions {
   includePlans?: boolean;
   includeScores?: boolean;
   includeSpecialScores?: boolean;
+  includePlanDetails?: boolean;
   eligibleOnly?: boolean;
+  requestDelayMs?: number;
+  rateLimitCooldownMinutes?: number;
+  maxSourceRequests?: number;
+  skipExisting?: boolean;
 }
 
 export interface GaokaoCnSyncResult {
@@ -41,6 +51,10 @@ export interface GaokaoCnSyncResult {
   schoolScoreRows: number;
   majorScoreRows: number;
   sourceRows: number;
+  sourceRequests: number;
+  sourceRequestBudget: number | null;
+  requestBudgetExhausted: boolean;
+  skippedRequests: number;
   skipped: number;
   errors: Array<{ university: string; message: string }>;
 }
@@ -140,64 +154,55 @@ interface GaokaoPlanDetail {
 interface FetchCount {
   rows: number;
   sourceRows: number;
+  requestBudgetExhausted?: boolean;
 }
 
-export const GAOKAO_PROVINCES = [
-  ["11", "北京"],
-  ["12", "天津"],
-  ["13", "河北"],
-  ["14", "山西"],
-  ["15", "内蒙古"],
-  ["21", "辽宁"],
-  ["22", "吉林"],
-  ["23", "黑龙江"],
-  ["31", "上海"],
-  ["32", "江苏"],
-  ["33", "浙江"],
-  ["34", "安徽"],
-  ["35", "福建"],
-  ["36", "江西"],
-  ["37", "山东"],
-  ["41", "河南"],
-  ["42", "湖北"],
-  ["43", "湖南"],
-  ["44", "广东"],
-  ["45", "广西"],
-  ["46", "海南"],
-  ["50", "重庆"],
-  ["51", "四川"],
-  ["52", "贵州"],
-  ["53", "云南"],
-  ["54", "西藏"],
-  ["61", "陕西"],
-  ["62", "甘肃"],
-  ["63", "青海"],
-  ["64", "宁夏"],
-  ["65", "新疆"]
-] as const;
+interface GaokaoRequestContext {
+  requestDelayMs: number;
+  rateLimitCooldownMinutes: number;
+  maxSourceRequests: number;
+  requestCount: number;
+  lastRequestAt: number;
+  rateLimited: boolean;
+  requestBudgetExhausted: boolean;
+}
 
-const SUBJECT_TYPES = [
-  { id: "2073", name: "物理类" },
-  { id: "2074", name: "历史类" },
-  { id: "1", name: "理科" },
-  { id: "2", name: "文科" },
-  { id: "3", name: "综合改革" }
-] as const;
+interface GaokaoCooldownStore {
+  getString(key: string, fallback: string): string;
+  setInternal(key: string, value: string): void;
+}
 
-const COMPREHENSIVE_REFORM_PROVINCES = new Set(["北京", "天津", "上海", "浙江", "山东", "海南"]);
-const TRADITIONAL_PROVINCES = new Set(["西藏", "新疆"]);
-const THIRD_BATCH_3_1_2_PROVINCES = new Set(["河北", "辽宁", "江苏", "福建", "湖北", "湖南", "广东", "重庆"]);
-const FOURTH_BATCH_3_1_2_PROVINCES = new Set(["吉林", "黑龙江", "安徽", "江西", "广西", "贵州", "甘肃"]);
-const FIFTH_BATCH_3_1_2_PROVINCES = new Set(["山西", "内蒙古", "河南", "四川", "云南", "陕西", "青海", "宁夏"]);
+export { GAOKAO_PROVINCES } from "./admission-regions.js";
+
+const SUBJECT_TYPES = GAOKAO_SUBJECT_TYPES;
 
 export class GaokaoCnAdapter {
+  private syncTail: Promise<void> = Promise.resolve();
+  private rateLimitUntil = 0;
+  private lastRequestAt = 0;
+
   constructor(
     private readonly universities: UniversityRepository,
     private readonly admissions: AdmissionRepository,
-    private readonly progress?: GaokaoCnProgressReporter
+    private readonly progress?: GaokaoCnProgressReporter,
+    private readonly cooldownStore?: GaokaoCooldownStore
   ) {}
 
   async sync(options: GaokaoCnSyncOptions = {}): Promise<GaokaoCnSyncResult> {
+    const previous = this.syncTail;
+    let release!: () => void;
+    this.syncTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await this.performSync(options);
+    } finally {
+      release();
+    }
+  }
+
+  private async performSync(options: GaokaoCnSyncOptions = {}): Promise<GaokaoCnSyncResult> {
     const jobId = this.admissions.startJob({
       jobType: gaokaoJobType(options),
       targetJson: JSON.stringify(options)
@@ -213,38 +218,79 @@ export class GaokaoCnAdapter {
       schoolScoreRows: 0,
       majorScoreRows: 0,
       sourceRows: 0,
+      sourceRequests: 0,
+      sourceRequestBudget: null,
+      requestBudgetExhausted: false,
+      skippedRequests: 0,
       skipped: 0,
       errors: []
     };
 
     try {
+      const cooldownUntil = this.activeRateLimitCooldownUntil();
+      if (cooldownUntil) {
+        const message = `Gaokao.cn 仍在限流冷却中，预计 ${cooldownUntil.toISOString()} 后再试；本次未请求源站。`;
+        result.errors.push({ university: "掌上高考", message });
+        this.report(message);
+        this.admissions.finishJob(jobId, {
+          status: "error",
+          error: message,
+          resultJson: JSON.stringify(result)
+        });
+        return result;
+      }
+
       const candidates = this.candidateUniversities(options);
       const rows = candidates.slice(result.offset, result.offset + clampLimit(options.limit));
       result.candidateTotal = candidates.length;
       result.total = rows.length;
       result.nextOffset = computeNextOffset(result.offset, rows.length, result.candidateTotal);
       this.report(`Preparing Gaokao.cn admission sync for ${rows.length} schools...`);
+      const requestContext = createRequestContext(options.requestDelayMs, options.rateLimitCooldownMinutes, options.maxSourceRequests);
+      result.sourceRequestBudget = requestContext.maxSourceRequests || null;
 
       for (const [index, university] of rows.entries()) {
         if (index > 0) await delay(700);
         try {
-          const mapped = await this.ensureMapping(university);
+          const mapped = await this.ensureMapping(university, requestContext);
+          result.sourceRequests = requestContext.requestCount;
           if (!mapped) {
             result.skipped += 1;
             continue;
           }
           result.mapped += 1;
-          const partial = await this.syncMappedUniversity(university, mapped.sourceSchoolId, options);
+          const partial = await this.syncMappedUniversity(university, mapped.sourceSchoolId, options, requestContext);
           result.planRows += partial.planRows;
           result.schoolScoreRows += partial.schoolScoreRows;
           result.majorScoreRows += partial.majorScoreRows;
           result.sourceRows += partial.sourceRows;
+          result.skippedRequests += partial.skippedRequests;
+          result.sourceRequests = requestContext.requestCount;
+          if (partial.requestBudgetExhausted) {
+            result.requestBudgetExhausted = true;
+            result.nextOffset = result.offset;
+            this.report(`Gaokao.cn source request budget exhausted after ${requestContext.requestCount} requests; stopping this batch and keeping offset ${result.offset}.`);
+            break;
+          }
           this.report(
-            `Saved admission data for ${university.name}: plans ${partial.planRows}, school scores ${partial.schoolScoreRows}, major scores ${partial.majorScoreRows}.`
+            `Saved admission data for ${university.name}: plans ${partial.planRows}, school scores ${partial.schoolScoreRows}, major scores ${partial.majorScoreRows}, skipped requests ${partial.skippedRequests}.`
           );
         } catch (error) {
-          result.errors.push({ university: university.name, message: getErrorMessage(error) });
-          this.report(`Gaokao.cn sync failed for ${university.name}: ${getErrorMessage(error)}`);
+          const message = getErrorMessage(error);
+          result.sourceRequests = requestContext.requestCount;
+          if (isGaokaoCnRequestBudgetError(error)) {
+            result.requestBudgetExhausted = true;
+            result.nextOffset = result.offset;
+            this.report(`Gaokao.cn source request budget exhausted after ${requestContext.requestCount} requests; stopping this batch and keeping offset ${result.offset}.`);
+            break;
+          }
+          result.errors.push({ university: university.name, message });
+          this.report(`Gaokao.cn sync failed for ${university.name}: ${message}`);
+          if (isGaokaoCnRateLimitError(error)) {
+            const until = this.setRateLimitCooldown(options.rateLimitCooldownMinutes);
+            this.report(`Gaokao.cn rate limit detected; stopping the current batch. Cooldown until ${until.toISOString()}.`);
+            break;
+          }
         }
       }
 
@@ -260,7 +306,10 @@ export class GaokaoCnAdapter {
     }
   }
 
-  async ensureMapping(university: UniversityRow): Promise<{ sourceSchoolId: string; sourceSchoolName: string } | null> {
+  async ensureMapping(
+    university: UniversityRow,
+    requestContext = createRequestContext()
+  ): Promise<{ sourceSchoolId: string; sourceSchoolName: string } | null> {
     const existing = this.admissions.getMapping(university.id);
     if (existing?.matchStatus === "unmatched" || existing?.matchStatus === "ambiguous") {
       return null;
@@ -271,7 +320,7 @@ export class GaokaoCnAdapter {
       return { sourceSchoolId: existing.sourceSchoolId, sourceSchoolName: existing.sourceSchoolName };
     }
 
-    const { schools, sourceOk } = await this.searchSchoolCandidates(university.name, university.id);
+    const { schools, sourceOk } = await this.searchSchoolCandidates(university.name, university.id, requestContext);
     const match = pickBestSchool(university.name, schools);
     if (!match) {
       if (sourceOk) {
@@ -310,9 +359,14 @@ export class GaokaoCnAdapter {
     return (await this.searchSchoolCandidates(keyword, universityId)).schools;
   }
 
-  private async searchSchoolCandidates(keyword: string, universityId?: number): Promise<{ schools: GaokaoSchool[]; sourceOk: boolean }> {
+  private async searchSchoolCandidates(
+    keyword: string,
+    universityId?: number,
+    requestContext = createRequestContext()
+  ): Promise<{ schools: GaokaoSchool[]; sourceOk: boolean }> {
+    this.assertRequestBudget(requestContext);
     const request = { keyword, uri: "apidata/api/gk/school/lists" };
-    const { payload, sourceId } = await this.fetchAndRecord<GaokaoSchool>("school-search", request, universityId, null);
+    const { payload, sourceId } = await this.fetchAndRecord<GaokaoSchool>("school-search", request, universityId, null, requestContext);
     const schools = responseItems(payload);
     return { schools, sourceOk: Boolean(sourceId && payload.code === "0000") };
   }
@@ -329,27 +383,70 @@ export class GaokaoCnAdapter {
   private async syncMappedUniversity(
     university: UniversityRow,
     sourceSchoolId: string,
-    options: GaokaoCnSyncOptions
-  ): Promise<Pick<GaokaoCnSyncResult, "planRows" | "schoolScoreRows" | "majorScoreRows" | "sourceRows">> {
+    options: GaokaoCnSyncOptions,
+    requestContext: GaokaoRequestContext
+  ): Promise<Pick<GaokaoCnSyncResult, "planRows" | "schoolScoreRows" | "majorScoreRows" | "sourceRows" | "skippedRequests" | "requestBudgetExhausted">> {
     const provinces = normalizeProvinceFilter(options.provinces);
     const scoreYears = normalizeYears(options.scoreYears, defaultAdmissionScoreYears());
     const planYears = normalizeYears(options.planYears, defaultAdmissionPlanYears());
     const explicitSubjectTypes = normalizeSubjectFilter(options.subjectTypes);
-    const result = { planRows: 0, schoolScoreRows: 0, majorScoreRows: 0, sourceRows: 0 };
+    const result = { planRows: 0, schoolScoreRows: 0, majorScoreRows: 0, sourceRows: 0, skippedRequests: 0, requestBudgetExhausted: false };
     const includePlans = options.includePlans !== false;
     const includeScores = options.includeScores !== false;
+    const includePlanDetails = options.includePlanDetails !== false;
+    const skipExisting = options.skipExisting === true;
 
     for (const province of provinces) {
       if (includePlans) {
         for (const year of planYears) {
           const subjectTypes = explicitSubjectTypes ?? defaultSubjectTypesForProvinceYear(province.name, year);
           for (const subject of subjectTypes) {
-            const summary = await this.fetchPlanSummary(university, sourceSchoolId, year, province.id, subject.id);
-            result.planRows += summary.rows;
-            result.sourceRows += summary.sourceRows;
-            const detail = await this.fetchPlanDetails(university, sourceSchoolId, year, province.id, subject.id);
-            result.planRows += detail.rows;
-            result.sourceRows += detail.sourceRows;
+            let summary: FetchCount = { rows: 0, sourceRows: 0 };
+            let detail: FetchCount = { rows: 0, sourceRows: 0 };
+            if (skipExisting && this.admissions.hasSourceCoverage({
+              sourceKind: "plan-school-summary",
+              universityId: university.id,
+              sourceSchoolId,
+              request: {
+                uri: "apidata/api/gkv3/plan/schoollists",
+                school_id: sourceSchoolId,
+                local_province_id: province.id,
+                local_type_id: subject.id,
+                year,
+                page: 1,
+                size: DEFAULT_PAGE_SIZE
+              }
+            })) {
+              result.skippedRequests += 1;
+            } else {
+              if (!this.hasRequestBudget(requestContext)) return { ...result, requestBudgetExhausted: true };
+              summary = await this.fetchPlanSummary(university, sourceSchoolId, year, province.id, subject.id, requestContext);
+              result.planRows += summary.rows;
+              result.sourceRows += summary.sourceRows;
+              if (summary.requestBudgetExhausted) return { ...result, requestBudgetExhausted: true };
+            }
+            if (includePlanDetails) {
+              if (skipExisting && this.admissions.hasSourceCoverage({
+                sourceKind: "plan-major",
+                universityId: university.id,
+                sourceSchoolId,
+                request: {
+                  uri: "apidata/api/gkv3/plan/school",
+                  school_id: sourceSchoolId,
+                  local_province_id: province.id,
+                  local_type_id: subject.id,
+                  year
+                }
+              })) {
+                result.skippedRequests += 1;
+              } else {
+                if (!this.hasRequestBudget(requestContext)) return { ...result, requestBudgetExhausted: true };
+                detail = await this.fetchPlanDetails(university, sourceSchoolId, year, province.id, subject.id, requestContext);
+                result.planRows += detail.rows;
+                result.sourceRows += detail.sourceRows;
+                if (detail.requestBudgetExhausted) return { ...result, requestBudgetExhausted: true };
+              }
+            }
             if (summary.rows + detail.rows > 0) await delay(180);
           }
         }
@@ -359,13 +456,50 @@ export class GaokaoCnAdapter {
         for (const year of scoreYears) {
           const subjectTypes = explicitSubjectTypes ?? defaultSubjectTypesForProvinceYear(province.name, year);
           for (const subject of subjectTypes) {
-            const schoolScores = await this.fetchSchoolScores(university, sourceSchoolId, year, province.id, subject.id);
-            result.schoolScoreRows += schoolScores.rows;
-            result.sourceRows += schoolScores.sourceRows;
+            let schoolScores: FetchCount = { rows: 0, sourceRows: 0 };
+            if (skipExisting && this.admissions.hasSourceCoverage({
+              sourceKind: "score-school",
+              universityId: university.id,
+              sourceSchoolId,
+              request: {
+                uri: "apidata/api/gk/score/province",
+                school_id: sourceSchoolId,
+                local_province_id: province.id,
+                local_type_id: subject.id,
+                year,
+                zslx: 0
+              }
+            })) {
+              result.skippedRequests += 1;
+            } else {
+              if (!this.hasRequestBudget(requestContext)) return { ...result, requestBudgetExhausted: true };
+              schoolScores = await this.fetchSchoolScores(university, sourceSchoolId, year, province.id, subject.id, requestContext);
+              result.schoolScoreRows += schoolScores.rows;
+              result.sourceRows += schoolScores.sourceRows;
+              if (schoolScores.requestBudgetExhausted) return { ...result, requestBudgetExhausted: true };
+            }
             if (options.includeSpecialScores !== false) {
-              const majorScores = await this.fetchMajorScores(university, sourceSchoolId, year, province.id, subject.id);
-              result.majorScoreRows += majorScores.rows;
-              result.sourceRows += majorScores.sourceRows;
+              if (skipExisting && this.admissions.hasSourceCoverage({
+                sourceKind: "score-major",
+                universityId: university.id,
+                sourceSchoolId,
+                request: {
+                  uri: "apidata/api/gk/score/special",
+                  school_id: sourceSchoolId,
+                  local_province_id: province.id,
+                  local_type_id: subject.id,
+                  year,
+                  zslx: 0
+                }
+              })) {
+                result.skippedRequests += 1;
+              } else {
+                if (!this.hasRequestBudget(requestContext)) return { ...result, requestBudgetExhausted: true };
+                const majorScores = await this.fetchMajorScores(university, sourceSchoolId, year, province.id, subject.id, requestContext);
+                result.majorScoreRows += majorScores.rows;
+                result.sourceRows += majorScores.sourceRows;
+                if (majorScores.requestBudgetExhausted) return { ...result, requestBudgetExhausted: true };
+              }
             }
             if (schoolScores.rows > 0) await delay(180);
           }
@@ -381,7 +515,8 @@ export class GaokaoCnAdapter {
     sourceSchoolId: string,
     year: number,
     provinceId: string,
-    subjectTypeId: string
+    subjectTypeId: string,
+    requestContext: GaokaoRequestContext
   ): Promise<FetchCount> {
     const request = {
       uri: "apidata/api/gkv3/plan/schoollists",
@@ -396,7 +531,8 @@ export class GaokaoCnAdapter {
       "plan-school-summary",
       request,
       university.id,
-      sourceSchoolId
+      sourceSchoolId,
+      requestContext
     );
     const items = responseItems(payload);
     for (const item of items) {
@@ -445,7 +581,8 @@ export class GaokaoCnAdapter {
     sourceSchoolId: string,
     year: number,
     provinceId: string,
-    subjectTypeId: string
+    subjectTypeId: string,
+    requestContext: GaokaoRequestContext
   ): Promise<FetchCount> {
     let saved = 0;
     let sourceRows = 0;
@@ -456,7 +593,7 @@ export class GaokaoCnAdapter {
       local_type_id: subjectTypeId,
       year,
       zslx: 0
-    }, university.id, sourceSchoolId, 20)) {
+    }, university.id, sourceSchoolId, 20, requestContext)) {
       if (sourceId) sourceRows += 1;
       for (const item of items) {
         this.admissions.upsertScore({
@@ -486,7 +623,7 @@ export class GaokaoCnAdapter {
         saved += 1;
       }
     }
-    return { rows: saved, sourceRows };
+    return { rows: saved, sourceRows, requestBudgetExhausted: requestContext.requestBudgetExhausted };
   }
 
   private async fetchPlanDetails(
@@ -494,7 +631,8 @@ export class GaokaoCnAdapter {
     sourceSchoolId: string,
     year: number,
     provinceId: string,
-    subjectTypeId: string
+    subjectTypeId: string,
+    requestContext: GaokaoRequestContext
   ): Promise<FetchCount> {
     let saved = 0;
     let sourceRows = 0;
@@ -504,7 +642,7 @@ export class GaokaoCnAdapter {
       local_province_id: provinceId,
       local_type_id: subjectTypeId,
       year
-    }, university.id, sourceSchoolId, 10)) {
+    }, university.id, sourceSchoolId, 10, requestContext)) {
       if (sourceId) sourceRows += 1;
       for (const item of items) {
         this.admissions.upsertPlan({
@@ -530,7 +668,7 @@ export class GaokaoCnAdapter {
         saved += 1;
       }
     }
-    return { rows: saved, sourceRows };
+    return { rows: saved, sourceRows, requestBudgetExhausted: requestContext.requestBudgetExhausted };
   }
 
   private async fetchMajorScores(
@@ -538,7 +676,8 @@ export class GaokaoCnAdapter {
     sourceSchoolId: string,
     year: number,
     provinceId: string,
-    subjectTypeId: string
+    subjectTypeId: string,
+    requestContext: GaokaoRequestContext
   ): Promise<FetchCount> {
     let saved = 0;
     let sourceRows = 0;
@@ -549,7 +688,7 @@ export class GaokaoCnAdapter {
       local_type_id: subjectTypeId,
       year,
       zslx: 0
-    }, university.id, sourceSchoolId, 20)) {
+    }, university.id, sourceSchoolId, 20, requestContext)) {
       if (sourceId) sourceRows += 1;
       for (const item of items) {
         this.admissions.upsertScore({
@@ -580,7 +719,7 @@ export class GaokaoCnAdapter {
         saved += 1;
       }
     }
-    return { rows: saved, sourceRows };
+    return { rows: saved, sourceRows, requestBudgetExhausted: requestContext.requestBudgetExhausted };
   }
 
   private async *fetchPaged<T extends object>(
@@ -588,11 +727,16 @@ export class GaokaoCnAdapter {
     baseRequest: Record<string, unknown>,
     universityId: number,
     sourceSchoolId: string,
-    pageSize = DEFAULT_PAGE_SIZE
+    pageSize = DEFAULT_PAGE_SIZE,
+    requestContext = createRequestContext()
   ): AsyncGenerator<{ items: T[]; sourceId: number | null }> {
     for (let page = 1; page <= MAX_PAGES; page += 1) {
+      if (!this.hasRequestBudget(requestContext)) {
+        requestContext.requestBudgetExhausted = true;
+        break;
+      }
       const request = { ...baseRequest, page, size: pageSize };
-      const { payload, sourceId } = await this.fetchAndRecord<T>(sourceKind, request, universityId, sourceSchoolId);
+      const { payload, sourceId } = await this.fetchAndRecord<T>(sourceKind, request, universityId, sourceSchoolId, requestContext);
       const items = responseItems(payload);
       yield { items, sourceId };
       const total = responseTotal(payload, items.length);
@@ -605,13 +749,30 @@ export class GaokaoCnAdapter {
     sourceKind: string,
     request: Record<string, unknown>,
     universityId: number | undefined,
-    sourceSchoolId: string | null
+    sourceSchoolId: string | null,
+    requestContext = createRequestContext()
   ): Promise<{ payload: GaokaoApiResponse<T>; sourceId: number | null }> {
+    this.assertRequestBudget(requestContext);
     const url = buildApiUrl(request);
     let payload: GaokaoApiResponse<T>;
     try {
+      const cooldownUntil = this.activeRateLimitCooldownUntil();
+      if (cooldownUntil) {
+        throw new GaokaoCnRateLimitError(`Gaokao.cn 仍在限流冷却中，预计 ${cooldownUntil.toISOString()} 后再试；本次未请求源站。`);
+      }
+      if (requestContext.rateLimited) {
+        throw new GaokaoCnRateLimitError("Gaokao.cn rate limit already detected in this sync; skipped remaining requests.");
+      }
+      await this.waitBeforeRequest(requestContext);
+      requestContext.requestCount += 1;
       payload = (await fetchJsonWithRetry(url)) as GaokaoApiResponse<T>;
     } catch (error) {
+      if (isGaokaoCnRateLimitError(error)) {
+        requestContext.rateLimited = true;
+        if (!isExistingRateLimitCooldownError(error)) {
+          this.setRateLimitCooldown(requestContext.rateLimitCooldownMinutes);
+        }
+      }
       this.admissions.insertSource({
         sourceKind,
         universityId,
@@ -632,18 +793,76 @@ export class GaokaoCnAdapter {
       requestJson: JSON.stringify(request),
       responseJson: JSON.stringify(payload),
       status: payload.code === "0000" ? "success" : "error",
-      error: payload.code === "0000" ? null : payload.message ?? payload.code ?? "unknown_error"
+      error: payload.code === "0000" ? null : `${payload.code ?? "unknown"}: ${payload.message ?? "unknown_error"}`
     });
     if (payload.code !== "0000") {
-      throw new Error(
-        `Gaokao.cn ${sourceKind} returned ${payload.code ?? "unknown"} (${summarizeRequestTarget(request)}): ${payload.message ?? "unknown_error"}`
-      );
+      const message = `Gaokao.cn ${sourceKind} returned ${payload.code ?? "unknown"} (${summarizeRequestTarget(request)}): ${payload.message ?? "unknown_error"}`;
+      if (isGaokaoCnRateLimitPayload(payload)) {
+        requestContext.rateLimited = true;
+        this.setRateLimitCooldown(requestContext.rateLimitCooldownMinutes);
+        throw new GaokaoCnRateLimitError(message);
+      }
+      throw new Error(message);
     }
     return { payload, sourceId };
   }
 
   private report(message: string): void {
     this.progress?.(message);
+  }
+
+  private async waitBeforeRequest(context: GaokaoRequestContext): Promise<void> {
+    const lastRequestAt = Math.max(context.lastRequestAt, this.lastRequestAt);
+    if (!context.requestDelayMs) {
+      const now = Date.now();
+      context.lastRequestAt = now;
+      this.lastRequestAt = now;
+      return;
+    }
+    const elapsed = lastRequestAt ? Date.now() - lastRequestAt : context.requestDelayMs;
+    if (elapsed < context.requestDelayMs) {
+      await delay(context.requestDelayMs - elapsed);
+    }
+    const now = Date.now();
+    context.lastRequestAt = now;
+    this.lastRequestAt = now;
+  }
+
+  private hasRequestBudget(context: GaokaoRequestContext): boolean {
+    return context.maxSourceRequests <= 0 || context.requestCount < context.maxSourceRequests;
+  }
+
+  private assertRequestBudget(context: GaokaoRequestContext): void {
+    if (!this.hasRequestBudget(context)) {
+      context.requestBudgetExhausted = true;
+      throw new GaokaoCnRequestBudgetError(`Gaokao.cn source request budget exhausted (${context.requestCount}/${context.maxSourceRequests}); stopped before starting another source endpoint.`);
+    }
+  }
+
+  rateLimitStatus(): { active: boolean; until: string | null } {
+    const until = this.activeRateLimitCooldownUntil();
+    return { active: Boolean(until), until: until?.toISOString() ?? null };
+  }
+
+  clearRateLimitCooldown(): void {
+    this.rateLimitUntil = 0;
+    this.cooldownStore?.setInternal(GLOBAL_RATE_LIMIT_COOLDOWN_KEY, "");
+  }
+
+  private activeRateLimitCooldownUntil(): Date | null {
+    const storedValue = this.cooldownStore?.getString(GLOBAL_RATE_LIMIT_COOLDOWN_KEY, "") ?? "";
+    const storedUntil = parseFutureDate(storedValue);
+    if (storedUntil) this.rateLimitUntil = Math.max(this.rateLimitUntil, storedUntil.getTime());
+    if (this.rateLimitUntil <= Date.now()) return null;
+    return new Date(this.rateLimitUntil);
+  }
+
+  private setRateLimitCooldown(minutes?: number): Date {
+    const cooldownMs = clampRateLimitCooldownMinutes(minutes) * 60 * 1000;
+    this.rateLimitUntil = Date.now() + cooldownMs;
+    const until = new Date(this.rateLimitUntil);
+    this.cooldownStore?.setInternal(GLOBAL_RATE_LIMIT_COOLDOWN_KEY, until.toISOString());
+    return until;
   }
 }
 
@@ -685,6 +904,8 @@ function isLikelyGaokaoCandidate(university: UniversityRow): boolean {
   const name = university.name.trim();
   if (!/^[\u4e00-\u9fff]/u.test(name)) return false;
   if (/[A-Za-z&]/u.test(name)) return false;
+  if (/^[.。·、]/u.test(name)) return false;
+  if (/皇家帝国|霍格沃茨|魔法|外星|宇宙|家里蹲|野鸡/u.test(name)) return false;
   return /[\u4e00-\u9fff]/u.test(name);
 }
 
@@ -715,21 +936,8 @@ function normalizeSubjectFilter(values: string[] | undefined): typeof SUBJECT_TY
 }
 
 function defaultSubjectTypesForProvinceYear(provinceName: string, year: number): typeof SUBJECT_TYPES[number][] {
-  const province = normalizeProvinceName(provinceName);
-  if (COMPREHENSIVE_REFORM_PROVINCES.has(province)) return SUBJECT_TYPES.filter((subject) => subject.name === "综合改革");
-  if (TRADITIONAL_PROVINCES.has(province)) return SUBJECT_TYPES.filter((subject) => subject.name === "理科" || subject.name === "文科");
-  if (THIRD_BATCH_3_1_2_PROVINCES.has(province)) return physicalHistorySubjects();
-  if (FOURTH_BATCH_3_1_2_PROVINCES.has(province)) return year >= 2024 ? physicalHistorySubjects() : scienceArtsSubjects();
-  if (FIFTH_BATCH_3_1_2_PROVINCES.has(province)) return year >= 2025 ? physicalHistorySubjects() : scienceArtsSubjects();
-  return scienceArtsSubjects();
-}
-
-function physicalHistorySubjects(): typeof SUBJECT_TYPES[number][] {
-  return SUBJECT_TYPES.filter((subject) => subject.name === "物理类" || subject.name === "历史类");
-}
-
-function scienceArtsSubjects(): typeof SUBJECT_TYPES[number][] {
-  return SUBJECT_TYPES.filter((subject) => subject.name === "理科" || subject.name === "文科");
+  const names = new Set(defaultAdmissionSubjectTypeNamesForProvinceYear(provinceName, year));
+  return SUBJECT_TYPES.filter((subject) => names.has(subject.name));
 }
 
 function normalizeYears(values: number[] | undefined, fallback: number[]): number[] {
@@ -848,7 +1056,7 @@ function schoolUrl(schoolId: string): string {
   return `${SITE_BASE}/school/${encodeURIComponent(schoolId)}`;
 }
 
-function renderGaokaoSchoolProfile(school: GaokaoSchool, schoolId: string, sourceUrl: string): string {
+export function renderGaokaoSchoolProfile(school: GaokaoSchool, schoolId: string, sourceUrl: string): string {
   const tags = [
     truthyFlag(school.f985) ? "985" : null,
     truthyFlag(school.f211) ? "211" : null,
@@ -870,6 +1078,76 @@ function truthyFlag(value: unknown): boolean {
   return Boolean(text && text !== "0" && text !== "false" && text !== "否");
 }
 
+class GaokaoCnRateLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GaokaoCnRateLimitError";
+  }
+}
+
+class GaokaoCnRequestBudgetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GaokaoCnRequestBudgetError";
+  }
+}
+
+export function isGaokaoCnRateLimitError(error: unknown): boolean {
+  if (error instanceof GaokaoCnRateLimitError) return true;
+  return isGaokaoCnRateLimitMessage(getErrorMessage(error));
+}
+
+function isGaokaoCnRequestBudgetError(error: unknown): boolean {
+  return error instanceof GaokaoCnRequestBudgetError || /source request budget exhausted|请求预算/u.test(getErrorMessage(error));
+}
+
+function isGaokaoCnRateLimitPayload<T extends object>(payload: GaokaoApiResponse<T>): boolean {
+  return isGaokaoCnRateLimitMessage(`${payload.code ?? ""} ${payload.message ?? ""}`);
+}
+
+function isGaokaoCnRateLimitMessage(message: string): boolean {
+  return /\b1069\b|访问太过频繁|请稍后再试|限流|HTTP 429|too many requests|rate limit/i.test(message);
+}
+
+function isExistingRateLimitCooldownError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("仍在限流冷却中");
+}
+
+function createRequestContext(requestDelayMs?: number, rateLimitCooldownMinutes?: number, maxSourceRequests?: number): GaokaoRequestContext {
+  return {
+    requestDelayMs: clampRequestDelayMs(requestDelayMs),
+    rateLimitCooldownMinutes: clampRateLimitCooldownMinutes(rateLimitCooldownMinutes),
+    maxSourceRequests: clampMaxSourceRequests(maxSourceRequests),
+    requestCount: 0,
+    lastRequestAt: 0,
+    rateLimited: false,
+    requestBudgetExhausted: false
+  };
+}
+
+function clampRequestDelayMs(value?: number): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_REQUEST_DELAY_MS;
+  const minDelay = process.env.NODE_ENV === "test" ? 0 : 10_000;
+  return Math.max(minDelay, Math.min(300_000, Math.floor(value)));
+}
+
+function clampRateLimitCooldownMinutes(value?: number): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES;
+  return Math.max(1, Math.min(24 * 60, Math.floor(value)));
+}
+
+function clampMaxSourceRequests(value?: number): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_MAX_SOURCE_REQUESTS;
+  return Math.max(0, Math.min(500, Math.floor(value)));
+}
+
+function parseFutureDate(value: string): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.getTime() > Date.now() ? date : null;
+}
+
 async function fetchJsonWithRetry(url: string, retries = 3): Promise<unknown> {
   let lastError: unknown = null;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
@@ -889,6 +1167,7 @@ async function fetchJsonWithRetry(url: string, retries = 3): Promise<unknown> {
       return response.json();
     } catch (error) {
       lastError = error;
+      if (isGaokaoCnRateLimitError(error)) break;
       if (attempt >= retries) break;
       await delay(800 * attempt);
     } finally {

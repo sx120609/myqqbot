@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   const universities = new UniversityRepository(database);
   const sync = new DataSyncService(config, database, universities);
   const srgaoxiaoSync = new SrgaoxiaoSyncService(config, universities);
-  const gaokaoCn = new GaokaoCnAdapter(universities, admissions);
+  const gaokaoCn = new GaokaoCnAdapter(universities, admissions, undefined, settings);
   const llm = new LlmClient(settings, logs);
   const nlu = new NaturalLanguageService(universities);
   const processor = new MessageProcessor(settings, universities, nlu, llm, logs, srgaoxiaoSync, answerSources, admissions, gaokaoCn);

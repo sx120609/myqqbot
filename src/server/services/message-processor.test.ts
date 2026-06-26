@@ -13,6 +13,10 @@ describe("MessageProcessor", () => {
     const settings = {
       runtime: () => ({
         onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        site: {
+          publicBaseUrl: "http://127.0.0.1:8787",
+          filingNumber: ""
+        },
         llm: {
           baseUrl: "https://llm.example/v1",
           apiKey: "test-key",
@@ -861,10 +865,181 @@ describe("MessageProcessor", () => {
     }));
   });
 
+  it("uses the confirmed school context for follow-up admission questions without a school name", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        site: {
+          publicBaseUrl: "https://bot.example.com/",
+          filingNumber: "蜀ICP备00000000号"
+        },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1600,
+          timeoutMs: 45000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: false,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5
+        }
+      })
+    } as SettingsStore;
+    const university = {
+      id: 6,
+      name: "南京航空航天大学",
+      slug: "nan-jing-hang-kong-hang-tian-da-xue",
+      file_path: "docs/universities/nan-jing-hang-kong-hang-tian-da-xue.md",
+      source_url: "https://example.com/nuaa.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "南航",
+      score: 0.95
+    };
+    const nlu = {
+      analyze: vi.fn(() => ({
+        candidates: [university],
+        reason: "本地学校候选，仅供模型路由参考"
+      })),
+      buildRetrievalContext: vi.fn(() => "问卷资料片段")
+    } as unknown as NaturalLanguageService;
+    const universities = {
+      getUniversity: vi.fn(() => university),
+      getTopicQuestions: vi.fn(() => [{ question: "南航怎么样", answers: [] }]),
+      getSchoolProfile: vi.fn(() => null)
+    } as unknown as UniversityRepository;
+    const admissions = {
+      queryPlans: vi.fn(() => []),
+      queryScores: vi.fn(() => [
+        {
+          id: 66,
+          scoreType: "school",
+          universityId: 6,
+          universityName: "南京航空航天大学",
+          sourceSchoolId: "452",
+          year: 2025,
+          provinceName: "四川",
+          subjectType: "理科",
+          batch: "本科一批",
+          planGroup: null,
+          majorName: null,
+          minScore: 622,
+          minRank: 14500,
+          avgScore: 633,
+          avgRank: 10000,
+          maxScore: 650,
+          planCount: 120,
+          controlScore: 520,
+          diffScore: 102,
+          selectionRequirements: null,
+          sourceUrl: "https://www.gaokao.cn/school/452/provinceline",
+          sourceRecordId: "166",
+          rawJson: "{}",
+          fetchedAt: "2026-06-25T00:00:00.000Z"
+        }
+      ]),
+      getMapping: vi.fn(() => null)
+    };
+    const gaokaoCn = {
+      sync: vi.fn().mockResolvedValue({
+        source: "gaokao_cn",
+        total: 1,
+        candidateTotal: 1,
+        offset: 0,
+        nextOffset: 0,
+        mapped: 1,
+        planRows: 0,
+        schoolScoreRows: 1,
+        majorScoreRows: 0,
+        sourceRows: 1,
+        skippedRequests: 0,
+        skipped: 0,
+        errors: []
+      })
+    };
+    const answerSources = {
+      create: vi.fn(() => "source-token")
+    } as unknown as AnswerSourceStore;
+    const llm = {
+      chat: vi.fn()
+        .mockResolvedValueOnce(routeJson("university_info", {
+          schoolNames: ["南京航空航天大学"],
+          topicKey: "general",
+          topicLabel: "整体评价"
+        }))
+        .mockResolvedValueOnce("南航整体不错。")
+        .mockResolvedValueOnce(routeJson("admission", {
+          schoolNames: [],
+          province: "四川",
+          subjectType: "理科",
+          years: [2025, 2024, 2023],
+          queryTypes: ["score", "rank"]
+        }))
+        .mockResolvedValueOnce("南航四川理科近三年分数线可以参考缓存数据。")
+    } as unknown as LlmClient;
+    const logs = {
+      message: vi.fn()
+    } as unknown as LogStore;
+    const processor = new MessageProcessor(
+      settings,
+      universities,
+      nlu,
+      llm,
+      logs,
+      undefined,
+      answerSources,
+      admissions as never,
+      gaokaoCn as never
+    );
+    const conversationKey = "private:u1";
+
+    await processor.process({
+      platform: "onebot",
+      text: "南航怎么样",
+      messageType: "private",
+      userId: "u1",
+      conversationKey
+    });
+    const result = await processor.process({
+      platform: "onebot",
+      text: "四川近三年分数线呢",
+      messageType: "private",
+      userId: "u1",
+      conversationKey
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.reason).toBe("招生数据回答");
+    expect(nlu.analyze).toHaveBeenCalledTimes(1);
+    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
+      universityId: 6,
+      provinces: ["四川"],
+      subjectTypes: ["理科"]
+    }));
+    expect(admissions.queryScores).toHaveBeenCalledWith(expect.objectContaining({
+      universityId: 6,
+      provinceName: "四川",
+      subjectType: "理科",
+      years: [2025, 2024, 2023]
+    }));
+    expect(answerSources.create).toHaveBeenLastCalledWith(expect.objectContaining({
+      question: "四川近三年分数线呢",
+      universityName: "南京航空航天大学",
+      topic: "招生数据"
+    }));
+  });
+
   it("syncs school and major score data for admission score queries", async () => {
     const settings = {
       runtime: () => ({
         onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        site: {
+          publicBaseUrl: "http://127.0.0.1:8787",
+          filingNumber: ""
+        },
         llm: {
           baseUrl: "https://llm.example/v1",
           apiKey: "test-key",
@@ -898,7 +1073,31 @@ describe("MessageProcessor", () => {
       }))
     } as unknown as NaturalLanguageService;
     const admissions = {
-      queryPlans: vi.fn(() => []),
+      queryPlans: vi.fn(() => [
+        {
+          id: 70,
+          universityId: 7,
+          universityName: "南京航空航天大学",
+          sourceSchoolId: "452",
+          year: 2026,
+          provinceName: "四川",
+          subjectType: "物理类",
+          batch: "本科一批",
+          planGroup: null,
+          majorName: "航空航天类",
+          planCount: 24,
+          schoolPlanCount: null,
+          majorCount: null,
+          tuition: "6380",
+          duration: "四年",
+          campus: null,
+          selectionRequirements: "物理,化学",
+          sourceUrl: "https://www.gaokao.cn/school/452/plan",
+          sourceRecordId: "89",
+          rawJson: "{}",
+          fetchedAt: "2026-06-25T01:00:00.000Z"
+        }
+      ]),
       queryScores: vi.fn(() => [
         {
           id: 1,
@@ -914,12 +1113,12 @@ describe("MessageProcessor", () => {
           majorName: null,
           minScore: 622,
           minRank: 14500,
-          avgScore: null,
-          avgRank: null,
-          maxScore: null,
+          avgScore: 633,
+          avgRank: 10000,
+          maxScore: 650,
           planCount: 120,
-          controlScore: null,
-          diffScore: null,
+          controlScore: 520,
+          diffScore: 102,
           selectionRequirements: null,
           sourceUrl: "https://www.gaokao.cn/school/452/provinceline",
           sourceRecordId: "88",
@@ -940,12 +1139,12 @@ describe("MessageProcessor", () => {
           majorName: null,
           minScore: 615,
           minRank: 16000,
-          avgScore: null,
-          avgRank: null,
-          maxScore: null,
+          avgScore: 626,
+          avgRank: 12000,
+          maxScore: 642,
           planCount: 118,
-          controlScore: null,
-          diffScore: null,
+          controlScore: 515,
+          diffScore: 100,
           selectionRequirements: null,
           sourceUrl: "https://www.gaokao.cn/school/452/provinceline",
           sourceRecordId: "87",
@@ -966,12 +1165,12 @@ describe("MessageProcessor", () => {
           majorName: null,
           minScore: 610,
           minRank: 17000,
-          avgScore: null,
-          avgRank: null,
-          maxScore: null,
+          avgScore: 620,
+          avgRank: 13000,
+          maxScore: 638,
           planCount: 116,
-          controlScore: null,
-          diffScore: null,
+          controlScore: 520,
+          diffScore: 90,
           selectionRequirements: null,
           sourceUrl: "https://www.gaokao.cn/school/452/provinceline",
           sourceRecordId: "86",
@@ -1001,10 +1200,61 @@ describe("MessageProcessor", () => {
         error: null,
         fetchedAt: "2026-06-25T00:00:00.000Z"
       })),
+      listSources: vi.fn(() => [
+        {
+          id: 1888,
+          source: "gaokao_cn",
+          sourceKind: "plan-major",
+          universityId: 7,
+          universityName: "南京航空航天大学",
+          sourceSchoolId: "452",
+          sourceUrl: "https://api.zjzw.cn/web/api/?uri=apidata/api/gkv3/plan/school&school_id=452&local_province_id=51&local_type_id=2073&year=2026&page=1&size=10",
+          requestJson: JSON.stringify({
+            uri: "apidata/api/gkv3/plan/school",
+            school_id: "452",
+            local_province_id: "51",
+            local_type_id: "2073",
+            year: 2026,
+            page: 1,
+            size: 10
+          }),
+          responseJson: JSON.stringify({ code: "0000", message: "成功---success", data: { item: [], numFound: 0 } }),
+          status: "success",
+          error: null,
+          fetchedAt: "2026-06-25T01:01:00.000Z"
+        },
+        {
+          id: 88,
+          source: "gaokao_cn",
+          sourceKind: "score-school",
+          universityId: 7,
+          universityName: "南京航空航天大学",
+          sourceSchoolId: "452",
+          sourceUrl: "https://api.zjzw.cn/web/api/?uri=apidata/api/gk/score/province&school_id=452&local_province_id=51&local_type_id=2&year=2025&page=1&size=20",
+          requestJson: "{}",
+          responseJson: "{}",
+          status: "success",
+          error: null,
+          fetchedAt: "2026-06-25T00:00:00.000Z"
+        }
+      ]),
       getMapping: vi.fn(() => null)
     };
     const gaokaoCn = {
-      sync: vi.fn().mockResolvedValue({ mapped: 1, total: 1 })
+      sync: vi.fn().mockResolvedValue({
+        mapped: 1,
+        total: 1,
+        candidateTotal: 1,
+        offset: 0,
+        nextOffset: 0,
+        planRows: 0,
+        schoolScoreRows: 0,
+        majorScoreRows: 0,
+        sourceRows: 5,
+        skippedRequests: 0,
+        skipped: 0,
+        errors: []
+      })
     };
     const llm = {
       chat: vi.fn()
@@ -1016,6 +1266,303 @@ describe("MessageProcessor", () => {
           queryTypes: ["score", "rank"]
         }))
         .mockResolvedValueOnce("南航四川近三年分数线可以参考缓存数据。")
+    } as unknown as LlmClient;
+    const logs = {
+      message: vi.fn()
+    } as unknown as LogStore;
+    const answerSources = {
+      create: vi.fn(() => "source-token")
+    } as unknown as AnswerSourceStore;
+    const universities = {
+      getUniversity: vi.fn(() => university),
+      getSchoolProfile: vi.fn(() => ({
+        universityId: 7,
+        source: "gaokao_cn",
+        sourceSchoolId: "452",
+        sourceUrl: "https://www.gaokao.cn/school/452",
+        payloadJson: "{}",
+        profileText: "掌上高考 school_id：452\n所在地：江苏 南京\n标签：211、双一流\n学校类型：理工类",
+        updatedAt: "2026-06-25T01:00:00.000Z"
+      }))
+    } as unknown as UniversityRepository;
+    const processor = new MessageProcessor(
+      settings,
+      universities,
+      nlu,
+      llm,
+      logs,
+      undefined,
+      answerSources,
+      admissions as never,
+      gaokaoCn as never
+    );
+
+    const result = await processor.process({
+      platform: "debug",
+      text: "南航四川近三年分数线和位次",
+      messageType: "private",
+      userId: "u1",
+      conversationKey: "private:u1"
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.reason).toBe("招生数据回答");
+    expect(result.sourcePageUrl).toBe("http://127.0.0.1:8787/sources/source-token");
+    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
+      universityId: 7,
+      provinces: ["四川"],
+      subjectTypes: ["物理类"],
+      planYears: [2026],
+      includePlans: true,
+      includeScores: false,
+      includePlanDetails: false,
+      skipExisting: true
+    }));
+    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
+      universityId: 7,
+      provinces: ["四川"],
+      subjectTypes: ["物理类"],
+      scoreYears: [2025],
+      includePlans: false,
+      includeScores: true,
+      includeSpecialScores: false,
+      skipExisting: true
+    }));
+    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
+      universityId: 7,
+      provinces: ["四川"],
+      subjectTypes: ["理科"],
+      scoreYears: [2024, 2023],
+      includePlans: false,
+      includeScores: true,
+      includeSpecialScores: false,
+      skipExisting: true
+    }));
+    expect(admissions.queryScores).toHaveBeenCalledWith(expect.objectContaining({
+      universityId: 7,
+      provinceName: "四川",
+      subjectType: "理科",
+      subjectTypes: ["物理类", "理科"],
+      years: [2025, 2024, 2023]
+    }));
+    expect(admissions.queryPlans).toHaveBeenCalledWith(expect.objectContaining({
+      universityId: 7,
+      provinceName: "四川",
+      subjectType: "理科",
+      subjectTypes: ["物理类", "理科"],
+      years: [2026]
+    }));
+    const prompt = JSON.stringify(vi.mocked(llm.chat).mock.calls[1][0]);
+    expect(prompt).toContain("掌上高考院校基础信息");
+    expect(prompt).toContain("所在地：江苏 南京");
+    expect(prompt).toContain("标签：211、双一流");
+    expect(prompt).toContain("院校基础信息补充表：school_profiles");
+    expect(answerSources.create).toHaveBeenCalledWith(expect.objectContaining({
+      topic: "招生数据",
+      schoolProfileText: expect.stringContaining("所在地：江苏 南京")
+    }));
+    expect(prompt).toContain("科类口径提示");
+    expect(prompt).toContain("实际检索科类：物理类 / 理科");
+    expect(prompt).toContain("2026 | 招生计划 | 物理类");
+    expect(prompt).toContain("航空航天类");
+    expect(prompt).toContain("平均分 | 平均位次 | 最高分 | 省控线 | 线差");
+    expect(prompt).toContain("622 | 14500 | 633 | 10000 | 650 | 520 | 102");
+    expect(prompt).toContain("分数趋势摘要");
+    expect(prompt).toContain("最低位次区间：14500-17000");
+    expect(prompt).toContain("平均分区间：620-633");
+    expect(prompt).toContain("最高分区间：638-650");
+    expect(prompt).toContain("省控线区间：515-520");
+    expect(prompt).toContain("线差区间：90-102");
+    expect(prompt).toContain("2025 相比 2024 位次前移");
+    expect(prompt).toContain("掌上高考来源快照：");
+    expect(prompt).toContain("score-school");
+    expect(prompt).toContain("plan-major");
+    expect(prompt).toContain("item_count=1");
+    expect(prompt).toContain("item_count=0");
+  });
+
+  it("stops admission realtime sync after Gaokao.cn rate limits", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1600,
+          timeoutMs: 45000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: false,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5
+        }
+      })
+    } as SettingsStore;
+    const university = {
+      id: 71,
+      name: "三亚学院",
+      slug: "san-ya-xue-yuan",
+      file_path: "docs/universities/san-ya-xue-yuan.md",
+      source_url: "https://example.com/syu.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "三亚学院",
+      score: 0.95
+    };
+    const nlu = {
+      analyze: vi.fn(() => ({
+        candidates: [university],
+        reason: "本地学校候选，仅供模型路由参考"
+      }))
+    } as unknown as NaturalLanguageService;
+    const admissions = {
+      queryPlans: vi.fn(() => []),
+      queryScores: vi.fn(() => []),
+      getMapping: vi.fn(() => null),
+      listSources: vi.fn(() => [])
+    };
+    const gaokaoCn = {
+      sync: vi.fn().mockResolvedValue({
+        source: "gaokao_cn",
+        total: 1,
+        candidateTotal: 1,
+        offset: 0,
+        nextOffset: 0,
+        mapped: 0,
+        planRows: 0,
+        schoolScoreRows: 0,
+        majorScoreRows: 0,
+        sourceRows: 1,
+        skippedRequests: 0,
+        skipped: 0,
+        errors: [{ university: "三亚学院", message: "Gaokao.cn plan-school-summary returned 1069: 访问太过频繁，请稍后再试" }]
+      })
+    };
+    const llm = {
+      chat: vi.fn()
+        .mockResolvedValueOnce(routeJson("admission", {
+          schoolNames: ["三亚学院"],
+          province: "北京",
+          subjectType: "综合改革",
+          years: [2025],
+          queryTypes: ["score", "rank"]
+        }))
+        .mockResolvedValueOnce("掌上高考当前限流，先参考本地缓存。")
+    } as unknown as LlmClient;
+    const logs = {
+      message: vi.fn()
+    } as unknown as LogStore;
+    const processor = new MessageProcessor(
+      settings,
+      { getUniversity: vi.fn(() => university) } as unknown as UniversityRepository,
+      nlu,
+      llm,
+      logs,
+      undefined,
+      undefined,
+      admissions as never,
+      gaokaoCn as never
+    );
+
+    const result = await processor.process({
+      platform: "debug",
+      text: "三亚学院北京近三年分数线",
+      messageType: "private",
+      userId: "u1",
+      conversationKey: "private:u1"
+    });
+
+    expect(result.handled).toBe(true);
+    expect(gaokaoCn.sync).toHaveBeenCalledTimes(1);
+    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
+      includePlans: true,
+      includeScores: false
+    }));
+    const prompt = JSON.stringify(vi.mocked(llm.chat).mock.calls[1][0]);
+    expect(prompt).toContain("已停止继续实时补数");
+    expect(prompt).toContain("错误 1");
+  });
+
+  it("shares the Bot realtime admission request budget across plan and score syncs", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1600,
+          timeoutMs: 45000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: false,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5
+        },
+        sync: {
+          gaokaoCnRequestDelayMs: 0,
+          gaokaoCnRateLimitCooldownMinutes: 720,
+          gaokaoCnMaxRequestsPerRun: 1,
+          gaokaoCnSkipExisting: true
+        }
+      })
+    } as SettingsStore;
+    const university = {
+      id: 72,
+      name: "南京航空航天大学",
+      slug: "nan-jing-hang-kong-hang-tian-da-xue",
+      file_path: "docs/universities/nan-jing-hang-kong-hang-tian-da-xue.md",
+      source_url: "https://example.com/nuaa.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "南航",
+      score: 0.95
+    };
+    const nlu = {
+      analyze: vi.fn(() => ({
+        candidates: [university],
+        reason: "本地学校候选，仅供模型路由参考"
+      }))
+    } as unknown as NaturalLanguageService;
+    const admissions = {
+      queryPlans: vi.fn(() => []),
+      queryScores: vi.fn(() => []),
+      getMapping: vi.fn(() => null),
+      listSources: vi.fn(() => [])
+    };
+    const gaokaoCn = {
+      sync: vi.fn().mockResolvedValue({
+        source: "gaokao_cn",
+        total: 1,
+        candidateTotal: 1,
+        offset: 0,
+        nextOffset: 0,
+        mapped: 1,
+        planRows: 0,
+        schoolScoreRows: 0,
+        majorScoreRows: 0,
+        sourceRows: 1,
+        sourceRequests: 1,
+        sourceRequestBudget: 1,
+        requestBudgetExhausted: true,
+        skippedRequests: 0,
+        skipped: 0,
+        errors: []
+      })
+    };
+    const llm = {
+      chat: vi.fn()
+        .mockResolvedValueOnce(routeJson("admission", {
+          schoolNames: ["南京航空航天大学"],
+          province: "四川",
+          subjectType: "理科",
+          years: [2025, 2024, 2023],
+          queryTypes: ["score", "rank"]
+        }))
+        .mockResolvedValueOnce("预算用完后先参考本地缓存。")
     } as unknown as LlmClient;
     const logs = {
       message: vi.fn()
@@ -1041,40 +1588,15 @@ describe("MessageProcessor", () => {
     });
 
     expect(result.handled).toBe(true);
-    expect(result.reason).toBe("招生数据回答");
+    expect(gaokaoCn.sync).toHaveBeenCalledTimes(1);
     expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
-      universityId: 7,
-      provinces: ["四川"],
-      subjectTypes: ["物理类"],
-      scoreYears: [2025],
-      includePlans: false,
-      includeScores: true,
-      includeSpecialScores: true
-    }));
-    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
-      universityId: 7,
-      provinces: ["四川"],
-      subjectTypes: ["理科"],
-      scoreYears: [2024, 2023],
-      includePlans: false,
-      includeScores: true,
-      includeSpecialScores: true
-    }));
-    expect(admissions.queryScores).toHaveBeenCalledWith(expect.objectContaining({
-      universityId: 7,
-      provinceName: "四川",
-      subjectType: "理科",
-      subjectTypes: ["物理类", "理科"],
-      years: [2025, 2024, 2023]
+      includePlans: true,
+      includeScores: false,
+      maxSourceRequests: 1
     }));
     const prompt = JSON.stringify(vi.mocked(llm.chat).mock.calls[1][0]);
-    expect(prompt).toContain("科类口径提示");
-    expect(prompt).toContain("分数趋势摘要");
-    expect(prompt).toContain("最低位次区间：14500-17000");
-    expect(prompt).toContain("2025 相比 2024 位次前移");
-    expect(prompt).toContain("掌上高考来源快照：");
-    expect(prompt).toContain("score-school");
-    expect(prompt).toContain("item_count=1");
+    expect(prompt).toContain("实时同步节流");
+    expect(prompt).toContain("本批已用 1/1 次源站请求预算");
   });
 
   it("uses historical scores and explains when the user asks for current-year score lines", async () => {
@@ -1768,8 +2290,95 @@ describe("MessageProcessor", () => {
     expect(result.reason).toBe("招生查询需要科类");
     expect(result.reply).toContain("哪个科类");
     expect(result.reply).toContain("物理类");
+    expect(result.reply).toContain("2025 年按");
+    expect(result.reply).toContain("2024、2023 年按");
+    expect(result.reply).toContain("自动换算口径");
     expect(gaokaoCn.sync).not.toHaveBeenCalled();
     expect(admissions.queryScores).not.toHaveBeenCalled();
+  });
+
+  it("asks for physics/history directly when admission years are after a province transition", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1600,
+          timeoutMs: 45000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: false,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5
+        }
+      })
+    } as SettingsStore;
+    const university = {
+      id: 18,
+      name: "南京航空航天大学",
+      slug: "nan-jing-hang-kong-hang-tian-da-xue",
+      file_path: "docs/universities/nan-jing-hang-kong-hang-tian-da-xue.md",
+      source_url: "https://example.com/nuaa.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "南京航空航天大学",
+      score: 0.95
+    };
+    const nlu = {
+      analyze: vi.fn(() => ({
+        candidates: [university],
+        reason: "本地学校候选，仅供模型路由参考"
+      }))
+    } as unknown as NaturalLanguageService;
+    const llm = {
+      chat: vi.fn().mockResolvedValueOnce(routeJson("admission", {
+        schoolNames: ["南京航空航天大学"],
+        province: "四川",
+        subjectType: null,
+        years: [2026],
+        queryTypes: ["plan"]
+      }))
+    } as unknown as LlmClient;
+    const logs = {
+      message: vi.fn()
+    } as unknown as LogStore;
+    const gaokaoCn = {
+      sync: vi.fn()
+    };
+    const admissions = {
+      queryPlans: vi.fn(),
+      queryScores: vi.fn()
+    };
+    const processor = new MessageProcessor(
+      settings,
+      {} as UniversityRepository,
+      nlu,
+      llm,
+      logs,
+      undefined,
+      undefined,
+      admissions as never,
+      gaokaoCn as never
+    );
+
+    const result = await processor.process({
+      platform: "debug",
+      text: "南航今年四川招生计划",
+      messageType: "private",
+      userId: "u1",
+      conversationKey: "private:u1"
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.reason).toBe("招生查询需要科类");
+    expect(result.reply).toContain("四川 2025 年起");
+    expect(result.reply).toContain("物理类");
+    expect(result.reply).toContain("历史类");
+    expect(result.reply).not.toContain("理科”或“文科");
+    expect(gaokaoCn.sync).not.toHaveBeenCalled();
   });
 
   it("uses comprehensive reform automatically for admission queries in 3+3 provinces", async () => {
@@ -1789,6 +2398,10 @@ describe("MessageProcessor", () => {
           requireMentionInGroup: false,
           contextTtlMinutes: 10,
           cooldownSeconds: 5
+        },
+        sync: {
+          gaokaoCnRequestDelayMs: 9000,
+          gaokaoCnSkipExisting: false
         }
       })
     } as SettingsStore;
@@ -1884,7 +2497,9 @@ describe("MessageProcessor", () => {
     expect(result.reason).toBe("招生数据回答");
     expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
       provinces: ["浙江"],
-      subjectTypes: ["综合改革"]
+      subjectTypes: ["综合改革"],
+      requestDelayMs: 9000,
+      skipExisting: false
     }));
     expect(admissions.queryScores).toHaveBeenCalledWith(expect.objectContaining({
       provinceName: "浙江",
@@ -1972,20 +2587,8 @@ describe("MessageProcessor", () => {
           years: [2025, 2024, 2023],
           queryTypes: ["score", "rank"]
         }))
-        .mockResolvedValueOnce(routeJson("admission", {
-          schoolNames: [],
-          province: "四川",
-          subjectType: null,
-          years: [],
-          queryTypes: []
-        }))
-        .mockResolvedValueOnce(routeJson("admission", {
-          schoolNames: [],
-          province: null,
-          subjectType: "理科",
-          years: [],
-          queryTypes: []
-        }))
+        .mockResolvedValueOnce(routeJson("casual"))
+        .mockResolvedValueOnce(routeJson("casual"))
         .mockResolvedValueOnce("南航四川理科近三年分数线可以参考缓存数据。")
     } as unknown as LlmClient;
     const logs = {
@@ -2032,7 +2635,15 @@ describe("MessageProcessor", () => {
     expect(first.reason).toBe("招生查询需要省份");
     expect(second.reason).toBe("招生查询需要科类");
     expect(third.reason).toBe("招生数据回答");
-    expect(gaokaoCn.sync).toHaveBeenCalledTimes(2);
+    expect(gaokaoCn.sync).toHaveBeenCalledTimes(3);
+    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
+      universityId: 10,
+      provinces: ["四川"],
+      subjectTypes: ["物理类"],
+      planYears: [2026],
+      includePlans: true,
+      includeScores: false
+    }));
     expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
       universityId: 10,
       provinces: ["四川"],
@@ -2069,6 +2680,7 @@ function routeJson(
     province: null,
     subjectType: null,
     years: [],
+    planGroup: null,
     majorName: null,
     queryTypes: [],
     topicKey: null,

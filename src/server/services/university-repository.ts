@@ -97,13 +97,22 @@ export class UniversityRepository {
         DELETE FROM aliases;
         DELETE FROM answers;
         DELETE FROM questions;
-        DELETE FROM universities;
+        CREATE TEMP TABLE IF NOT EXISTS import_university_slugs(slug TEXT PRIMARY KEY);
+        DELETE FROM import_university_slugs;
       `);
 
-      const insertUniversity = this.database.db.prepare(`
+      const upsertUniversity = this.database.db.prepare(`
         INSERT INTO universities(name, slug, file_path, source_url, raw_markdown, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(slug) DO UPDATE SET
+          name = excluded.name,
+          file_path = excluded.file_path,
+          source_url = excluded.source_url,
+          raw_markdown = excluded.raw_markdown,
+          updated_at = excluded.updated_at
       `);
+      const getUniversityId = this.database.db.prepare("SELECT id FROM universities WHERE slug = ?");
+      const insertImportedSlug = this.database.db.prepare("INSERT OR IGNORE INTO import_university_slugs(slug) VALUES (?)");
       const insertQuestion = this.database.db.prepare(`
         INSERT INTO questions(university_id, question, topic, position)
         VALUES (?, ?, ?, ?)
@@ -114,7 +123,7 @@ export class UniversityRepository {
       `);
 
       for (const university of universities) {
-        const info = insertUniversity.run(
+        upsertUniversity.run(
           university.name,
           university.slug,
           university.filePath,
@@ -122,7 +131,8 @@ export class UniversityRepository {
           university.rawMarkdown,
           now
         );
-        const universityId = Number(info.lastInsertRowid);
+        insertImportedSlug.run(university.slug);
+        const universityId = Number((getUniversityId.get(university.slug) as { id: number }).id);
 
         for (const question of university.questions) {
           const qInfo = insertQuestion.run(universityId, question.question, question.topic, question.position);
@@ -132,6 +142,11 @@ export class UniversityRepository {
           }
         }
       }
+      this.database.db.exec(`
+        DELETE FROM universities
+        WHERE slug NOT IN (SELECT slug FROM import_university_slugs);
+        DROP TABLE import_university_slugs;
+      `);
 
       this.seedDefaultAliases();
       this.rebuildFts();

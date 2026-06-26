@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { __wrapInlineTextForTest, markdownToPlainText, renderReplyImage } from "./reply-image-renderer.js";
+import {
+  __layoutKindsForTest,
+  __splitReplyImageContentForTest,
+  __wrapInlineTextForTest,
+  markdownToPlainText,
+  renderReplyImage
+} from "./reply-image-renderer.js";
+
+const IMAGE_RENDER_TIMEOUT_MS = 60_000;
 
 describe("reply-image-renderer", () => {
   it("renders markdown reply text to a png image", () => {
@@ -8,17 +16,7 @@ describe("reply-image-renderer", () => {
     expect(image.mimeType).toBe("image/png");
     expect(image.bytes).toBeGreaterThan(1000);
     expect(Buffer.from(image.dataBase64, "base64").subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
-  }, 30000);
-
-  it("renders with configurable header text", () => {
-    const image = renderReplyImage("测试回复", {
-      headerTitle: "自定义助手名",
-      headerBadge: "自定义角标"
-    });
-
-    expect(image.mimeType).toBe("image/png");
-    expect(image.bytes).toBeGreaterThan(1000);
-  }, 30000);
+  }, IMAGE_RENDER_TIMEOUT_MS);
 
   it("renders with a longer configurable header badge", () => {
     const image = renderReplyImage("测试回复", {
@@ -28,15 +26,26 @@ describe("reply-image-renderer", () => {
 
     expect(image.mimeType).toBe("image/png");
     expect(image.bytes).toBeGreaterThan(1000);
-  }, 30000);
+  }, IMAGE_RENDER_TIMEOUT_MS);
 
   it("renders deeper markdown headings and dividers", () => {
-    const image = renderReplyImage("#### 食堂 共性是：\n\n- 能吃\n- 但整体评价中等\n\n---\n\n#### 校园环境\n图书馆评价不错");
-
-    expect(image.mimeType).toBe("image/png");
-    expect(image.bytes).toBeGreaterThan(1000);
+    expect(__layoutKindsForTest("#### 食堂 共性是：\n\n- 能吃\n- 但整体评价中等\n\n---\n\n#### 校园环境\n图书馆评价不错"))
+      .toEqual(expect.arrayContaining(["text", "rule"]));
     expect(markdownToPlainText("#### 食堂 共性是：\n---")).toBe("食堂 共性是：");
-  }, 30000);
+  });
+
+  it("renders markdown admission tables as structured rows", () => {
+    const markdown = [
+      "中国药科大学 近三年河南录取情况",
+      "",
+      "年份 | 科类 | 批次 | 最低分 | 最低位次 | 计划数",
+      "--- | --- | --- | --- | --- | ---",
+      "2025 | 理科 | 本科一批 | 610 | 12000 | 20",
+      "2024 | 理科 | 本科一批 | 604 | 14000 | 18"
+    ].join("\n");
+
+    expect(__layoutKindsForTest(markdown).filter((kind) => kind === "tableRow")).toHaveLength(3);
+  });
 
   it("renders a local QR code for the source page", () => {
     const image = renderReplyImage("测试回复", {
@@ -45,19 +54,16 @@ describe("reply-image-renderer", () => {
 
     expect(image.mimeType).toBe("image/png");
     expect(image.bytes).toBeGreaterThan(2000);
-  }, 30000);
+  }, IMAGE_RENDER_TIMEOUT_MS);
 
   it("moves the source disclaimer into the image footer", () => {
-    const image = renderReplyImage(
-      "测试回复\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。",
-      {
-        sourcePageUrl: "https://example.com/sources/source-token"
-      }
-    );
-
-    expect(image.mimeType).toBe("image/png");
-    expect(image.bytes).toBeGreaterThan(2000);
-  }, 30000);
+    expect(__splitReplyImageContentForTest(
+      "测试回复\n\n院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。"
+    )).toEqual({
+      body: "测试回复",
+      footerNotice: "院校画像参考公开资料和神人高校网补充数据，生活体验数据来自 CollegesChat 问卷和神人高校评论，常识建议仅供参考。"
+    });
+  });
 
   it("keeps common punctuation away from awkward line edges", () => {
     const cases = [

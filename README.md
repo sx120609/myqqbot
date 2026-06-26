@@ -111,29 +111,33 @@ sudo SRGAOXIAO_SYNC_ALL=1 SRGAOXIAO_PAGE_SIZE=100 SRGAOXIAO_REVIEW_MAX_PAGES=20 
 
 WebUI 的“高校数据”页可以直接开启和调整应用内自动同步，包括 CollegesChat 主数据同步间隔、神人高校全站画像同步间隔、评论每校最多页数。应用内自动同步设置保存在 SQLite 中，不需要 root 权限。
 
-同步一批掌上高考招生数据，默认抓 2026 招生计划和 2023-2025 历史分数线，先跑 10 所学校测试：
+同步一批掌上高考招生数据，默认抓 2026 招生计划和 2023-2025 历史分数线。这个源站容易限流，建议按后台补库方式慢慢跑：每批 1 所学校、请求间隔 60 秒、每批源站请求预算 4 次、跳过已有覆盖。
 
 ```bash
 cd /opt/myqqbot
-sudo npm run sync:gaokao-cn -- --limit=10
+sudo npm run sync:gaokao-cn -- --limit=1 --request-delay-ms=60000 --max-source-requests=4 --skip-existing
 ```
 
 也可以用部署脚本直接跑：
 
 ```bash
-sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --limit=10
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --limit=1 --request-delay-ms=60000 --max-source-requests=4 --skip-existing
 ```
 
 常用筛选和续跑：
 
 ```bash
-sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --query=中国药科大学 --provinces=四川,河南 --limit=1
-sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --plans-only --plan-years=2026 --limit=20
-sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --scores-only --score-years=2025,2024,2023 --offset=20 --limit=20
-sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --plans-only --loop --max-batches=10 --limit=20
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --query=中国药科大学 --provinces=四川,河南 --limit=1 --max-source-requests=4
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --plans-only --plan-years=2026 --limit=1 --request-delay-ms=60000 --max-source-requests=4 --skip-existing
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --scores-only --score-years=2025,2024,2023 --offset=20 --limit=1 --request-delay-ms=60000 --max-source-requests=4 --skip-existing
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --plans-only --loop --max-batches=10 --limit=1 --batch-delay-ms=900000 --request-delay-ms=60000 --max-source-requests=4 --skip-existing
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --plans-only --limit=1 --request-delay-ms=60000 --max-source-requests=4 --skip-existing
+sudo APP_DIR=/opt/myqqbot scripts/deploy.sh sync-gaokao-cn --plans-only --skip-existing --loop --limit=1
 ```
 
-每批结束会打印 `next offset` 和下一批命令。WebUI 的“招生数据”页也可以开启掌上高考定期同步、调整同步年份、省份范围、每批学校数、失败重试次数，并查看映射和失败日志。
+每批结束会打印 `next offset` 和下一批命令。`--loop` 多批同步默认每批间隔 15 分钟，也可以用 `--batch-delay-ms` 调整。WebUI 的“招生数据”页也可以开启掌上高考定期同步、调整同步年份、省份范围、每批学校数、每轮批次数、批次间隔毫秒、请求间隔毫秒、每批请求预算、限流冷却分钟、跳过已有覆盖、失败重试次数，并查看映射、失败日志和按年份/省份聚合的最大覆盖缺口。长期全站补数据建议开启“跳过已有覆盖”，程序会分别判断计划汇总、专业计划、院校线、专业线是否已有本地数据，已覆盖的接口不再请求源站。每批请求预算默认 4，预算用完会主动暂停当前批次并保留 offset，不算源站错误；下一轮会从同一 offset 继续，并跳过已经入库的接口。普通网络/源站临时错误会按失败重试次数延迟重试，默认第一次等待 30 分钟，之后指数退避；若源站返回 `1069 / 访问太过频繁`，程序会停止当前批次并保留 offset，且不会走失败重试，定时同步、手动同步和 QQ 问答临时补数都会进入共享冷却，默认 720 分钟。国内机器建议请求间隔保持 60000 毫秒以上，生产环境即使误填更低也会自动抬到 10000 毫秒；需要加速时优先缩小省份、年份、降低每批请求预算或关闭专业线，不建议提高每批学校数。
+
+Bot 遇到“近三年分数线、最低位次、专业录取分”等问题时，会优先查询 2023-2025 历史分数，同时补充当前招生计划年份的数据作为报考参考；如果用户明确问招生计划或多校对比，则按用户指定年份范围抓计划。
 
 如需定期更新高校数据，可启用 systemd 定时器，默认每天 `03:40` 附近执行一次：
 

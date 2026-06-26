@@ -1,4 +1,6 @@
 import type { AppDatabase, SqlValue } from "../db.js";
+import { defaultAdmissionPlanYears, defaultAdmissionScoreYears } from "./admission-calendar.js";
+import { defaultAdmissionSubjectTypeNamesForProvinceYear, gaokaoProvinceNames } from "./admission-regions.js";
 
 export const ADMISSION_SOURCE = "gaokao_cn";
 
@@ -136,9 +138,35 @@ export interface AdmissionQuery {
   subjectTypes?: string[] | null;
   years?: number[];
   batch?: string | null;
+  planGroup?: string | null;
   scoreType?: "school" | "major" | null;
   majorName?: string | null;
   limit?: number;
+}
+
+export interface AdmissionCoverageCheck {
+  source?: string;
+  universityId: number;
+  sourceSchoolId?: string | null;
+  year: number;
+  provinceName: string;
+  subjectType?: string | null;
+}
+
+export interface AdmissionPlanCoverageCheck extends AdmissionCoverageCheck {
+  majorOnly?: boolean;
+}
+
+export interface AdmissionScoreCoverageCheck extends AdmissionCoverageCheck {
+  scoreType: "school" | "major";
+}
+
+export interface AdmissionSourceCoverageCheck {
+  source?: string;
+  sourceKind: string;
+  universityId: number;
+  sourceSchoolId?: string | null;
+  request: Record<string, unknown>;
 }
 
 export interface AdmissionScoreRow {
@@ -223,6 +251,38 @@ export interface AdmissionCoverageStats {
   scoreYears: AdmissionCoverageYear[];
 }
 
+export type AdmissionCoverageGapKind = "plan" | "school_score" | "major_score";
+
+export interface AdmissionCoverageGap {
+  kind: AdmissionCoverageGapKind;
+  year: number;
+  provinceName: string;
+  subjectType: string | null;
+  totalMappedUniversities: number;
+  coveredUniversities: number;
+  missingUniversities: number;
+  rowCount: number;
+  coverageRatio: number;
+}
+
+export interface AdmissionCoverageMissingUniversity {
+  universityId: number;
+  universityName: string;
+  sourceSchoolId: string;
+  sourceSchoolName: string;
+  matchStatus: AdmissionSchoolMapping["matchStatus"];
+  updatedAt: string;
+}
+
+export interface AdmissionCoverageGapQuery {
+  planYears?: number[];
+  scoreYears?: number[];
+  provinces?: string[];
+  subjectTypes?: string[];
+  limit?: number;
+  source?: string;
+}
+
 export interface AdmissionUnmappedUniversity {
   id: number;
   name: string;
@@ -241,7 +301,7 @@ export interface AdmissionMappingIssue {
   updatedAt: string;
 }
 
-const NORMALIZATION_VERSION = "2026-06-26-v3";
+const NORMALIZATION_VERSION = "2026-06-26-v5";
 
 export class AdmissionRepository {
   constructor(private readonly database: AppDatabase) {
@@ -343,6 +403,91 @@ export class AdmissionRepository {
     return row.count;
   }
 
+  hasPlanCoverage(input: AdmissionPlanCoverageCheck): boolean {
+    const where = [
+      "source = ?",
+      "university_id = ?",
+      "year = ?",
+      "province_name = ?"
+    ];
+    const params: SqlValue[] = [
+      input.source ?? ADMISSION_SOURCE,
+      input.universityId,
+      input.year,
+      normalizeProvinceName(input.provinceName)
+    ];
+    if (input.sourceSchoolId) {
+      where.push("source_school_id = ?");
+      params.push(input.sourceSchoolId);
+    }
+    const subjectType = normalizeSubjectType(input.subjectType);
+    if (subjectType) {
+      where.push("subject_type = ?");
+      params.push(subjectType);
+    }
+    if (input.majorOnly) {
+      where.push("major_name IS NOT NULL AND major_name <> ''");
+    }
+    return this.hasRows("admission_plans", where, params);
+  }
+
+  hasScoreCoverage(input: AdmissionScoreCoverageCheck): boolean {
+    const where = [
+      "source = ?",
+      "score_type = ?",
+      "university_id = ?",
+      "year = ?",
+      "province_name = ?"
+    ];
+    const params: SqlValue[] = [
+      input.source ?? ADMISSION_SOURCE,
+      input.scoreType,
+      input.universityId,
+      input.year,
+      normalizeProvinceName(input.provinceName)
+    ];
+    if (input.sourceSchoolId) {
+      where.push("source_school_id = ?");
+      params.push(input.sourceSchoolId);
+    }
+    const subjectType = normalizeSubjectType(input.subjectType);
+    if (subjectType) {
+      where.push("subject_type = ?");
+      params.push(subjectType);
+    }
+    return this.hasRows("admission_scores", where, params);
+  }
+
+  hasSourceCoverage(input: AdmissionSourceCoverageCheck): boolean {
+    const where = [
+      "source = ?",
+      "source_kind = ?",
+      "university_id = ?",
+      "status = 'success'"
+    ];
+    const params: SqlValue[] = [
+      input.source ?? ADMISSION_SOURCE,
+      input.sourceKind,
+      input.universityId
+    ];
+    if (input.sourceSchoolId) {
+      where.push("source_school_id = ?");
+      params.push(input.sourceSchoolId);
+    }
+    const rows = this.database.db
+      .prepare(
+        `
+        SELECT request_json AS requestJson, response_json AS responseJson
+        FROM admission_sources
+        WHERE ${where.join(" AND ")}
+        ORDER BY fetched_at DESC, id DESC
+        LIMIT 80
+      `
+      )
+      .all(...params) as Array<{ requestJson: string; responseJson: string | null }>;
+    return hasCompleteSourceCoverage(rows, input.request);
+  }
+
   coverageStats(source = ADMISSION_SOURCE): AdmissionCoverageStats {
     const scalar = (sql: string, params: SqlValue[] = []): number => {
       const row = this.database.db.prepare(sql).get(...params) as { count: number } | undefined;
@@ -384,6 +529,118 @@ export class AdmissionRepository {
       planYears: this.coverageYears("admission_plans", source),
       scoreYears: this.coverageYears("admission_scores", source)
     };
+  }
+
+  coverageGaps(query: AdmissionCoverageGapQuery = {}): AdmissionCoverageGap[] {
+    const source = query.source ?? ADMISSION_SOURCE;
+    const totalMappedUniversities = this.countMappings(source);
+    const provinces = normalizeCoverageGapProvinces(query.provinces);
+    const planYears = normalizeCoverageGapYears(query.planYears, defaultAdmissionPlanYears());
+    const scoreYears = normalizeCoverageGapYears(query.scoreYears, defaultAdmissionScoreYears());
+    const explicitSubjectTypes = normalizeCoverageGapSubjectTypes(query.subjectTypes);
+    const gaps: AdmissionCoverageGap[] = [];
+
+    for (const year of planYears) {
+      for (const provinceName of provinces) {
+        for (const subjectType of coverageSubjectTypesForProvinceYear(provinceName, year, explicitSubjectTypes)) {
+          gaps.push(this.coverageGapFor({
+            kind: "plan",
+            source,
+            totalMappedUniversities,
+            table: "admission_plans",
+            year,
+            provinceName,
+            subjectType
+          }));
+        }
+      }
+    }
+    for (const year of scoreYears) {
+      for (const provinceName of provinces) {
+        for (const subjectType of coverageSubjectTypesForProvinceYear(provinceName, year, explicitSubjectTypes)) {
+          gaps.push(this.coverageGapFor({
+            kind: "school_score",
+            source,
+            totalMappedUniversities,
+            table: "admission_scores",
+            scoreType: "school",
+            year,
+            provinceName,
+            subjectType
+          }));
+          gaps.push(this.coverageGapFor({
+            kind: "major_score",
+            source,
+            totalMappedUniversities,
+            table: "admission_scores",
+            scoreType: "major",
+            year,
+            provinceName,
+            subjectType
+          }));
+        }
+      }
+    }
+
+    return gaps
+      .sort((left, right) =>
+        right.missingUniversities - left.missingUniversities ||
+        left.coverageRatio - right.coverageRatio ||
+        right.year - left.year ||
+        left.provinceName.localeCompare(right.provinceName) ||
+        String(left.subjectType ?? "").localeCompare(String(right.subjectType ?? ""))
+      )
+      .slice(0, clampLimit(query.limit ?? 24));
+  }
+
+  coverageMissingUniversities(input: {
+    kind: AdmissionCoverageGapKind;
+    year: number;
+    provinceName: string;
+    subjectType?: string | null;
+    source?: string;
+    limit?: number;
+  }): AdmissionCoverageMissingUniversity[] {
+    const source = input.source ?? ADMISSION_SOURCE;
+    const provinceName = normalizeProvinceName(input.provinceName);
+    const table = input.kind === "plan" ? "admission_plans" : "admission_scores";
+    const scoreType = input.kind === "school_score" ? "school" : input.kind === "major_score" ? "major" : null;
+    const coverageWhere = [
+      `${table}.source = m.source`,
+      `${table}.university_id = m.university_id`,
+      `${table}.source_school_id = m.source_school_id`,
+      `${table}.year = ?`,
+      `${table}.province_name = ?`
+    ];
+    const coverageParams: SqlValue[] = [input.year, provinceName];
+    const subjectType = normalizeSubjectType(input.subjectType);
+    if (subjectType) {
+      coverageWhere.push(`${table}.subject_type = ?`);
+      coverageParams.push(subjectType);
+    }
+    if (scoreType) {
+      coverageWhere.push(`${table}.score_type = ?`);
+      coverageParams.push(scoreType);
+    }
+    return this.database.db
+      .prepare(
+        `
+        SELECT m.university_id AS universityId, u.name AS universityName,
+          m.source_school_id AS sourceSchoolId, m.source_school_name AS sourceSchoolName,
+          m.match_status AS matchStatus, m.updated_at AS updatedAt
+        FROM admission_school_mappings m
+        JOIN universities u ON u.id = m.university_id
+        WHERE m.source = ?
+          AND m.match_status IN ('matched', 'manual')
+          AND NOT EXISTS (
+            SELECT 1 FROM ${table}
+            WHERE ${coverageWhere.join(" AND ")}
+          )
+        ORDER BY u.name
+        LIMIT ?
+      `
+      )
+      .all(source, ...coverageParams, clampLimit(input.limit ?? 80)) as unknown as AdmissionCoverageMissingUniversity[];
   }
 
   listUnmappedUniversities(query = "", limit = 50): AdmissionUnmappedUniversity[] {
@@ -783,7 +1040,8 @@ export class AdmissionRepository {
         p.subject_type,
         p.batch,
         CASE WHEN p.major_name IS NULL THEN 0 ELSE 1 END,
-        p.major_name
+        p.major_name,
+        p.plan_group
       LIMIT ?
     `;
     return this.database.db.prepare(sql).all(...params, clampLimit(query.limit)) as unknown as AdmissionPlanRow[];
@@ -836,9 +1094,13 @@ export class AdmissionRepository {
     }>;
     const seen = new Set<string>();
     const deleteStmt = this.database.db.prepare("DELETE FROM admission_plans WHERE id = ?");
-    const updateStmt = this.database.db.prepare("UPDATE admission_plans SET unique_key = ?, batch = ?, plan_group = ?, major_name = ? WHERE id = ?");
+    const updateStmt = this.database.db.prepare(
+      "UPDATE admission_plans SET unique_key = ?, province_name = ?, subject_type = ?, batch = ?, plan_group = ?, major_name = ? WHERE id = ?"
+    );
 
     for (const row of rows) {
+      const provinceName = normalizeProvinceName(row.provinceName);
+      const subjectType = normalizeSubjectType(row.subjectType);
       const batch = normalizeBatchName(row.batch);
       const planGroup = normalizePlanGroup(row.planGroup);
       const majorName = normalizeMajorName(row.majorName);
@@ -847,8 +1109,8 @@ export class AdmissionRepository {
         row.source,
         row.sourceSchoolId,
         row.year,
-        normalizeProvinceName(row.provinceName),
-        normalizeSubjectType(row.subjectType),
+        provinceName,
+        subjectType,
         batch,
         majorName,
         planGroup
@@ -858,8 +1120,15 @@ export class AdmissionRepository {
         continue;
       }
       seen.add(uniqueKey);
-      if (uniqueKey !== row.uniqueKey || batch !== row.batch || planGroup !== row.planGroup || majorName !== row.majorName) {
-        updateStmt.run(uniqueKey, batch, planGroup, majorName, row.id);
+      if (
+        uniqueKey !== row.uniqueKey ||
+        provinceName !== row.provinceName ||
+        subjectType !== row.subjectType ||
+        batch !== row.batch ||
+        planGroup !== row.planGroup ||
+        majorName !== row.majorName
+      ) {
+        updateStmt.run(uniqueKey, provinceName, subjectType, batch, planGroup, majorName, row.id);
       }
     }
   }
@@ -890,9 +1159,13 @@ export class AdmissionRepository {
     }>;
     const seen = new Set<string>();
     const deleteStmt = this.database.db.prepare("DELETE FROM admission_scores WHERE id = ?");
-    const updateStmt = this.database.db.prepare("UPDATE admission_scores SET unique_key = ?, batch = ?, plan_group = ?, major_name = ? WHERE id = ?");
+    const updateStmt = this.database.db.prepare(
+      "UPDATE admission_scores SET unique_key = ?, province_name = ?, subject_type = ?, batch = ?, plan_group = ?, major_name = ? WHERE id = ?"
+    );
 
     for (const row of rows) {
+      const provinceName = normalizeProvinceName(row.provinceName);
+      const subjectType = normalizeSubjectType(row.subjectType);
       const batch = normalizeBatchName(row.batch);
       const planGroup = normalizePlanGroup(row.planGroup);
       const majorName = normalizeMajorName(row.majorName);
@@ -902,8 +1175,8 @@ export class AdmissionRepository {
         row.source,
         row.sourceSchoolId,
         row.year,
-        normalizeProvinceName(row.provinceName),
-        normalizeSubjectType(row.subjectType),
+        provinceName,
+        subjectType,
         batch,
         majorName,
         planGroup
@@ -913,8 +1186,15 @@ export class AdmissionRepository {
         continue;
       }
       seen.add(uniqueKey);
-      if (uniqueKey !== row.uniqueKey || batch !== row.batch || planGroup !== row.planGroup || majorName !== row.majorName) {
-        updateStmt.run(uniqueKey, batch, planGroup, majorName, row.id);
+      if (
+        uniqueKey !== row.uniqueKey ||
+        provinceName !== row.provinceName ||
+        subjectType !== row.subjectType ||
+        batch !== row.batch ||
+        planGroup !== row.planGroup ||
+        majorName !== row.majorName
+      ) {
+        updateStmt.run(uniqueKey, provinceName, subjectType, batch, planGroup, majorName, row.id);
       }
     }
   }
@@ -935,6 +1215,148 @@ export class AdmissionRepository {
       )
       .all(source) as unknown as AdmissionCoverageYear[];
   }
+
+  private coverageGapFor(input: {
+    kind: AdmissionCoverageGapKind;
+    source: string;
+    totalMappedUniversities: number;
+    table: "admission_plans" | "admission_scores";
+    scoreType?: "school" | "major";
+    year: number;
+    provinceName: string;
+    subjectType?: string | null;
+  }): AdmissionCoverageGap {
+    const provinceName = normalizeProvinceName(input.provinceName);
+    const where = ["source = ?", "year = ?", "province_name = ?"];
+    const params: SqlValue[] = [input.source, input.year, provinceName];
+    const subjectType = normalizeSubjectType(input.subjectType);
+    if (subjectType) {
+      where.push("subject_type = ?");
+      params.push(subjectType);
+    }
+    if (input.scoreType) {
+      where.push("score_type = ?");
+      params.push(input.scoreType);
+    }
+    const row = this.database.db
+      .prepare(`
+        SELECT COUNT(*) AS rowCount,
+          COUNT(DISTINCT university_id) AS coveredUniversities
+        FROM ${input.table}
+        WHERE ${where.join(" AND ")}
+      `)
+      .get(...params) as { rowCount: number; coveredUniversities: number } | undefined;
+    const coveredUniversities = Number(row?.coveredUniversities ?? 0);
+    const totalMappedUniversities = input.totalMappedUniversities;
+    return {
+      kind: input.kind,
+      year: input.year,
+      provinceName,
+      subjectType,
+      totalMappedUniversities,
+      coveredUniversities,
+      missingUniversities: Math.max(0, totalMappedUniversities - coveredUniversities),
+      rowCount: Number(row?.rowCount ?? 0),
+      coverageRatio: totalMappedUniversities ? coveredUniversities / totalMappedUniversities : 0
+    };
+  }
+
+  private hasRows(table: "admission_plans" | "admission_scores", where: string[], params: SqlValue[]): boolean {
+    const row = this.database.db
+      .prepare(`SELECT 1 AS found FROM ${table} WHERE ${where.join(" AND ")} LIMIT 1`)
+      .get(...params) as { found: number } | undefined;
+    return Boolean(row);
+  }
+}
+
+function hasCompleteSourceCoverage(
+  rows: Array<{ requestJson: string; responseJson: string | null }>,
+  expectedRequest: Record<string, unknown>
+): boolean {
+  for (const row of rows) {
+    const request = parseJsonObject(row.requestJson);
+    const response = parseJsonObject(row.responseJson);
+    if (!request || !response || !sourceRequestMatches(request, expectedRequest)) continue;
+    if (isCompleteSourceSnapshot(request, response)) return true;
+  }
+  return false;
+}
+
+function sourceRequestMatches(request: Record<string, unknown>, expected: Record<string, unknown>): boolean {
+  for (const [key, value] of Object.entries(expected)) {
+    if (value === undefined || value === null || value === "") continue;
+    if (String(request[key] ?? "") !== String(value)) return false;
+  }
+  return true;
+}
+
+function isCompleteSourceSnapshot(request: Record<string, unknown>, response: Record<string, unknown>): boolean {
+  const page = toPositiveNumber(request.page);
+  const size = toPositiveNumber(request.size);
+  if (!page || !size) return true;
+
+  const itemCount = sourceItemCount(response);
+  const total = sourceTotalCount(response);
+  if (total !== null) return page * size >= total;
+  return itemCount === 0 || itemCount < size;
+}
+
+function sourceItemCount(response: Record<string, unknown>): number {
+  const data = response.data;
+  if (Array.isArray(data)) return data.length;
+  if (data && typeof data === "object" && Array.isArray((data as { item?: unknown[] }).item)) {
+    return (data as { item: unknown[] }).item.length;
+  }
+  return 0;
+}
+
+function sourceTotalCount(response: Record<string, unknown>): number | null {
+  const data = response.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const parsed = Number((data as { numFound?: unknown }).numFound);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseJsonObject(value: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function toPositiveNumber(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function normalizeCoverageGapProvinces(values: string[] | undefined): string[] {
+  const normalized = (values?.length ? values : gaokaoProvinceNames())
+    .map((value) => normalizeProvinceName(value))
+    .filter(Boolean);
+  return Array.from(new Set(normalized));
+}
+
+function normalizeCoverageGapYears(values: number[] | undefined, fallback: number[]): number[] {
+  const normalized = (values?.length ? values : fallback)
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value))
+    .map((value) => Math.floor(value));
+  return Array.from(new Set(normalized));
+}
+
+function normalizeCoverageGapSubjectTypes(values: string[] | undefined): string[] | null {
+  const normalized = values
+    ?.map((value) => normalizeSubjectType(value))
+    .filter((value): value is string => Boolean(value));
+  const unique = Array.from(new Set(normalized));
+  return unique.length ? unique : null;
+}
+
+function coverageSubjectTypesForProvinceYear(provinceName: string, year: number, explicitSubjectTypes: string[] | null): string[] {
+  return explicitSubjectTypes ?? defaultAdmissionSubjectTypeNamesForProvinceYear(provinceName, year);
 }
 
 function appendCommonWhere(where: string[], params: Array<string | number>, query: AdmissionQuery, alias: string): void {
@@ -968,13 +1390,26 @@ function appendCommonWhere(where: string[], params: Array<string | number>, quer
     where.push(`${alias}.batch = ?`);
     params.push(normalizeBatchName(query.batch) ?? query.batch.trim());
   }
+  if (query.planGroup) {
+    const planGroups = expandPlanGroupQueryTerms(query.planGroup);
+    if (planGroups.length > 1) {
+      where.push(`${alias}.plan_group IN (${planGroups.map(() => "?").join(",")})`);
+      params.push(...planGroups);
+    } else if (planGroups.length === 1) {
+      where.push(`${alias}.plan_group = ?`);
+      params.push(planGroups[0]);
+    }
+  }
   if (query.scoreType && alias === "s") {
     where.push(`${alias}.score_type = ?`);
     params.push(query.scoreType);
   }
   if (query.majorName) {
-    where.push(`${alias}.major_name LIKE ?`);
-    params.push(`%${normalizeMajorName(query.majorName) ?? query.majorName.trim()}%`);
+    const terms = expandMajorQueryTerms(query.majorName);
+    if (terms.length) {
+      where.push(`(${terms.map(() => `${alias}.major_name LIKE ?`).join(" OR ")})`);
+      params.push(...terms.map((term) => `%${term}%`));
+    }
   }
 }
 
@@ -1005,19 +1440,19 @@ export function normalizeBatchName(value: string | null | undefined): string | n
   if (!text) return null;
   text = text
     .replace(/[()]/gu, (match) => (match === "(" ? "（" : "）"))
-    .replace(/普通类/u, "")
+    .replace(/[：:]/gu, "")
     .replace(/\s+/gu, "");
   if (/国家专项/u.test(text)) return "国家专项计划本科批";
   if (/地方专项/u.test(text)) return "地方专项计划本科批";
   if (/高校专项/u.test(text)) return "高校专项计划本科批";
   if (/提前/u.test(text) && /本科/u.test(text)) return "本科提前批";
   if (/提前/u.test(text) && /(高职|专科)/u.test(text)) return "专科提前批";
-  if (/本科(第一|一)批|本一批|一本/u.test(text)) return "本科一批";
-  if (/本科(第二|二)批|本二批|二本/u.test(text)) return "本科二批";
-  if (/本科批|本科批次|普通本科/u.test(text)) return "本科批";
-  if (/平行录取一段|一段|常规批第?[一1]段/u.test(text)) return "普通类一段";
-  if (/平行录取二段|二段|常规批第?[二2]段/u.test(text)) return "普通类二段";
-  if (/常规批|普通批/u.test(text)) return "普通类常规批";
+  if (/本科(?:第?一|Ⅰ|I)批|第?一批本科|本一批|一本/u.test(text)) return "本科一批";
+  if (/本科(?:第?二|Ⅱ|II)批|第?二批本科|本二批|二本/u.test(text)) return "本科二批";
+  if (/本科(?:普通|普通类)?批|普通(?:类)?本科批|本科批次|本科普通(?:类)?批|普通本科/u.test(text)) return "本科批";
+  if (/平行录取第?[一1]段|普通类?一段|一段|常规批第?[一1]段/u.test(text)) return "普通类一段";
+  if (/平行录取第?[二2]段|普通类?二段|二段|常规批第?[二2]段/u.test(text)) return "普通类二段";
+  if (/普通类?常规批|常规批|普通批/u.test(text)) return "普通类常规批";
   if (/高职|专科/u.test(text)) return "专科批";
   return text;
 }
@@ -1046,6 +1481,121 @@ export function normalizeMajorName(value: string | null | undefined): string | n
   text = text.replace(/，?具体详见学校招生章程$/u, "");
   return clean(text);
 }
+
+function expandPlanGroupQueryTerms(value: string): string[] {
+  const normalized = normalizePlanGroup(value);
+  if (!normalized) return [];
+  const terms = new Set<string>([normalized]);
+  const match = normalized.match(/^([A-Z]?)(0*)(\d+)$/u);
+  if (match) {
+    const [, prefix, , digits] = match;
+    const parsed = Number(digits);
+    if (Number.isFinite(parsed)) {
+      const number = String(parsed);
+      terms.add(`${prefix}${number}`);
+      terms.add(`${prefix}${number.padStart(2, "0")}`);
+      terms.add(`${prefix}${number.padStart(3, "0")}`);
+    }
+  }
+  return Array.from(terms);
+}
+
+function expandMajorQueryTerms(value: string): string[] {
+  const normalized = normalizeMajorName(value) ?? clean(value);
+  if (!normalized) return [];
+  const compact = normalized
+    .replace(/[（）()\s、,，/|]/gu, "")
+    .toLowerCase();
+  const terms = new Set<string>([normalized]);
+  const add = (...items: Array<string | null | undefined>) => {
+    for (const item of items) {
+      const cleaned = normalizeMajorName(item);
+      if (cleaned) terms.add(cleaned);
+    }
+  };
+
+  const aliasKeys = expandMajorAliasKeys(compact);
+  for (const group of MAJOR_ALIAS_GROUPS) {
+    if (aliasKeys.some((key) => group.pattern.test(key))) add(...group.terms);
+  }
+
+  return Array.from(terms).slice(0, 24);
+}
+
+function expandMajorAliasKeys(compact: string): string[] {
+  const keys = new Set<string>([compact]);
+  const suffixes = ["相关专业", "相关方向", "相关", "专业方向", "专业类", "专业", "方向", "类"];
+  for (const suffix of suffixes) {
+    if (compact.endsWith(suffix) && compact.length > suffix.length) {
+      keys.add(compact.slice(0, -suffix.length));
+    }
+  }
+  return Array.from(keys).filter(Boolean);
+}
+
+const MAJOR_ALIAS_GROUPS: Array<{ pattern: RegExp; terms: string[] }> = [
+  {
+    pattern: /^(计科|计算机|计算机类|计算机专业|计算机相关|计算机相关专业|cs)$/iu,
+    terms: [
+      "计算机类",
+      "计算机科学与技术",
+      "软件工程",
+      "网络工程",
+      "信息安全",
+      "网络空间安全",
+      "数据科学与大数据技术",
+      "人工智能",
+      "智能科学与技术",
+      "电子与计算机工程"
+    ]
+  },
+  { pattern: /^计算机科学与技术$/u, terms: ["计算机科学与技术", "计算机类"] },
+  { pattern: /^(软工|软件|软件工程)$/u, terms: ["软件工程"] },
+  { pattern: /^(网安|网络安全|网络空间|网络空间安全|信息安全)$/u, terms: ["网络空间安全", "信息安全"] },
+  { pattern: /^(大数据|数据科学|数据科学与大数据技术)$/u, terms: ["数据科学与大数据技术", "计算机类"] },
+  { pattern: /^(ai|人工智能|智能科学与技术)$/iu, terms: ["人工智能", "智能科学与技术", "计算机类"] },
+  {
+    pattern: /^(电子信息|电子信息类|电信|通信|通信工程)$/u,
+    terms: [
+      "电子信息类",
+      "电子信息工程",
+      "通信工程",
+      "信息工程",
+      "电子科学与技术",
+      "微电子科学与工程",
+      "集成电路设计与集成系统",
+      "光电信息科学与工程",
+      "电磁场与无线技术"
+    ]
+  },
+  { pattern: /^(电气|电气工程|电气工程及其自动化)$/u, terms: ["电气工程及其自动化", "智能电网信息工程"] },
+  { pattern: /^(自动化|控制|控制科学|机器人工程)$/u, terms: ["自动化", "机器人工程", "智能装备与系统"] },
+  {
+    pattern: /^(机械|机械类|机械工程|机械设计|机电)$/u,
+    terms: ["机械类", "机械工程", "机械设计制造及其自动化", "机械电子工程", "车辆工程", "智能制造工程"]
+  },
+  { pattern: /^(土木|土木工程|土建)$/u, terms: ["土木类", "土木工程", "智能建造", "建筑环境与能源应用工程"] },
+  { pattern: /^(建筑|建筑学)$/u, terms: ["建筑类", "建筑学", "城乡规划", "风景园林"] },
+  { pattern: /^(临床|临床医学)$/u, terms: ["临床医学"] },
+  { pattern: /^(口腔|口腔医学)$/u, terms: ["口腔医学"] },
+  { pattern: /^(医学影像|影像医学|医学影像学)$/u, terms: ["医学影像学", "医学影像技术"] },
+  { pattern: /^(护理|护理学)$/u, terms: ["护理学"] },
+  { pattern: /^(药学|药学类)$/u, terms: ["药学", "药学类", "临床药学", "药物制剂"] },
+  { pattern: /^(中药|中药学|中药学类)$/u, terms: ["中药学", "中药学类"] },
+  { pattern: /^(制药|制药工程)$/u, terms: ["制药工程", "药物制剂"] },
+  { pattern: /^(法学|法律)$/u, terms: ["法学", "法学类"] },
+  { pattern: /^(金融|金融学|金融工程)$/u, terms: ["金融学", "金融工程", "金融科技"] },
+  { pattern: /^(经济|经济学|经济学类)$/u, terms: ["经济学", "经济学类", "经济统计学"] },
+  { pattern: /^(会计|会计学)$/u, terms: ["会计学", "财务管理", "审计学"] },
+  { pattern: /^(工商管理|工商|管理学)$/u, terms: ["工商管理", "工商管理类", "市场营销", "人力资源管理"] },
+  { pattern: /^(汉语言|中文|汉语言文学)$/u, terms: ["汉语言文学", "中国语言文学类", "汉语言"] },
+  { pattern: /^(英语|英语语言文学)$/u, terms: ["英语", "英语语言文学", "商务英语"] },
+  { pattern: /^(数学|数学类|数学与应用数学)$/u, terms: ["数学类", "数学与应用数学", "信息与计算科学"] },
+  { pattern: /^(物理|物理学|物理学类)$/u, terms: ["物理学", "物理学类", "应用物理学"] },
+  { pattern: /^(化学|化学类|应用化学)$/u, terms: ["化学", "化学类", "应用化学"] },
+  { pattern: /^(生物|生物科学|生物技术)$/u, terms: ["生物科学", "生物技术", "生物科学类"] },
+  { pattern: /^(材料|材料类|材料科学)$/u, terms: ["材料类", "材料科学与工程", "高分子材料与工程", "新能源材料与器件"] }
+];
 
 function formatPlanGroupCode(code: string): string {
   const upper = code.toUpperCase();
