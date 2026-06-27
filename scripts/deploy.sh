@@ -54,8 +54,8 @@ Usage:
                                   Sync cached srgaoxiao school profiles.
   scripts/deploy.sh sync-srgaoxiao-full
                                   Sync all srgaoxiao school profiles once.
-  scripts/deploy.sh sync-gaokao-cn [--limit=10 ...]
-                                  Sync Gaokao.cn admission plans and score lines.
+  scripts/deploy.sh sync-gaokao-cn
+                                  Removed. Gaokao.cn is queried realtime during QQ admission answers.
   scripts/deploy.sh download-xuefeng-agent [--url=...]
                                   Download and cache the Xuefeng Agent SQLite database only.
   scripts/deploy.sh sync-xuefeng-agent [--limit=10000 ...]
@@ -688,14 +688,7 @@ sync_srgaoxiao_full_command() {
 }
 
 sync_gaokao_cn_command() {
-  ensure_linux_and_node
-  resolve_app_dir
-  cd "$APP_DIR"
-  if [ -f dist/server/scripts/sync-gaokao-cn.js ]; then
-    node dist/server/scripts/sync-gaokao-cn.js "$@"
-  else
-    npm run sync:gaokao-cn -- "$@"
-  fi
+  fail "Gaokao.cn full sync has been removed. Admission answers now query Gaokao.cn realtime and do not write a local cache."
 }
 
 sync_xuefeng_agent_command() {

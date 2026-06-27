@@ -18,6 +18,8 @@ import type { MessageAnalysis, NaturalLanguageService } from "./nlu.js";
 import type { SrgaoxiaoSyncService } from "./srgaoxiao-sync.js";
 import type { UniversityRepository } from "./university-repository.js";
 
+const DEFAULT_ADMISSION_REALTIME_REQUEST_BUDGET = 12;
+
 export interface IncomingImage {
   url?: string;
   file?: string;
@@ -199,7 +201,7 @@ export class MessageProcessor {
 
     const analysis =
       shouldResolveUniversitiesLocally(routeIntent)
-        ? this.nlu.analyze(routeIntent.schoolNames.join(" "), context?.universityId)
+        ? this.nlu.analyze(buildSchoolAnalysisText(routeIntent, input.text), context?.universityId)
         : emptyMessageAnalysis();
 
     if (input.images?.length) {
@@ -385,16 +387,17 @@ export class MessageProcessor {
               "你是 QQBot 的入口路由器。你的任务是理解用户自然语言，判断这条消息应该进入哪个处理分支。" +
               "这是唯一入口：程序不会再用关键词或低置信度模板抢先决定回复类型。" +
               "不要使用固定关键词思维；要根据整句语义、上下文、是否在群聊被提及、是否包含图片来判断。" +
-              "route 只能是 university_info、casual、ignore。" +
-              "本机器人当前不处理高校招生数据、招生计划、分数线、最低位次、专业录取分、专业组投档线、志愿冲稳保等分数类/报考类问题；这类消息请归为 casual，并让后续普通回复说明当前只做院校介绍和校园生活资料。" +
+              "route 只能是 admission、university_info、casual、ignore。" +
+              "admission 表示高校招生/报考/志愿数据问题，例如招生计划、历年分数线、最低位次、专业录取分、专业组投档线、专业组里有哪些专业、冲稳保、多少分多少位能不能上。" +
               "university_info 表示高校资料/校园生活/院校评价/学校对比，例如学校介绍、院校定位、宿舍、食堂、校园网、外卖、澡堂、管理、学校怎么样、两校生活体验怎么选。" +
               "casual 表示应该正常闲聊、看图闲聊、解释图片、或回答能力/模型/使用方式问题。ignore 表示群聊里没有必要回复的旁观消息。" +
+              "如果 route 是 university_info 或 admission，只要用户原话里出现了疑似学校名，就把原文片段尽量放入 schoolNames；即使不确定是否为标准全称、是否缺少校区后缀，也不要留空。" +
+              "如果 route 是 admission，请尽量抽取 province、subjectType、years、planGroup、majorName 和 queryTypes；不确定的字段填 null 或空数组，后续会追问。" +
               "私聊或明确 @ 机器人时，除非是明显垃圾内容，否则 shouldReply 通常为 true；未 @ 的群聊普通路人闲聊 shouldReply 可为 false。" +
               "如果消息含图片且需要回复，请仍然选择最接近的 route；后续图片理解会按你的 route 和学校/主题字段组织资料。" +
               "只输出一个 JSON 对象，不要 Markdown，不要解释。字段：" +
               "route:string, shouldReply:boolean, confidence:number, schoolNames:string[], province:string|null, subjectType:string|null, years:number[], planGroup:string|null, majorName:string|null, queryTypes:string[], topicKey:string|null, topicLabel:string|null, needsFollowUp:boolean, followUpQuestion:string|null, reason:string。" +
               "confidence 只用于调试记录，程序不会因为低置信度拒绝回复。" +
-              "招生字段 province、subjectType、years、planGroup、majorName、queryTypes 当前只保留兼容旧结构；默认返回 null 或空数组。" +
               `topicKey 如果是高校生活资料，请从这些 key 中选一个或返回 general：${topicOptions}。`
           },
           {
@@ -404,7 +407,7 @@ export class MessageProcessor {
               `消息场景：${input.messageType === "group" ? "群聊" : "私聊"}；是否 @ 机器人：${input.mentionedBot ? "是" : "否"}。\n` +
               `是否包含图片：${input.images?.length ? `是，${input.images.length} 张` : "否"}。\n` +
               "程序不会提供本地关键词候选。请你直接从用户原话和上下文中理解是否涉及学校、涉及哪些学校、属于哪类请求。\n" +
-              `当前日期：${today}。产品范围已经收窄为院校介绍和校园生活资料，不做 ${currentYear} 年招生计划、分数线、位次或志愿填报判断。\n\n` +
+              `当前日期：${today}。招生计划可以看 ${currentYear} 年，录取分数线/位次通常优先参考近几年历史数据；如果用户问 ${currentYear} 年录取分数线，要提醒可能尚未完整公布。\n\n` +
               `用户消息：${input.text}`
           }
         ],
@@ -672,18 +675,19 @@ export class MessageProcessor {
       schools.push(university);
     }
     if (schools.length) return schools;
+    const candidates = dedupeCandidates(analysis.candidates);
+    if (candidates.length === 1) return [candidates[0]];
     const context = this.getContext(conversationKey, now);
     const contextSchool = context ? this.universities.getUniversity(context.universityId) : null;
     return contextSchool ? [contextSchool] : [];
   }
 
   private createAdmissionRealtimeSyncBudget(): AdmissionRealtimeSyncBudget {
-    const runtime = this.settings.runtime() as { sync?: { gaokaoCnMaxRequestsPerRun?: number } };
-    const value = runtime.sync?.gaokaoCnMaxRequestsPerRun;
-    if (value === undefined || !Number.isFinite(value) || value <= 0) {
-      return { initial: null, remaining: null };
-    }
-    const max = Math.floor(value);
+    const runtime = this.settings.runtime() as { sync?: { gaokaoCnRealtimeMaxRequestsPerRun?: number } };
+    const configured = runtime.sync?.gaokaoCnRealtimeMaxRequestsPerRun;
+    const max = Number.isFinite(configured)
+      ? Math.max(1, Math.floor(Number(configured)))
+      : DEFAULT_ADMISSION_REALTIME_REQUEST_BUDGET;
     return { initial: max, remaining: max };
   }
 
@@ -699,136 +703,181 @@ export class MessageProcessor {
     let syncError: string | null = null;
     let syncSummary: AdmissionSyncSummary | null = null;
     const subjectTypes = compatibleAdmissionSubjectTypes(subjectType, province);
-    if (this.gaokaoCn) {
+    let plans: AdmissionPlanRow[] = [];
+    let scores: AdmissionScoreRow[] = [];
+    let sourceSnapshots: AdmissionSourceRow[] = [];
+    const mapping = this.admissions?.getMapping(university.id) ?? null;
+    const realtimeFetcher = (this.gaokaoCn as (GaokaoCnAdapter & {
+      fetchRealtimeAdmissionData?: GaokaoCnAdapter["fetchRealtimeAdmissionData"];
+    }) | undefined)?.fetchRealtimeAdmissionData;
+    if (this.gaokaoCn && typeof realtimeFetcher === "function") {
       try {
-        const syncResults: GaokaoCnSyncResult[] = [];
         const syncSettings = this.settings.runtime().sync;
-        const requestDelayMs = syncSettings?.gaokaoCnRequestDelayMs;
+        const requestDelayMs = syncSettings?.gaokaoCnRealtimeRequestDelayMs ?? 0;
         const rateLimitCooldownMinutes = syncSettings?.gaokaoCnRateLimitCooldownMinutes;
-        const maxSourceRequests = syncSettings?.gaokaoCnMaxRequestsPerRun;
-        const skipExisting = syncSettings?.gaokaoCnSkipExisting ?? true;
-        const rateLimitStatus = (this.gaokaoCn as GaokaoCnAdapter & {
-          rateLimitStatus?: () => { active?: boolean; until?: string | null };
-        }).rateLimitStatus?.();
-        if (rateLimitStatus?.active) {
-          syncError = `掌上高考当前处于限流冷却中，预计 ${rateLimitStatus.until ?? "稍后"} 后再恢复实时补数；本次优先使用本地缓存资料回答。`;
-        } else {
+        const maxSourceRequests = syncSettings?.gaokaoCnRealtimeMaxRequestsPerRun ?? DEFAULT_ADMISSION_REALTIME_REQUEST_BUDGET;
+        const includePlanDetails = shouldSyncPlanDetails(intent, syncSettings?.gaokaoCnIncludePlanDetails);
+        const result = await realtimeFetcher.call(this.gaokaoCn, {
+          universityId: university.id,
+          universityName: university.name,
+          sourceSchoolId: mapping?.sourceSchoolId,
+          province,
+          subjectType,
+          subjectTypes,
+          planYears: years.planYears,
+          scoreYears: years.scoreYears,
+          planGroup: intent.planGroup,
+          majorName: intent.majorName,
+          includePlans: syncKinds.includePlans,
+          includeScores: syncKinds.includeScores,
+          includePlanDetails,
+          requestDelayMs,
+          rateLimitCooldownMinutes,
+          maxSourceRequests: admissionRealtimeMaxSourceRequests(realtimeSyncBudget, maxSourceRequests)
+        });
+        plans = result.plans;
+        scores = result.scores;
+        sourceSnapshots = result.sourceSnapshots;
+        syncSummary = summarizeAdmissionSyncResults([result.summary]);
+        consumeAdmissionRealtimeSyncBudget(realtimeSyncBudget, result.summary);
+        if (hasGaokaoRateLimitSyncResult(result.summary)) {
+          syncError = "掌上高考当前触发限流，本次已停止继续实时获取；下面只基于已拿到的数据回答。";
+        } else if (result.summary.errors.length) {
+          syncError = result.summary.errors.map((error) => error.message).join("；");
+        }
+      } catch (error) {
+        syncError = error instanceof Error ? error.message : String(error);
+      }
+    } else {
+      const legacySyncer = (this.gaokaoCn as (GaokaoCnAdapter & {
+        sync?: GaokaoCnAdapter["sync"];
+      }) | undefined)?.sync;
+      if (this.gaokaoCn && typeof legacySyncer === "function" && this.admissions) {
+        const results: GaokaoCnSyncResult[] = [];
+        try {
+          const syncSettings = this.settings.runtime().sync;
+          const requestDelayMs = syncSettings?.gaokaoCnRealtimeRequestDelayMs ?? 0;
+          const rateLimitCooldownMinutes = syncSettings?.gaokaoCnRateLimitCooldownMinutes;
+          const maxSourceRequests =
+            syncSettings?.gaokaoCnRealtimeMaxRequestsPerRun ??
+            syncSettings?.gaokaoCnMaxRequestsPerRun ??
+            DEFAULT_ADMISSION_REALTIME_REQUEST_BUDGET;
           const includePlanDetails = shouldSyncPlanDetails(intent, syncSettings?.gaokaoCnIncludePlanDetails);
-          const includeSpecialScores = shouldSyncMajorScores(intent);
-          let stopRealtimeSync = false;
+          const runLegacySync = async (options: Parameters<GaokaoCnAdapter["sync"]>[0]): Promise<boolean> => {
+            if (!hasAdmissionRealtimeSyncBudget(realtimeSyncBudget)) return false;
+            const result = await legacySyncer.call(this.gaokaoCn, {
+              eligibleOnly: true,
+              requestDelayMs,
+              rateLimitCooldownMinutes,
+              maxSourceRequests: admissionRealtimeMaxSourceRequests(realtimeSyncBudget, maxSourceRequests),
+              skipExisting: syncSettings?.gaokaoCnSkipExisting ?? true,
+              ...options
+            });
+            results.push(result);
+            consumeAdmissionRealtimeSyncBudget(realtimeSyncBudget, result);
+            if (hasGaokaoRateLimitSyncResult(result)) {
+              syncError = "掌上高考当前触发限流，本次已停止继续实时获取；下面只基于已拿到的数据回答。";
+              return false;
+            }
+            if (result.requestBudgetExhausted) return false;
+            return true;
+          };
+
           if (syncKinds.includePlans) {
-            for (const group of groupYearsByAdmissionSubjectTypes(province, subjectType, years.planYears)) {
-              if (!hasAdmissionRealtimeSyncBudget(realtimeSyncBudget)) {
-                stopRealtimeSync = true;
-                break;
-              }
-              const result = await this.gaokaoCn.sync({
+            const planGroups = groupYearsByAdmissionSubjectTypes(province, subjectType, years.planYears);
+            const groups = planGroups.length ? planGroups : [{ subjectTypes, years: years.planYears }];
+            for (const group of groups) {
+              const shouldContinue = await runLegacySync({
                 universityId: university.id,
                 provinces: [province],
                 subjectTypes: group.subjectTypes,
                 planYears: group.years,
                 includePlans: true,
                 includeScores: false,
-                includeSpecialScores: false,
                 includePlanDetails,
-                requestDelayMs,
-                rateLimitCooldownMinutes,
-                maxSourceRequests: admissionRealtimeMaxSourceRequests(realtimeSyncBudget, maxSourceRequests),
-                skipExisting
+                useMnzyPlanDetails: true
               });
-              syncResults.push(result);
-              consumeAdmissionRealtimeSyncBudget(realtimeSyncBudget, result);
-              if (hasGaokaoRateLimitSyncResult(result)) {
-                syncError = "掌上高考当前触发限流，本次已停止继续实时补数；下面会优先使用本地缓存资料回答。";
-                stopRealtimeSync = true;
-                break;
-              }
-              if (result.requestBudgetExhausted || !hasAdmissionRealtimeSyncBudget(realtimeSyncBudget)) {
-                stopRealtimeSync = true;
-                break;
-              }
+              if (!shouldContinue) break;
             }
           }
-          if (syncKinds.includeScores && !stopRealtimeSync) {
-            for (const group of groupYearsByAdmissionSubjectTypes(province, subjectType, years.scoreYears)) {
-              if (!hasAdmissionRealtimeSyncBudget(realtimeSyncBudget)) break;
-              const result = await this.gaokaoCn.sync({
+
+          if (!syncError && syncKinds.includeScores && hasAdmissionRealtimeSyncBudget(realtimeSyncBudget)) {
+            const scoreGroups = groupYearsByAdmissionSubjectTypes(province, subjectType, years.scoreYears);
+            const groups = scoreGroups.length ? scoreGroups : [{ subjectTypes, years: years.scoreYears }];
+            for (const group of groups) {
+              const shouldContinue = await runLegacySync({
                 universityId: university.id,
                 provinces: [province],
                 subjectTypes: group.subjectTypes,
                 scoreYears: group.years,
                 includePlans: false,
                 includeScores: true,
-                includeSpecialScores,
-                requestDelayMs,
-                rateLimitCooldownMinutes,
-                maxSourceRequests: admissionRealtimeMaxSourceRequests(realtimeSyncBudget, maxSourceRequests),
-                skipExisting
+                includeSpecialScores: shouldSyncMajorScores(intent)
               });
-              syncResults.push(result);
-              consumeAdmissionRealtimeSyncBudget(realtimeSyncBudget, result);
-              if (hasGaokaoRateLimitSyncResult(result)) {
-                syncError = "掌上高考当前触发限流，本次已停止继续实时补数；下面会优先使用本地缓存资料回答。";
-                break;
-              }
-              if (result.requestBudgetExhausted || !hasAdmissionRealtimeSyncBudget(realtimeSyncBudget)) break;
+              if (!shouldContinue) break;
             }
           }
-          syncSummary = summarizeAdmissionSyncResults(syncResults);
+
+          syncSummary = summarizeAdmissionSyncResults(results);
+          if (!syncError) {
+            const messages = results.flatMap((result) => result.errors.map((error) => error.message));
+            if (messages.length) syncError = messages.join("；");
+          }
+        } catch (error) {
+          syncError = error instanceof Error ? error.message : String(error);
         }
-      } catch (error) {
-        syncError = error instanceof Error ? error.message : String(error);
+      }
+
+      if (this.admissions) {
+        plans = this.admissions.queryPlans({
+          universityId: university.id,
+          provinceName: province,
+          subjectType,
+          subjectTypes,
+          years: years.planYears,
+          planGroup: intent.planGroup,
+          majorName: intent.majorName,
+          limit: 80
+        });
+        scores = this.admissions.queryScores({
+          universityId: university.id,
+          provinceName: province,
+          subjectType,
+          subjectTypes,
+          years: years.scoreYears,
+          planGroup: intent.planGroup,
+          majorName: intent.majorName,
+          limit: 120
+        });
+        if (intent.majorName && !scores.length) {
+          scores = this.admissions.queryScores({
+            universityId: university.id,
+            provinceName: province,
+            subjectType,
+            subjectTypes,
+            years: years.scoreYears,
+            planGroup: intent.planGroup,
+            limit: 80
+          });
+        }
+        if (intent.majorName && !plans.length) {
+          plans = this.admissions.queryPlans({
+            universityId: university.id,
+            provinceName: province,
+            subjectType,
+            subjectTypes,
+            years: years.planYears,
+            planGroup: intent.planGroup,
+            limit: 40
+          });
+        }
+        sourceSnapshots = this.collectAdmissionSourceSnapshots(university.id, plans, scores, syncSummary);
       }
     }
 
-    let planMajorFallback = false;
-    let scoreMajorFallback = false;
-    let plans = this.admissions!.queryPlans({
-      universityId: university.id,
-      provinceName: province,
-      subjectType,
-      subjectTypes,
-      years: years.planYears,
-      planGroup: intent.planGroup,
-      majorName: intent.majorName,
-      limit: 80
-    });
-    let scores = this.admissions!.queryScores({
-      universityId: university.id,
-      provinceName: province,
-      subjectType,
-      subjectTypes,
-      years: years.scoreYears,
-      planGroup: intent.planGroup,
-      majorName: intent.majorName,
-      limit: 120
-    });
-    if (intent.majorName && !scores.length) {
-      scores = this.admissions!.queryScores({
-        universityId: university.id,
-        provinceName: province,
-        subjectType,
-        subjectTypes,
-        years: years.scoreYears,
-        planGroup: intent.planGroup,
-        limit: 80
-      });
-      scoreMajorFallback = scores.length > 0;
-    }
-    if (intent.majorName && !plans.length) {
-      plans = this.admissions!.queryPlans({
-        universityId: university.id,
-        provinceName: province,
-        subjectType,
-        subjectTypes,
-        years: years.planYears,
-        planGroup: intent.planGroup,
-        limit: 40
-      });
-      planMajorFallback = plans.length > 0;
-    }
+    const planMajorFallback = Boolean(intent.majorName && plans.length && !admissionRowsContainMajor(plans, intent.majorName));
+    const scoreMajorFallback = Boolean(intent.majorName && scores.length && !admissionRowsContainMajor(scores, intent.majorName));
 
-    const sourceSnapshots = this.collectAdmissionSourceSnapshots(university.id, plans, scores, syncSummary);
     const schoolProfile = this.universities.getSchoolProfile?.(university.id, ADMISSION_SOURCE);
     const schoolProfileText = schoolProfile?.profileText ?? null;
     const contextText = renderAdmissionContext({
@@ -853,7 +902,6 @@ export class MessageProcessor {
       syncSummary,
       syncError
     });
-    const mapping = this.admissions!.getMapping(university.id);
     return {
       university,
       sourceUrl: mapping?.sourceUrl ?? university.source_url,
@@ -923,6 +971,10 @@ export class MessageProcessor {
     conversationKey: string,
     now: number
   ): ReturnType<UniversityRepository["getUniversity"]> | null {
+    if (intent.schoolNames.length === 0) {
+      const candidates = dedupeCandidates(analysis.candidates);
+      if (candidates.length === 1) return candidates[0];
+    }
     return this.resolveAdmissionUniversity(
       {
         isAdmissionQuery: false,
@@ -1015,13 +1067,13 @@ export class MessageProcessor {
             content:
               xuefengAgentBasePrompt() +
               xuefengAdmissionPrompt() +
-              "请基于给定的招生数据缓存回答，数据可能来自省考试院、学校招生网等官方来源，也可能包含雪峰 Agent 历史库等第三方缓存；不要编造不存在的分数、位次、计划数。" +
+              "请基于本次实时获取的招生数据回答，数据可能来自掌上高考志愿接口、省考试院、学校招生网等公开来源，也可能包含雪峰 Agent 历史库等第三方参考；不要编造不存在的分数、位次、计划数。" +
               `当前日期是 ${currentAdmissionDate()}：${currentAdmissionYear()} 招生计划可以优先参考；${currentAdmissionYear()} 录取分数线和最低位次通常要等各省录取后才陆续出现，因此涉及分数/位次时优先使用 ${defaultAdmissionScoreYearRange()} 历史数据。` +
               "比较投档线、录取门槛或趋势时必须优先使用同一年同省同科类的最低位次（minRank）：位次数字越小通常代表门槛越高；最低分只作为附带参考，不能用裸分跨年判断涨跌。" +
               "回答结构改成雪峰 Agent 式：1. 先一句话拍板，告诉用户这事儿该怎么看；2. 再给关键依据，优先讲位次、专业组、计划变化和数据口径；3. 然后讲报考打法，明确冲、稳、保或适合/不适合；4. 最后补风险和还缺什么信息。" +
               "需要表格时可以用 Markdown 表格，推荐列为 年份|科类|批次/专业组|口径/专业|最低位次|最低分|计划数；但不要为了表格牺牲可读性，QQ 里要像人话。" +
-              "若数据为空或同步失败，要直说缺口，并建议补充省份/科类/专业或稍后同步。不要输出没有依据的预测分数，不要把 2026 招生计划当成 2026 录取分数线。" +
-              "结尾必须提醒最终以省考试院和学校招生网为准；若上下文明确显示第三方缓存或雪峰 Agent 历史库来源，也要说明仅供参考。适合 QQ 阅读，可以用 Markdown 标题、加粗和列表。"
+              "若数据为空或实时获取失败，要直说缺口，并建议补充省份/科类/专业组/专业或稍后再问。不要输出没有依据的预测分数，不要把 2026 招生计划当成 2026 录取分数线。" +
+              "结尾必须提醒最终以省考试院和学校招生网为准；若上下文明确显示第三方参考或雪峰 Agent 历史库来源，也要说明仅供参考。适合 QQ 阅读，可以用 Markdown 标题、加粗和列表。"
           },
           {
             role: "user",
@@ -1032,7 +1084,7 @@ export class MessageProcessor {
       );
     } catch (error) {
       const message = normalizeLlmFailureMessage(error, this.settings.runtime().llm.timeoutMs);
-      return `我查到了 ${input.universityName} 在${input.province}的招生数据缓存，但模型总结失败：${message}\n\n${input.contextText.slice(0, 1200)}\n\n招生数据最终请以省考试院和学校招生网为准。`;
+      return `我实时获取到了 ${input.universityName} 在${input.province}的招生数据，但模型总结失败：${message}\n\n${input.contextText.slice(0, 1200)}\n\n招生数据最终请以省考试院和学校招生网为准。`;
     }
   }
 
@@ -1054,13 +1106,13 @@ export class MessageProcessor {
             content:
               xuefengAgentBasePrompt() +
               xuefengAdmissionPrompt() +
-              "你在做多校招生对比。用户正在比较多所明确提到的学校，请基于给定招生数据缓存回答，数据可能来自省考试院、学校招生网等官方来源，也可能包含雪峰 Agent 历史库等第三方缓存。" +
+              "你在做多校招生对比。用户正在比较多所明确提到的学校，请基于本次实时获取的招生数据回答，数据可能来自掌上高考志愿接口、省考试院、学校招生网等公开来源，也可能包含雪峰 Agent 历史库等第三方参考。" +
               "不要编造不存在的分数、位次、计划数或专业线；某所学校缺数据时要单独说明缺口，不能用另一所学校的数据代替。" +
               `当前日期是 ${currentAdmissionDate()}：${currentAdmissionYear()} 招生计划可以优先参考；${currentAdmissionYear()} 录取分数线和最低位次通常要等各省录取后才陆续出现，因此分数/位次优先看 ${defaultAdmissionScoreYearRange()} 历史数据。` +
               "比较投档线、录取门槛或趋势时必须优先使用同一年同省同科类的最低位次（minRank）：位次数字越小通常代表门槛越高；最低分只作为附带参考，不能用裸分跨年判断涨跌。" +
               "回答必须先拍板：如果必须二选一，直接说按什么前提选哪所；如果取决于专业、城市、升学/就业，就把分叉条件说透。然后再给对比表格，推荐列为 学校|年份|科类|口径/专业|最低位次|最低分|计划数；最后给风险提醒。" +
               "如果用户问专业，优先比较该专业，资料不足再回到院校线；不要输出没有依据的预测分数。" +
-              "结尾必须提醒：最终以省考试院和学校招生网为准；若上下文明确显示第三方缓存或雪峰 Agent 历史库来源，也要说明仅供参考。适合 QQ 阅读，可以用 Markdown 标题、表格、加粗和列表。"
+              "结尾必须提醒：最终以省考试院和学校招生网为准；若上下文明确显示第三方参考或雪峰 Agent 历史库来源，也要说明仅供参考。适合 QQ 阅读，可以用 Markdown 标题、表格、加粗和列表。"
           },
           {
             role: "user",
@@ -1072,7 +1124,7 @@ export class MessageProcessor {
       );
     } catch (error) {
       const message = normalizeLlmFailureMessage(error, this.settings.runtime().llm.timeoutMs);
-      return `我查到了 ${names} 在${input.province}${input.subjectType}的招生数据缓存，但模型对比总结失败：${message}\n\n${input.contextText.slice(0, 1600)}\n\n招生数据最终请以省考试院和学校招生网为准。`;
+      return `我实时获取到了 ${names} 在${input.province}${input.subjectType}的招生数据，但模型对比总结失败：${message}\n\n${input.contextText.slice(0, 1600)}\n\n招生数据最终请以省考试院和学校招生网为准。`;
     }
   }
 
@@ -1218,8 +1270,8 @@ export class MessageProcessor {
               xuefengAgentBasePrompt() +
               `你是 QQ 群/私聊里的雪峰 Agent 式高校资料助手，也可以自然回应用户的日常闲聊、能力询问和模型询问。` +
               `后台配置的模型 ID 是 ${model}，如果用户问你是什么模型，可以说明“后台配置的模型是 ${model}”，但不要编造供应商或你不知道的内部细节。` +
-              "你当前只做院校介绍、院校定位和校园生活资料总结，重点是宿舍、食堂、校园网、外卖、澡堂、早晚自习、管理、城市体验、适合什么人。用户不用命令，直接自然提问即可。" +
-              "如果用户问分数线、位次、招生计划、专业组、志愿冲稳保、能不能录取等分数类/报考类问题，要明确说明当前不做这类查询，并引导用户改问学校介绍或校园生活体验。" +
+              "你可以做院校介绍、校园生活资料总结，也可以在入口路由交给 admission 分支时查询招生计划、分数线、位次、专业组和志愿建议。用户不用命令，直接自然提问即可。" +
+              "如果用户在普通闲聊里问你能做什么，可以说明你能查学校生活资料，也能按省份、科类、分数/位次和专业组做报考数据参考；最终仍以省考试院和学校招生网为准。" +
               "如果用户的问题像是在问高校资料，但没有明确学校、简称不确定、或没有完成资料检索，不要编造学校资料；请简短追问完整学校名或具体方面。" +
               "请用中文回复，语气自然、直给，适合 QQ 阅读。普通寒暄可以很短；能力介绍、解释类问题可以适当展开，不要固定限制在 120 字以内。"
           },
@@ -1368,8 +1420,14 @@ function emptyMessageAnalysis(): MessageAnalysis {
 }
 
 function shouldResolveUniversitiesLocally(intent: MessageRouteIntent): boolean {
-  if (intent.route !== "admission" && intent.route !== "university_info") return false;
-  return intent.schoolNames.length > 0;
+  if (intent.route === "university_info") return true;
+  if (intent.route === "admission") return true;
+  return false;
+}
+
+function buildSchoolAnalysisText(intent: MessageRouteIntent, messageText: string): string {
+  const schoolNames = intent.schoolNames.map((name) => name.trim()).filter(Boolean);
+  return schoolNames.length ? schoolNames.join(" ") : messageText;
 }
 
 function renderRouteContextLine(context: ConversationContext | null): string {
@@ -1552,7 +1610,17 @@ function pickAdmissionSyncKinds(intent: AdmissionIntent): { includePlans: boolea
 
 function shouldSyncPlanDetails(intent: AdmissionIntent, includePlanDetailsSetting = false): boolean {
   const types = new Set(intent.queryTypes);
-  return Boolean(intent.majorName) || (includePlanDetailsSetting && (types.has("plan") || types.has("compare")));
+  return (
+    Boolean(intent.majorName) ||
+    Boolean(intent.planGroup) ||
+    includePlanDetailsSetting ||
+    types.has("plan") ||
+    types.has("score") ||
+    types.has("rank") ||
+    types.has("major_score") ||
+    types.has("trend") ||
+    types.has("compare")
+  );
 }
 
 function shouldSyncMajorScores(intent: AdmissionIntent): boolean {
@@ -1691,7 +1759,7 @@ function renderAdmissionComparisonContext(input: {
     `多校招生对比查询：${input.schools.map((school) => school.university.name).join(" / ")}`,
     `用户问题：${input.userMessage}`,
     `省份：${input.province}；科类：${input.subjectType}；专业组：${input.planGroup ?? "未指定"}；专业：${input.majorName ?? "未指定"}`,
-    "使用的数据表：admission_plans、admission_scores、admission_sources。",
+    "本次招生数据来自实时请求，不写入本地 admission_* 缓存表。",
     ""
   ];
   for (const school of input.schools) {
@@ -1699,7 +1767,7 @@ function renderAdmissionComparisonContext(input: {
     lines.push(school.contextText);
     lines.push("");
   }
-  lines.push("多校对比说明：以上每所学校均单独同步、查询和保留来源快照；招生数据最终请以省考试院和学校招生网为准。");
+  lines.push("多校对比说明：以上每所学校均单独实时请求并保留本回答内的来源摘要；招生数据最终请以省考试院和学校招生网为准。");
   return lines.join("\n");
 }
 
@@ -1746,17 +1814,17 @@ function renderAdmissionContext(input: {
   }
   if (input.syncSummary) {
     lines.push(
-      `实时同步结果：已请求掌上高考；本批 ${input.syncSummary.total}/${input.syncSummary.candidateTotal || input.syncSummary.total} 所，offset ${input.syncSummary.offset} → ${input.syncSummary.nextOffset}，映射 ${input.syncSummary.mapped}，计划 ${input.syncSummary.planRows}（汇总 ${input.syncSummary.planSummaryRows}，专业计划 ${input.syncSummary.majorPlanRows}），院校线 ${input.syncSummary.schoolScoreRows}，专业线 ${input.syncSummary.majorScoreRows}，来源快照 ${input.syncSummary.sourceRows}，跳过学校 ${input.syncSummary.skipped}，跳过已有接口 ${input.syncSummary.skippedRequests}，错误 ${input.syncSummary.errorCount}。`
+      `实时获取结果：已请求掌上高考；计划 ${input.syncSummary.planRows}（汇总 ${input.syncSummary.planSummaryRows}，专业计划 ${input.syncSummary.majorPlanRows}），院校线 ${input.syncSummary.schoolScoreRows}，专业线 ${input.syncSummary.majorScoreRows}，来源摘要 ${input.syncSummary.sourceRows}，源站请求 ${input.syncSummary.sourceRequests}/${input.syncSummary.sourceRequestBudget ?? "不限"}，错误 ${input.syncSummary.errorCount}。本次结果不写入本地缓存。`
     );
     if (input.syncSummary.requestBudgetExhausted) {
-      lines.push(`实时同步节流：本批已用 ${input.syncSummary.sourceRequests}/${input.syncSummary.sourceRequestBudget ?? "不限"} 次源站请求预算，已主动暂停继续补数；后续定时同步会从当前 offset 继续。`);
+      lines.push(`实时获取节流：本批已用 ${input.syncSummary.sourceRequests}/${input.syncSummary.sourceRequestBudget ?? "不限"} 次源站请求预算，已主动暂停继续请求。`);
     }
   }
   if (!input.plans.length && !input.scores.length && !input.syncError) {
     lines.push(
       input.syncSummary
-        ? "数据状态：本次同步正常完成，但当前学校/省份/科类/年份/专业条件没有返回可入库的计划或分数。常见原因是源站暂未开放该年份数据、该校当年未在该省该科类招生，或源站字段与当前条件不完全一致。"
-        : "数据状态：本地暂未检索到当前条件的招生计划或录取分数。"
+        ? "数据状态：本次实时请求正常完成，但当前学校/省份/科类/年份/专业条件没有返回可用的计划或分数。常见原因是源站暂未开放该年份数据、该校当年未在该省该科类招生，或源站字段与当前条件不完全一致。"
+        : "数据状态：本次暂未获取到当前条件的招生计划或录取分数。"
     );
   }
   const coverageSuggestion = renderAdmissionCoverageSuggestion(input);
@@ -1791,7 +1859,7 @@ function renderAdmissionContext(input: {
       );
     }
   } else {
-    lines.push("暂无匹配的招生计划缓存。");
+    lines.push("暂无匹配的招生计划数据。");
   }
 
   const scoreTrendSummary = renderScoreTrendSummary(input.scores, input.plans);
@@ -1823,7 +1891,7 @@ function renderAdmissionContext(input: {
       );
     }
   } else {
-    lines.push("暂无匹配的录取分数/位次缓存。");
+    lines.push("暂无匹配的录取分数/位次数据。");
   }
 
   const sourceIds = Array.from(
@@ -1835,9 +1903,9 @@ function renderAdmissionContext(input: {
   );
   const fetchedTimes = Array.from(new Set([...input.plans, ...input.scores].map((row) => formatDateTimeShort(row.fetchedAt))));
   lines.push("\n资料页追溯：");
-  lines.push("使用的数据表：admission_plans、admission_scores、admission_sources。");
+  lines.push("本次招生数据来自实时请求，不写入 admission_plans、admission_scores、admission_sources 缓存表。");
   if (input.schoolProfileText) lines.push("院校基础信息补充表：school_profiles。");
-  lines.push(`招生来源记录：${sourceIds.length ? sourceIds.slice(0, 24).join("、") : "本次没有匹配到来源记录"}`);
+  lines.push(`实时行标记：${sourceIds.length ? sourceIds.slice(0, 24).join("、") : "本次没有可展示的行标记"}`);
   if (input.sourceSnapshots.length) {
     lines.push("招生来源快照：");
     for (const snapshot of input.sourceSnapshots.slice(0, 8)) {
@@ -1845,7 +1913,7 @@ function renderAdmissionContext(input: {
     }
   }
   if (input.syncSummary && !sourceIds.length) {
-    lines.push(`本次同步来源快照数：${input.syncSummary.sourceRows}；没有入库行时，说明源站响应未包含当前查询条件可用的数据行。`);
+    lines.push(`本次实时来源摘要数：${input.syncSummary.sourceRows}；没有数据行时，说明源站响应未包含当前查询条件可用的数据。`);
   }
   lines.push(`抓取时间：${fetchedTimes.length ? fetchedTimes.slice(0, 12).join("、") : "暂无"}`);
   lines.push(`原始数据行摘要：${renderRawSnapshotSummary(input.plans, input.scores)}`);
@@ -1881,9 +1949,9 @@ function renderPlanGroupMajorCoverageNote(input: {
   const hasGroupedScore = input.scores.some((row) => Boolean(row.planGroup));
   const hasGroupedPlanSummary = input.plans.some((row) => Boolean(row.planGroup));
   if (input.planGroup || input.majorName || hasGroupedScore || hasGroupedPlanSummary) {
-    return "专业组内专业清单缺口：当前没有检索到专业计划明细，只能看到专业组投档线/位次或计划汇总；回答时只能判断专业组门槛、风险和补数方向，不得编造该组下面有哪些专业，也不要推荐具体组内专业。后台应优先同步专业计划 admission_plans。";
+    return "专业组内专业清单缺口：本次实时接口没有返回专业计划明细，只能看到专业组投档线/位次或计划汇总；回答时只能判断专业组门槛和风险，不得编造该组下面有哪些专业，也不要推荐具体组内专业。";
   }
-  return "专业组内专业清单：本次没有锁定具体专业组；若用户要按专业组选专业，需要先同步专业计划明细。";
+  return "专业组内专业清单：本次没有锁定具体专业组；若用户要按专业组选专业，需要先拿到实时接口返回的专业计划明细。";
 }
 
 function renderMajorFallbackNotice(majorName: string, planMajorFallback: boolean, scoreMajorFallback: boolean): string {
@@ -1892,6 +1960,14 @@ function renderMajorFallbackNotice(majorName: string, planMajorFallback: boolean
     scoreMajorFallback ? "录取分数/位次" : null
   ].filter(Boolean);
   return `专业匹配提示：用户请求了“${majorName}”，但${tables.join("、")}没有检索到完全匹配的专业记录；下方对应表格已回退展示当前学校/省份/科类/年份的通用记录。回答时必须明确这些不是“${majorName}”的精确专业数据，不能把院校线或其他专业计划当成该专业结论。`;
+}
+
+function admissionRowsContainMajor(rows: Array<{ majorName: string | null }>, majorName: string): boolean {
+  const target = normalizeSchoolName(majorName);
+  return rows.some((row) => {
+    const current = normalizeSchoolName(row.majorName ?? "");
+    return Boolean(current && target && (current.includes(target) || target.includes(current)));
+  });
 }
 
 function renderAdmissionCoverageSuggestion(input: {
@@ -1921,29 +1997,18 @@ function renderAdmissionCoverageSuggestion(input: {
   if (!missingPlan && !missingScore && !sourceReturnedNoRows && !input.syncError) return null;
   if (!missingPlan && !missingScore) return null;
 
-  const queryTypes = new Set(input.queryTypes);
-  const tableHints: string[] = [];
-  const sourceKinds: string[] = [];
-  if (missingPlan) {
-    tableHints.push(`招生计划 admission_plans（年份 ${formatAdmissionYears(input.planYears)}）`);
-    sourceKinds.push("plan-school-summary");
-    if (input.majorName) sourceKinds.push("plan-major");
-  }
-  if (missingScore) {
-    tableHints.push(`录取分数/位次 admission_scores（年份 ${formatAdmissionYears(input.scoreYears)}）`);
-    sourceKinds.push("score-school");
-    if (input.majorName || queryTypes.has("major_score")) sourceKinds.push("score-major");
-  }
-
   const subjectText = input.subjectTypes.length
     ? input.subjectTypes.join(" / ")
     : input.subjectType ?? "未指定";
+  const missingParts = [
+    missingPlan ? `招生计划（年份 ${formatAdmissionYears(input.planYears)}）` : null,
+    missingScore ? `录取分数/位次（年份 ${formatAdmissionYears(input.scoreYears)}）` : null
+  ].filter(Boolean);
   const lines = [
-    "补数建议：当前回答缺少可直接命中的招生缓存，后台可优先补这个覆盖缺口。",
-    `补数条件：学校=${input.universityName}；省份=${input.province}；科类=${subjectText}；专业组=${input.planGroup ?? "未指定"}；专业=${input.majorName ?? "未指定"}`,
-    `建议同步表：${tableHints.join("；")}。`,
-    `建议检查招生来源接口：${Array.from(new Set(sourceKinds)).join("、")}。`,
-    "WebUI 操作：进入“招生数据”的手动同步，填入学校/省份/科类/年份，并按缺口勾选招生计划、院校线或专业线；若已有来源快照但无入库行，优先查看来源快照里的请求参数和 item_count。"
+    "数据缺口：本次实时请求没有拿到足够匹配的招生数据，不会使用本地缓存补齐。",
+    `查询条件：学校=${input.universityName}；省份=${input.province}；科类=${subjectText}；专业组=${input.planGroup ?? "未指定"}；专业=${input.majorName ?? "未指定"}`,
+    `缺少内容：${missingParts.length ? missingParts.join("；") : "当前条件可用数据"}。`,
+    "建议：让用户补充更准确的省份、科类、年份、专业组或专业名；如果条件已经明确，可以稍后重试，源站可能暂时没有返回。"
   ];
   return lines.join("\n");
 }
@@ -2027,7 +2092,7 @@ function renderAdmissionReferenceTable(plans: AdmissionPlanRow[], scores: Admiss
 
 function renderAdmissionSourceLabel(source: string): string {
   const labels: Record<string, string> = {
-    gaokao_cn: "掌上高考缓存",
+    gaokao_cn: "掌上高考实时数据",
     xuefeng_agent: "雪峰Agent历史库",
     jiangsu_eea: "江苏考试院官方",
     jiangsu_school_official: "高校招生网官方"
@@ -2226,11 +2291,17 @@ function summarizeSourceRequest(requestJson: string): string {
         "local_province_id",
         "local_type_id",
         "province",
+        "classify",
         "subjectType",
         "batch",
         "year",
         "page",
+        "pageNum",
         "size",
+        "pageSize",
+        "universityName",
+        "universityMajorGroup",
+        "recruitCode",
         "title"
       ]).join(", ") || requestJson.slice(0, 180)
     );
@@ -2244,7 +2315,7 @@ function summarizeSourceResponse(responseJson: string | null, error: string | nu
   if (!responseJson) return "无响应正文";
   try {
     const data = JSON.parse(responseJson) as Record<string, unknown>;
-    const summary = pickObjectEntries(data, ["code", "message", "location", "title", "rowCount"]);
+    const summary = pickObjectEntries(data, ["code", "msg", "message", "location", "title", "rowCount"]);
     const itemCount = countResponseItems(data);
     if (itemCount !== null) summary.push(`item_count=${itemCount}`);
     return summary.join(", ") || responseJson.slice(0, 220);
@@ -2261,9 +2332,17 @@ function pickObjectEntries(data: Record<string, unknown>, keys: string[]): strin
 
 function countResponseItems(data: Record<string, unknown>): number | null {
   const body = data.data;
-  if (!body || typeof body !== "object") return null;
-  const item = (body as Record<string, unknown>).item;
-  if (Array.isArray(item)) return item.length;
+  if (body && typeof body === "object") {
+    const item = (body as Record<string, unknown>).item;
+    if (Array.isArray(item)) return item.length;
+  }
+  const mnzyBody = data.body;
+  if (!mnzyBody || typeof mnzyBody !== "object") return null;
+  const record = mnzyBody as Record<string, unknown>;
+  if (Array.isArray(record.list)) return record.list.length;
+  const intentionList = Array.isArray(record.intentionList) ? record.intentionList.length : 0;
+  const notIntentionList = Array.isArray(record.notIntentionList) ? record.notIntentionList.length : 0;
+  if (intentionList || notIntentionList) return intentionList + notIntentionList;
   return null;
 }
 
@@ -2404,7 +2483,7 @@ function renderGreetingReply(): string {
 }
 
 function renderAdmissionDisabledReply(): string {
-  return "这类分数线、位次、招生计划、专业组和志愿冲稳保问题我现在先不做了。当前只做院校介绍和校园生活资料：比如学校定位、宿舍食堂、校园网、管理、城市体验、适合什么人。你可以直接问“某某大学怎么样”或“某某大学宿舍食堂如何”。";
+  return "后台现在关闭了招生问答，所以这类分数线、位次、招生计划、专业组和志愿冲稳保问题暂时不能查。可以在 WebUI 的“自然语言设置”里打开“招生问答”，再按学校、省份、科类、分数/位次继续问。";
 }
 
 function renderCasualFallback(hasContext: boolean): string {

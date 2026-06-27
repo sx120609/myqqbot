@@ -189,18 +189,15 @@ describe("AutoSyncScheduler", () => {
     expect(gaokaoCn.sync).toHaveBeenCalledTimes(1);
     const failedStatus = scheduler.status().jobs.gaokaoCnPlan;
     expect(failedStatus.retryAt).toEqual(expect.any(String));
-    expect(failedStatus.nextRunAt).toBe(failedStatus.retryAt);
+    expect(failedStatus.nextRunAt).toBeNull();
     expect(failedStatus.cursorOffset).toBe(0);
 
     stored.set("sync.internal.gaokaoCnPlan.retryAt", new Date(Date.now() - 1000).toISOString());
     await scheduler.tick();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(gaokaoCn.sync).toHaveBeenCalledTimes(2);
-    const recoveredStatus = scheduler.status().jobs.gaokaoCnPlan;
-    expect(recoveredStatus.retryAt).toBeNull();
-    expect(recoveredStatus.cursorOffset).toBe(10);
-    expect(recoveredStatus.lastResult).toMatchObject({ ok: true, planRows: 6 });
+    expect(gaokaoCn.sync).toHaveBeenCalledTimes(1);
+    expect(scheduler.status().jobs.gaokaoCnPlan.cursorOffset).toBe(0);
     warn.mockRestore();
   });
 
@@ -227,7 +224,7 @@ describe("AutoSyncScheduler", () => {
 
     expect(gaokaoCn.sync).not.toHaveBeenCalled();
     expect(scheduler.status().jobs.gaokaoCnPlan.cooldownUntil).toBe(cooldownUntil);
-    expect(scheduler.status().jobs.gaokaoCnPlan.nextRunAt).toBe(cooldownUntil);
+    expect(scheduler.status().jobs.gaokaoCnPlan.nextRunAt).toBeNull();
   });
 
   it("skips scheduled Gaokao.cn sync while adapter-wide cooldown is active", async () => {
@@ -252,7 +249,7 @@ describe("AutoSyncScheduler", () => {
 
     expect(gaokaoCn.sync).not.toHaveBeenCalled();
     expect(scheduler.status().jobs.gaokaoCnPlan.cooldownUntil).toBe(cooldownUntil);
-    expect(scheduler.status().jobs.gaokaoCnPlan.nextRunAt).toBe(cooldownUntil);
+    expect(scheduler.status().jobs.gaokaoCnPlan.nextRunAt).toBeNull();
   });
 
   it("can advance multiple Gaokao.cn batches in one scheduled run", async () => {
@@ -357,12 +354,8 @@ describe("AutoSyncScheduler", () => {
 
     await scheduler.tick();
 
-    expect(gaokaoCn.sync).toHaveBeenCalledTimes(1);
-    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
-      includePlans: true,
-      includeScores: false
-    }));
-    expect(scheduler.status().jobs.gaokaoCnPlan.running).toBe(true);
+    expect(gaokaoCn.sync).not.toHaveBeenCalled();
+    expect(scheduler.status().jobs.gaokaoCnPlan.running).toBe(false);
     expect(scheduler.status().jobs.gaokaoCnScore.running).toBe(false);
 
     resolveSync(fixtureGaokaoResult({ nextOffset: 0 }));

@@ -124,9 +124,9 @@ export class AutoSyncScheduler {
         },
         gaokaoCnPlan: {
           ...this.states.gaokaoCnPlan,
-          enabled: runtime.gaokaoCnAutoEnabled,
+          enabled: false,
           intervalHours: clampInterval(runtime.gaokaoCnPlanIntervalHours),
-          nextRunAt: this.nextRunAt("gaokaoCnPlan", runtime.gaokaoCnAutoEnabled, runtime.gaokaoCnPlanIntervalHours),
+          nextRunAt: null,
           cursorOffset: this.gaokaoCursor("gaokaoCnPlan", gaokaoSignature(planOptions)),
           lastResult: this.gaokaoLastResult("gaokaoCnPlan"),
           cooldownUntil: this.gaokaoEffectiveRateLimitCooldownUntil("gaokaoCnPlan"),
@@ -134,9 +134,9 @@ export class AutoSyncScheduler {
         },
         gaokaoCnScore: {
           ...this.states.gaokaoCnScore,
-          enabled: runtime.gaokaoCnAutoEnabled,
+          enabled: false,
           intervalHours: clampInterval(runtime.gaokaoCnScoreIntervalHours),
-          nextRunAt: this.nextRunAt("gaokaoCnScore", runtime.gaokaoCnAutoEnabled, runtime.gaokaoCnScoreIntervalHours),
+          nextRunAt: null,
           cursorOffset: this.gaokaoCursor("gaokaoCnScore", gaokaoSignature(scoreOptions)),
           lastResult: this.gaokaoLastResult("gaokaoCnScore"),
           cooldownUntil: this.gaokaoEffectiveRateLimitCooldownUntil("gaokaoCnScore"),
@@ -161,40 +161,7 @@ export class AutoSyncScheduler {
         })
       );
     }
-    if (
-      runtime.gaokaoCnAutoEnabled &&
-      !this.isAnyGaokaoCnRunning() &&
-      this.isDue("gaokaoCnPlan", runtime.gaokaoCnPlanIntervalHours)
-    ) {
-      void this.run(
-        "gaokaoCnPlan",
-        () => this.syncGaokaoCnBatches(
-          "gaokaoCnPlan",
-          this.gaokaoPlanOptions(runtime),
-          runtime.gaokaoCnBatchesPerRun,
-          runtime.gaokaoCnBatchDelayMs,
-          runtime.gaokaoCnRateLimitCooldownMinutes
-        ),
-        clampRetryLimit(runtime.gaokaoCnRetryLimit)
-      );
-    }
-    if (
-      runtime.gaokaoCnAutoEnabled &&
-      !this.isAnyGaokaoCnRunning() &&
-      this.isDue("gaokaoCnScore", runtime.gaokaoCnScoreIntervalHours)
-    ) {
-      void this.run(
-        "gaokaoCnScore",
-        () => this.syncGaokaoCnBatches(
-          "gaokaoCnScore",
-          this.gaokaoScoreOptions(runtime),
-          runtime.gaokaoCnBatchesPerRun,
-          runtime.gaokaoCnBatchDelayMs,
-          runtime.gaokaoCnRateLimitCooldownMinutes
-        ),
-        clampRetryLimit(runtime.gaokaoCnRetryLimit)
-      );
-    }
+    // 掌上高考不再做后台全量同步；招生问答按单次问题实时请求，且不写入 admission_* 缓存。
   }
 
   private async syncGaokaoCnBatches(

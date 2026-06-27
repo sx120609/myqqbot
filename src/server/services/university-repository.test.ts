@@ -53,6 +53,26 @@ describe("UniversityRepository", () => {
 
     database.close();
   });
+
+  it("matches a campus school when the user mentions the base school name", () => {
+    const dir = mkdtempSync(join(tmpdir(), "myqqbot-university-test-"));
+    tempDirs.push(dir);
+    const database = new AppDatabase(join(dir, "test.sqlite"));
+    const universities = new UniversityRepository(database);
+
+    universities.importAll([
+      fixtureUniversity("江苏警官学院浦口校区", "jiang-su-jing-guan-xue-yuan-pu-kou-xiao-qu", "# 江苏警官学院浦口校区")
+    ]);
+
+    const candidates = universities.findSchoolCandidates("江苏警官学院怎么样");
+
+    expect(candidates[0]).toMatchObject({
+      name: "江苏警官学院浦口校区",
+      matchedBy: "江苏警官学院"
+    });
+
+    database.close();
+  });
 });
 
 function fixtureUniversity(name: string, slug: string, rawMarkdown: string): ParsedUniversity {

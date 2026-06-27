@@ -379,19 +379,21 @@ describe("admission API", () => {
         onebot: {}
       } as never);
 
-      await app.inject({
+      const first = await app.inject({
         method: "POST",
         url: "/api/data/sync-gaokao-cn",
         payload: { includePlans: true, limit: 1 }
       });
-      await app.inject({
+      const second = await app.inject({
         method: "POST",
         url: "/api/data/sync-gaokao-cn",
         payload: { includePlans: true, includePlanDetails: true, limit: 1 }
       });
 
-      expect(sync).toHaveBeenNthCalledWith(1, expect.objectContaining({ includePlanDetails: false }));
-      expect(sync).toHaveBeenNthCalledWith(2, expect.objectContaining({ includePlanDetails: true }));
+      expect(first.statusCode).toBe(410);
+      expect(second.statusCode).toBe(410);
+      expect(first.json()).toMatchObject({ ok: false, code: "GAOKAO_CN_SYNC_REMOVED" });
+      expect(sync).not.toHaveBeenCalled();
     } finally {
       await app.close();
       database.close();
@@ -442,11 +444,10 @@ describe("admission API", () => {
         payload: { limit: 1 }
       });
 
-      expect(response.statusCode).toBe(429);
+      expect(response.statusCode).toBe(410);
       expect(response.json()).toMatchObject({
         ok: false,
-        code: "GAOKAO_CN_RATE_LIMIT_COOLDOWN",
-        cooldownUntil
+        code: "GAOKAO_CN_SYNC_REMOVED"
       });
       expect(sync).not.toHaveBeenCalled();
     } finally {

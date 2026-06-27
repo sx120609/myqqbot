@@ -132,12 +132,12 @@ describe("MessageProcessor", () => {
 
     expect(result.handled).toBe(true);
     expect(result.reason).toBe("招生问答已关闭");
-    expect(result.reply).toContain("当前只做院校介绍和校园生活资料");
+    expect(result.reply).toContain("后台现在关闭了招生问答");
     expect(nlu.analyze).not.toHaveBeenCalled();
     expect(vi.mocked(llm.chat)).toHaveBeenCalledTimes(1);
   });
 
-  it("does not use local school candidates when the LLM route omits school names", async () => {
+  it("falls back to local school candidates when the LLM route omits school names", async () => {
     const settings = {
       runtime: () => ({
         onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
@@ -175,16 +175,19 @@ describe("MessageProcessor", () => {
       }))
     } as unknown as NaturalLanguageService;
     const llm = {
-      chat: vi.fn().mockResolvedValueOnce(routeJson("university_info", {
-        topicKey: "general",
-        topicLabel: "整体评价"
-      }))
+      chat: vi.fn()
+        .mockResolvedValueOnce(routeJson("university_info", {
+          topicKey: "general",
+          topicLabel: "整体评价"
+        }))
+        .mockResolvedValueOnce("南师大整体不错。")
     } as unknown as LlmClient;
     const logs = {
       message: vi.fn()
     } as unknown as LogStore;
     const universities = {
-      getUniversity: vi.fn(() => localCandidate)
+      getTopicQuestions: vi.fn(() => []),
+      getSchoolProfile: vi.fn(() => null)
     } as unknown as UniversityRepository;
     const processor = new MessageProcessor(settings, universities, nlu, llm, logs);
 
@@ -197,10 +200,10 @@ describe("MessageProcessor", () => {
     });
 
     expect(result.handled).toBe(true);
-    expect(result.reason).toBe("需要学校名");
-    expect(result.reply).toContain("你想查哪所学校");
-    expect(nlu.analyze).not.toHaveBeenCalled();
-    expect(vi.mocked(llm.chat)).toHaveBeenCalledTimes(1);
+    expect(result.reason).toBe("模型判断为高校资料回答");
+    expect(result.reply).toContain("南师大整体不错。");
+    expect(nlu.analyze).toHaveBeenCalledWith("南师大你觉得怎么样", undefined);
+    expect(vi.mocked(llm.chat)).toHaveBeenCalledTimes(2);
   });
 
   it("uses the LLM with a data-gap note when no questionnaire snippets are retrieved", async () => {
@@ -414,7 +417,7 @@ describe("MessageProcessor", () => {
     }));
   });
 
-  it("does not answer university info from local candidates when the LLM omits school names", async () => {
+  it("uses the raw message to resolve a university info school when the LLM omits school names", async () => {
     const settings = {
       runtime: () => ({
         onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
@@ -452,17 +455,20 @@ describe("MessageProcessor", () => {
       }))
     } as unknown as NaturalLanguageService;
     const llm = {
-      chat: vi.fn().mockResolvedValueOnce(routeJson("university_info", {
-        schoolNames: [],
-        topicKey: "general",
-        topicLabel: "整体评价"
-      }))
+      chat: vi.fn()
+        .mockResolvedValueOnce(routeJson("university_info", {
+          schoolNames: [],
+          topicKey: "general",
+          topicLabel: "整体评价"
+        }))
+        .mockResolvedValueOnce("南航整体不错。")
     } as unknown as LlmClient;
     const logs = {
       message: vi.fn()
     } as unknown as LogStore;
     const universities = {
-      getTopicQuestions: vi.fn()
+      getTopicQuestions: vi.fn(() => []),
+      getSchoolProfile: vi.fn(() => null)
     } as unknown as UniversityRepository;
     const processor = new MessageProcessor(settings, universities, nlu, llm, logs);
 
@@ -475,10 +481,11 @@ describe("MessageProcessor", () => {
     });
 
     expect(result.handled).toBe(true);
-    expect(result.reason).toBe("需要学校名");
-    expect(result.reply).toContain("哪所学校");
-    expect(universities.getTopicQuestions).not.toHaveBeenCalled();
-    expect(llm.chat).toHaveBeenCalledTimes(1);
+    expect(result.reason).toBe("模型判断为高校资料回答");
+    expect(result.reply).toContain("南航整体不错。");
+    expect(nlu.analyze).toHaveBeenCalledWith("南航怎么样", undefined);
+    expect(universities.getTopicQuestions).toHaveBeenCalledWith(21, "general", "南航怎么样", 6);
+    expect(llm.chat).toHaveBeenCalledTimes(2);
   });
 
   it("does not build a comparison from local candidates unless the LLM returns multiple school names", async () => {
@@ -1090,7 +1097,7 @@ describe("MessageProcessor", () => {
 
     expect(result.handled).toBe(true);
     expect(result.reason).toBe("招生数据回答");
-    expect(nlu.analyze).toHaveBeenCalledTimes(1);
+    expect(nlu.analyze).toHaveBeenCalledTimes(2);
     expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
       universityId: 6,
       provinces: ["四川"],
@@ -1395,7 +1402,8 @@ describe("MessageProcessor", () => {
       planYears: [2026],
       includePlans: true,
       includeScores: false,
-      includePlanDetails: false,
+      includePlanDetails: true,
+      useMnzyPlanDetails: true,
       skipExisting: true
     }));
     expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
@@ -1734,11 +1742,11 @@ describe("MessageProcessor", () => {
       includeScores: false
     }));
     const prompt = JSON.stringify(vi.mocked(llm.chat).mock.calls[1][0]);
-    expect(prompt).toContain("已停止继续实时补数");
+    expect(prompt).toContain("已停止继续实时获取");
     expect(prompt).toContain("错误 1");
   });
 
-  it("shares the Bot realtime admission request budget across plan and score syncs", async () => {
+  it("uses a dedicated Bot realtime admission request budget across plan and score syncs", async () => {
     const settings = {
       runtime: () => ({
         onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
@@ -1761,6 +1769,8 @@ describe("MessageProcessor", () => {
           gaokaoCnRequestDelayMs: 0,
           gaokaoCnRateLimitCooldownMinutes: 720,
           gaokaoCnMaxRequestsPerRun: 1,
+          gaokaoCnRealtimeRequestDelayMs: 250,
+          gaokaoCnRealtimeMaxRequestsPerRun: 7,
           gaokaoCnSkipExisting: true
         }
       })
@@ -1801,8 +1811,8 @@ describe("MessageProcessor", () => {
         schoolScoreRows: 0,
         majorScoreRows: 0,
         sourceRows: 1,
-        sourceRequests: 1,
-        sourceRequestBudget: 1,
+        sourceRequests: 7,
+        sourceRequestBudget: 7,
         requestBudgetExhausted: true,
         skippedRequests: 0,
         skipped: 0,
@@ -1848,11 +1858,12 @@ describe("MessageProcessor", () => {
     expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
       includePlans: true,
       includeScores: false,
-      maxSourceRequests: 1
+      requestDelayMs: 250,
+      maxSourceRequests: 7
     }));
     const prompt = JSON.stringify(vi.mocked(llm.chat).mock.calls[1][0]);
-    expect(prompt).toContain("实时同步节流");
-    expect(prompt).toContain("本批已用 1/1 次源站请求预算");
+    expect(prompt).toContain("实时获取节流");
+    expect(prompt).toContain("本批已用 7/7 次源站请求预算");
   });
 
   it("uses historical scores and explains when the user asks for current-year score lines", async () => {
@@ -2468,16 +2479,16 @@ describe("MessageProcessor", () => {
       planYears: [2026],
       includePlans: true,
       includeScores: false,
-      includePlanDetails: false
+      includePlanDetails: true,
+      useMnzyPlanDetails: true
     }));
     const prompt = JSON.stringify(vi.mocked(llm.chat).mock.calls[1][0]);
-    expect(prompt).toContain("实时同步结果：已请求掌上高考");
-    expect(prompt).toContain("数据状态：本次同步正常完成");
-    expect(prompt).toContain("补数建议：当前回答缺少可直接命中的招生缓存");
-    expect(prompt).toContain("补数条件：学校=安徽大学；省份=四川；科类=物理类");
-    expect(prompt).toContain("建议同步表：招生计划 admission_plans（年份 2026）");
-    expect(prompt).toContain("建议检查招生来源接口：plan-school-summary");
-    expect(prompt).toContain("来源快照 2");
+    expect(prompt).toContain("实时获取结果：已请求掌上高考");
+    expect(prompt).toContain("数据状态：本次实时请求正常完成");
+    expect(prompt).toContain("数据缺口：本次实时请求没有拿到足够匹配的招生数据");
+    expect(prompt).toContain("查询条件：学校=安徽大学；省份=四川；科类=物理类");
+    expect(prompt).toContain("缺少内容：招生计划（年份 2026）");
+    expect(prompt).toContain("来源摘要 2");
     expect(prompt).toContain("招生来源快照：");
     expect(prompt).toContain("plan-major");
     expect(prompt).toContain("item_count=0");
@@ -2485,13 +2496,13 @@ describe("MessageProcessor", () => {
     expect(answerSources.create).toHaveBeenCalledWith(expect.objectContaining({
       topic: "招生数据",
       sourceUrl: "https://www.gaokao.cn/school/67",
-      contextText: expect.stringContaining("本次同步来源快照数：2")
+      contextText: expect.stringContaining("本次实时来源摘要数：2")
     }));
     expect(answerSources.create).toHaveBeenCalledWith(expect.objectContaining({
       contextText: expect.stringContaining("招生来源快照：")
     }));
     expect(answerSources.create).toHaveBeenCalledWith(expect.objectContaining({
-      contextText: expect.stringContaining("补数条件：学校=安徽大学；省份=四川；科类=物理类")
+      contextText: expect.stringContaining("查询条件：学校=安徽大学；省份=四川；科类=物理类")
     }));
   });
 
@@ -2926,7 +2937,7 @@ describe("MessageProcessor", () => {
     expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
       provinces: ["浙江"],
       subjectTypes: ["综合改革"],
-      requestDelayMs: 9000,
+      requestDelayMs: 0,
       skipExisting: false
     }));
     expect(admissions.queryScores).toHaveBeenCalledWith(expect.objectContaining({

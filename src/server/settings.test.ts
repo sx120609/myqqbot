@@ -27,6 +27,10 @@ describe("SettingsStore", () => {
     expect(settings.all(false)["sync.gaokaoCnRequestDelayMs"]).toBe("180000");
     expect(settings.runtime().sync.gaokaoCnMaxRequestsPerRun).toBe(1);
     expect(settings.all(false)["sync.gaokaoCnMaxRequestsPerRun"]).toBe("1");
+    expect(settings.runtime().sync.gaokaoCnRealtimeRequestDelayMs).toBe(0);
+    expect(settings.all(false)["sync.gaokaoCnRealtimeRequestDelayMs"]).toBe("0");
+    expect(settings.runtime().sync.gaokaoCnRealtimeMaxRequestsPerRun).toBe(12);
+    expect(settings.all(false)["sync.gaokaoCnRealtimeMaxRequestsPerRun"]).toBe("12");
     expect(settings.runtime().sync.gaokaoCnBatchesPerRun).toBe(1);
     expect(settings.all(false)["sync.gaokaoCnBatchesPerRun"]).toBe("1");
     expect(settings.runtime().sync.gaokaoCnBatchDelayMs).toBe(1800000);
@@ -143,6 +147,12 @@ describe("SettingsStore", () => {
       .run("sync.gaokaoCnMaxRequestsPerRun", "0", now);
     database.db
       .prepare("INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)")
+      .run("sync.gaokaoCnRealtimeRequestDelayMs", "-20", now);
+    database.db
+      .prepare("INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)")
+      .run("sync.gaokaoCnRealtimeMaxRequestsPerRun", "0", now);
+    database.db
+      .prepare("INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)")
       .run("sync.gaokaoCnBatchDelayMs", "1000", now);
     database.db
       .prepare("INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)")
@@ -152,18 +162,24 @@ describe("SettingsStore", () => {
 
     expect(settings.all(false)["sync.gaokaoCnRequestDelayMs"]).toBe("180000");
     expect(settings.all(false)["sync.gaokaoCnMaxRequestsPerRun"]).toBe("1");
+    expect(settings.all(false)["sync.gaokaoCnRealtimeRequestDelayMs"]).toBe("0");
+    expect(settings.all(false)["sync.gaokaoCnRealtimeMaxRequestsPerRun"]).toBe("1");
     expect(settings.all(false)["sync.gaokaoCnBatchDelayMs"]).toBe("1800000");
     expect(settings.all(false)["sync.gaokaoCnRateLimitCooldownMinutes"]).toBe("1440");
 
     settings.update({
       "sync.gaokaoCnRequestDelayMs": "12000",
       "sync.gaokaoCnMaxRequestsPerRun": "0",
+      "sync.gaokaoCnRealtimeRequestDelayMs": "90000",
+      "sync.gaokaoCnRealtimeMaxRequestsPerRun": "0",
       "sync.gaokaoCnBatchDelayMs": "300000",
       "sync.gaokaoCnRateLimitCooldownMinutes": "720"
     });
 
     expect(settings.all(false)["sync.gaokaoCnRequestDelayMs"]).toBe("180000");
     expect(settings.all(false)["sync.gaokaoCnMaxRequestsPerRun"]).toBe("1");
+    expect(settings.all(false)["sync.gaokaoCnRealtimeRequestDelayMs"]).toBe("60000");
+    expect(settings.all(false)["sync.gaokaoCnRealtimeMaxRequestsPerRun"]).toBe("1");
     expect(settings.all(false)["sync.gaokaoCnBatchDelayMs"]).toBe("1800000");
     expect(settings.all(false)["sync.gaokaoCnRateLimitCooldownMinutes"]).toBe("1440");
 

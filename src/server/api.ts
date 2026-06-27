@@ -241,56 +241,12 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
     };
   });
 
-  app.post("/api/data/sync-gaokao-cn", async (request, reply) => {
-    const body = request.body as {
-      query?: string;
-      limit?: number;
-      offset?: number;
-      universityId?: number;
-      provinces?: string[] | string;
-      subjectTypes?: string[] | string;
-      scoreYears?: number[] | string;
-      planYears?: number[] | string;
-      includePlans?: boolean;
-      includeScores?: boolean;
-      includeSpecialScores?: boolean;
-      includePlanDetails?: boolean;
-      eligibleOnly?: boolean;
-      requestDelayMs?: number;
-      maxSourceRequests?: number;
-      skipExisting?: boolean;
-    };
-    const syncSettings = deps.settings.runtime().sync;
-    const rateLimitStatus = deps.gaokaoCn.rateLimitStatus?.();
-    if (rateLimitStatus?.active) {
-      const message = `掌上高考当前处于限流冷却中，预计 ${rateLimitStatus.until ?? "稍后"} 后再恢复同步；本次没有请求源站。`;
-      return reply.code(429).send({
-        ok: false,
-        code: "GAOKAO_CN_RATE_LIMIT_COOLDOWN",
-        cooldownUntil: rateLimitStatus.until,
-        message
-      });
-    }
-    const result = await deps.gaokaoCn.sync({
-      query: body.query,
-      limit: body.limit,
-      offset: body.offset,
-      universityId: body.universityId,
-      provinces: parseStringList(body.provinces),
-      subjectTypes: parseStringList(body.subjectTypes),
-      scoreYears: parseNumberList(body.scoreYears),
-      planYears: parseNumberList(body.planYears),
-      includePlans: body.includePlans,
-      includeScores: body.includeScores,
-      includeSpecialScores: body.includeSpecialScores,
-      includePlanDetails: body.includePlanDetails ?? syncSettings.gaokaoCnIncludePlanDetails,
-      eligibleOnly: body.eligibleOnly,
-      requestDelayMs: body.requestDelayMs,
-      rateLimitCooldownMinutes: syncSettings.gaokaoCnRateLimitCooldownMinutes,
-      maxSourceRequests: body.maxSourceRequests ?? syncSettings.gaokaoCnMaxRequestsPerRun,
-      skipExisting: body.skipExisting
+  app.post("/api/data/sync-gaokao-cn", async (_request, reply) => {
+    return reply.code(410).send({
+      ok: false,
+      code: "GAOKAO_CN_SYNC_REMOVED",
+      message: "掌上高考全量同步和本地缓存已下线；招生问答现在按用户问题实时请求源站，本次回答用完即丢。"
     });
-    return { ok: true, ...result };
   });
 
   app.post("/api/data/sync-xuefeng-agent", async (request) => {

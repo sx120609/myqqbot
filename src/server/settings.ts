@@ -58,6 +58,8 @@ export interface RuntimeSettings {
     gaokaoCnRetryLimit: number;
     gaokaoCnRequestDelayMs: number;
     gaokaoCnMaxRequestsPerRun: number;
+    gaokaoCnRealtimeRequestDelayMs: number;
+    gaokaoCnRealtimeMaxRequestsPerRun: number;
     gaokaoCnBatchesPerRun: number;
     gaokaoCnBatchDelayMs: number;
     gaokaoCnRateLimitCooldownMinutes: number;
@@ -70,6 +72,8 @@ const LEGACY_GAOKAO_PROVINCES_DEFAULT = "江苏,浙江,安徽,河南,山东,四�
 const DEFAULT_GAOKAO_CN_LIMIT = "1";
 const DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS = "180000";
 const DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN = "1";
+const DEFAULT_GAOKAO_CN_REALTIME_REQUEST_DELAY_MS = "0";
+const DEFAULT_GAOKAO_CN_REALTIME_MAX_REQUESTS_PER_RUN = "12";
 const DEFAULT_GAOKAO_CN_BATCH_DELAY_MS = "1800000";
 const DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES = "1440";
 const MIN_GAOKAO_CN_REQUEST_DELAY_MS = 180000;
@@ -98,7 +102,7 @@ const DEFAULTS: Record<string, string> = {
   "nl.requireMentionInGroup": "false",
   "nl.contextTtlMinutes": "10",
   "nl.cooldownSeconds": "5",
-  "nl.admissionQaEnabled": process.env.NL_ADMISSION_QA_ENABLED ?? "false",
+  "nl.admissionQaEnabled": process.env.NL_ADMISSION_QA_ENABLED ?? "true",
   "sync.collegesAutoEnabled": "false",
   "sync.collegesIntervalHours": "24",
   "sync.srgaoxiaoAutoEnabled": "false",
@@ -119,6 +123,8 @@ const DEFAULTS: Record<string, string> = {
   "sync.gaokaoCnRetryLimit": "1",
   "sync.gaokaoCnRequestDelayMs": process.env.GAOKAO_CN_REQUEST_DELAY_MS ?? DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS,
   "sync.gaokaoCnMaxRequestsPerRun": process.env.GAOKAO_CN_MAX_REQUESTS_PER_RUN ?? DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN,
+  "sync.gaokaoCnRealtimeRequestDelayMs": process.env.GAOKAO_CN_REALTIME_REQUEST_DELAY_MS ?? DEFAULT_GAOKAO_CN_REALTIME_REQUEST_DELAY_MS,
+  "sync.gaokaoCnRealtimeMaxRequestsPerRun": process.env.GAOKAO_CN_REALTIME_MAX_REQUESTS_PER_RUN ?? DEFAULT_GAOKAO_CN_REALTIME_MAX_REQUESTS_PER_RUN,
   "sync.gaokaoCnBatchesPerRun": process.env.GAOKAO_CN_BATCHES_PER_RUN ?? "1",
   "sync.gaokaoCnBatchDelayMs": process.env.GAOKAO_CN_BATCH_DELAY_MS ?? DEFAULT_GAOKAO_CN_BATCH_DELAY_MS,
   "sync.gaokaoCnRateLimitCooldownMinutes": process.env.GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES ?? DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES,
@@ -184,7 +190,7 @@ export class SettingsStore {
         requireMentionInGroup: this.getBoolean("nl.requireMentionInGroup", false),
         contextTtlMinutes: this.getNumber("nl.contextTtlMinutes", 10),
         cooldownSeconds: this.getNumber("nl.cooldownSeconds", 5),
-        admissionQaEnabled: this.getBoolean("nl.admissionQaEnabled", false)
+        admissionQaEnabled: this.getBoolean("nl.admissionQaEnabled", true)
       },
       sync: {
         collegesAutoEnabled: this.getBoolean("sync.collegesAutoEnabled", false),
@@ -210,6 +216,8 @@ export class SettingsStore {
         gaokaoCnRetryLimit: this.getNumber("sync.gaokaoCnRetryLimit", 1),
         gaokaoCnRequestDelayMs: clampGaokaoRequestDelayMs(this.getNumber("sync.gaokaoCnRequestDelayMs", Number(DEFAULT_GAOKAO_CN_REQUEST_DELAY_MS))),
         gaokaoCnMaxRequestsPerRun: clampGaokaoMaxRequestsPerRun(this.getNumber("sync.gaokaoCnMaxRequestsPerRun", Number(DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN))),
+        gaokaoCnRealtimeRequestDelayMs: clampGaokaoRealtimeRequestDelayMs(this.getNumber("sync.gaokaoCnRealtimeRequestDelayMs", Number(DEFAULT_GAOKAO_CN_REALTIME_REQUEST_DELAY_MS))),
+        gaokaoCnRealtimeMaxRequestsPerRun: clampGaokaoRealtimeMaxRequestsPerRun(this.getNumber("sync.gaokaoCnRealtimeMaxRequestsPerRun", Number(DEFAULT_GAOKAO_CN_REALTIME_MAX_REQUESTS_PER_RUN))),
         gaokaoCnBatchesPerRun: this.getNumber("sync.gaokaoCnBatchesPerRun", 1),
         gaokaoCnBatchDelayMs: clampGaokaoBatchDelayMs(this.getNumber("sync.gaokaoCnBatchDelayMs", Number(DEFAULT_GAOKAO_CN_BATCH_DELAY_MS))),
         gaokaoCnRateLimitCooldownMinutes: clampGaokaoRateLimitCooldownMinutes(this.getNumber("sync.gaokaoCnRateLimitCooldownMinutes", Number(DEFAULT_GAOKAO_CN_RATE_LIMIT_COOLDOWN_MINUTES))),
@@ -312,6 +320,8 @@ export class SettingsStore {
       WHERE key IN (
         'sync.gaokaoCnRequestDelayMs',
         'sync.gaokaoCnMaxRequestsPerRun',
+        'sync.gaokaoCnRealtimeRequestDelayMs',
+        'sync.gaokaoCnRealtimeMaxRequestsPerRun',
         'sync.gaokaoCnBatchDelayMs',
         'sync.gaokaoCnRateLimitCooldownMinutes'
       )
@@ -361,6 +371,8 @@ export class SettingsStore {
 function normalizeGaokaoSyncSetting(key: string, value: string): string {
   if (key === "sync.gaokaoCnRequestDelayMs") return String(clampGaokaoRequestDelayMs(Number(value)));
   if (key === "sync.gaokaoCnMaxRequestsPerRun") return String(clampGaokaoMaxRequestsPerRun(Number(value)));
+  if (key === "sync.gaokaoCnRealtimeRequestDelayMs") return String(clampGaokaoRealtimeRequestDelayMs(Number(value)));
+  if (key === "sync.gaokaoCnRealtimeMaxRequestsPerRun") return String(clampGaokaoRealtimeMaxRequestsPerRun(Number(value)));
   if (key === "sync.gaokaoCnBatchDelayMs") return String(clampGaokaoBatchDelayMs(Number(value)));
   if (key === "sync.gaokaoCnRateLimitCooldownMinutes") return String(clampGaokaoRateLimitCooldownMinutes(Number(value)));
   return value;
@@ -374,6 +386,16 @@ function clampGaokaoRequestDelayMs(value: number): number {
 function clampGaokaoMaxRequestsPerRun(value: number): number {
   if (!Number.isFinite(value)) return Number(DEFAULT_GAOKAO_CN_MAX_REQUESTS_PER_RUN);
   return Math.max(1, Math.min(500, Math.floor(value)));
+}
+
+function clampGaokaoRealtimeRequestDelayMs(value: number): number {
+  if (!Number.isFinite(value)) return Number(DEFAULT_GAOKAO_CN_REALTIME_REQUEST_DELAY_MS);
+  return Math.max(0, Math.min(60 * 1000, Math.floor(value)));
+}
+
+function clampGaokaoRealtimeMaxRequestsPerRun(value: number): number {
+  if (!Number.isFinite(value)) return Number(DEFAULT_GAOKAO_CN_REALTIME_MAX_REQUESTS_PER_RUN);
+  return Math.max(1, Math.min(100, Math.floor(value)));
 }
 
 function clampGaokaoBatchDelayMs(value: number): number {

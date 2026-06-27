@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-type Page = "dashboard" | "model" | "site" | "natural" | "data" | "admissions" | "aliases" | "debug" | "logs" | "security";
+type Page = "dashboard" | "model" | "site" | "natural" | "data" | "aliases" | "debug" | "logs" | "security";
 
 const ADMISSION_CURRENT_YEAR = new Date().getFullYear();
 const ADMISSION_CURRENT_MONTH = new Date().getMonth() + 1;
@@ -475,7 +475,6 @@ function App() {
         {page === "site" && <SitePage />}
         {page === "natural" && <NaturalLanguagePage />}
         {page === "data" && <DataPage />}
-        {page === "admissions" && <AdmissionsPage />}
         {page === "aliases" && <AliasesPage />}
         {page === "debug" && <DebugPage />}
         {page === "logs" && <LogsPage />}
@@ -798,16 +797,19 @@ function NaturalLanguagePage() {
   };
   return (
     <section>
-      <Header title="自然语言设置" subtitle="控制群聊是否需要 @、上下文和冷却；消息入口由大模型判断。" />
+      <Header title="自然语言设置" subtitle="控制群聊是否需要 @、上下文、冷却和招生问答；消息入口由大模型判断。" />
       <Panel title="触发策略" icon={<MessageSquareText size={18} />}>
         <div className="toggle-row">
           <Switch label="群聊自然触发" checked={settings["nl.groupNaturalEnabled"] !== "false"} onChange={(v) => update("nl.groupNaturalEnabled", String(v))} />
           <Switch label="群聊必须 @ 机器人" checked={settings["nl.requireMentionInGroup"] === "true"} onChange={(v) => update("nl.requireMentionInGroup", String(v))} />
+          <Switch label="招生问答" checked={settings["nl.admissionQaEnabled"] !== "false"} onChange={(v) => update("nl.admissionQaEnabled", String(v))} />
           <Switch label="QQ 回复渲染为图片" checked={settings["onebot.replyAsImage"] !== "false"} onChange={(v) => update("onebot.replyAsImage", String(v))} />
         </div>
         <FormGrid>
           <Input label="上下文分钟" value={String(settings["nl.contextTtlMinutes"] ?? "")} onChange={(v) => update("nl.contextTtlMinutes", v)} />
           <Input label="单用户冷却秒" value={String(settings["nl.cooldownSeconds"] ?? "")} onChange={(v) => update("nl.cooldownSeconds", v)} />
+          <Input label="招生实时请求间隔毫秒" value={String(settings["sync.gaokaoCnRealtimeRequestDelayMs"] ?? "0")} onChange={(v) => update("sync.gaokaoCnRealtimeRequestDelayMs", v)} hint="用户问分数线、位次、招生计划或专业组时实时请求；默认 0，最高 60000。" />
+          <Input label="招生实时请求预算" value={String(settings["sync.gaokaoCnRealtimeMaxRequestsPerRun"] ?? "12")} onChange={(v) => update("sync.gaokaoCnRealtimeMaxRequestsPerRun", v)} hint="单次回答最多请求多少个掌上高考接口；默认 12，够拉专业组明细和历史位次。" />
           <Input label="回复图片标题" value={String(settings["onebot.replyImageTitle"] ?? "高校资料助手")} onChange={(v) => update("onebot.replyImageTitle", v)} />
           <Input label="回复图片角标" value={String(settings["onebot.replyImageBadge"] ?? "AI 生成回复")} onChange={(v) => update("onebot.replyImageBadge", v)} />
         </FormGrid>
@@ -1672,6 +1674,8 @@ function AdmissionsPage() {
           <Input label="批次间隔毫秒" value={String(settings["sync.gaokaoCnBatchDelayMs"] ?? "1800000")} onChange={(v) => updateSetting("sync.gaokaoCnBatchDelayMs", v)} hint="每轮多批同步时，批与批之间等待多久；建议不少于 1800000。" />
           <Input label="请求间隔毫秒" value={String(settings["sync.gaokaoCnRequestDelayMs"] ?? "180000")} onChange={(v) => updateSetting("sync.gaokaoCnRequestDelayMs", v)} hint="默认 180000；低于 180000 会自动按 180000 保存，频繁 1069 时继续调高。" />
           <Input label="每批请求预算" value={String(settings["sync.gaokaoCnMaxRequestsPerRun"] ?? "1")} onChange={(v) => updateSetting("sync.gaokaoCnMaxRequestsPerRun", v)} hint="每批最多启动多少个掌上高考接口；低于 1 会自动按 1 保存。" />
+          <Input label="QQ 实时请求间隔毫秒" value={String(settings["sync.gaokaoCnRealtimeRequestDelayMs"] ?? "0")} onChange={(v) => updateSetting("sync.gaokaoCnRealtimeRequestDelayMs", v)} hint="用户问招生数据时临时补数使用；默认 0，最高 60000。" />
+          <Input label="QQ 实时请求预算" value={String(settings["sync.gaokaoCnRealtimeMaxRequestsPerRun"] ?? "12")} onChange={(v) => updateSetting("sync.gaokaoCnRealtimeMaxRequestsPerRun", v)} hint="用户单次问题最多请求多少个掌上高考接口；默认 12，足够拉专业组明细和历史位次。" />
           <Input label="限流冷却分钟" value={String(settings["sync.gaokaoCnRateLimitCooldownMinutes"] ?? "1440")} onChange={(v) => updateSetting("sync.gaokaoCnRateLimitCooldownMinutes", v)} hint="遇到 1069 后定时任务、手动同步和 QQ 临时补数都会暂停源站请求。" />
           <Input label="失败重试次数" value={String(settings["sync.gaokaoCnRetryLimit"] ?? "1")} onChange={(v) => updateSetting("sync.gaokaoCnRetryLimit", v)} hint="仅普通错误会延迟重试；1069 限流不会重试，只进入冷却。" />
         </FormGrid>

@@ -427,7 +427,12 @@ export class UniversityRepository {
     const normalizedText = text.toLowerCase();
 
     for (const school of schools) {
-      const names = [school.name, ...school.aliases.split("|").filter(Boolean), school.slug];
+      const names = [
+        school.name,
+        ...school.aliases.split("|").filter(Boolean),
+        ...campusBaseNameVariants(school.name),
+        school.slug
+      ];
       let best: { matchedBy: string; score: number } | null = null;
       for (const name of names) {
         if (!name) continue;
@@ -533,4 +538,19 @@ export class UniversityRepository {
       insert.run(row.id, row.name, row.slug, row.aliases, row.content.slice(0, 12000));
     }
   }
+}
+
+function campusBaseNameVariants(name: string): string[] {
+  if (!name.endsWith("校区")) return [];
+  const stem = name.slice(0, -"校区".length);
+  const markers = ["高等专科学校", "职业技术学院", "职业学院", "技术学院", "大学", "学院", "学校"];
+  const variants = new Set<string>();
+  for (const marker of markers) {
+    const index = stem.lastIndexOf(marker);
+    if (index < 0) continue;
+    const end = index + marker.length;
+    if (end >= stem.length) continue;
+    variants.add(stem.slice(0, end));
+  }
+  return [...variants];
 }

@@ -487,6 +487,150 @@ describe("GaokaoCnAdapter", () => {
     database.close();
   });
 
+  it("uses Mnzy recommendMajorList for realtime major-group plan details when enabled", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "myqqbot-gaokao-test-"));
+    tempDirs.push(dir);
+    const database = new AppDatabase(join(dir, "test.sqlite"));
+    const universities = new UniversityRepository(database);
+    universities.importAll([fixtureUniversity("南京大学", "nan-jing-da-xue")]);
+    const [nanjing] = universities.listUniversities("南京大学", 1);
+    const admissions = new AdmissionRepository(database);
+    admissions.upsertMapping({
+      universityId: nanjing.id,
+      sourceSchoolId: "111",
+      sourceSchoolName: "南京大学",
+      payloadJson: JSON.stringify({
+        school_id: 111,
+        name: "南京大学",
+        province_name: "江苏",
+        city_name: "南京",
+        level_name: "本科",
+        type_name: "综合"
+      })
+    });
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      if (url.includes("/v3/v1/query/recommendPage")) {
+        expect(body).toMatchObject({
+          province: "江苏",
+          classify: "物理",
+          batch: "本科批",
+          type: null,
+          universityName: "南京大学"
+        });
+        return jsonResponse({
+          code: 200,
+          msg: "OK",
+          body: {
+            total: 1,
+            pageNum: 1,
+            pageSize: 20,
+            list: [
+              {
+                universityName: "南京大学",
+                zsgkId: 111,
+                recruitCode: "110108",
+                universityMajorGroup: "08",
+                year: 2026,
+                planNum: 1,
+                majorNum: 1,
+                claim: "化",
+                historyScore: "[{\"2025\":\"680,165,1\"}]"
+              }
+            ]
+          }
+        });
+      }
+      if (url.includes("/v4/v1/query/recommendMajorList")) {
+        expect(body).toMatchObject({
+          province: "江苏",
+          classify: "物理",
+          batch: "本科批",
+          recruitCode: "110108",
+          universityMajorGroup: "08"
+        });
+        return jsonResponse({
+          code: 200,
+          msg: "OK",
+          body: {
+            intentionList: [
+              {
+                universityName: "南京大学",
+                recruitCode: "110108",
+                universityMajorGroup: "08",
+                majorName: "人工智能",
+                majorRemarks: "（至诚班）",
+                year: 2026,
+                planNum: 1,
+                claim: "化",
+                studyCost: "6380",
+                studyYear: "四年"
+              }
+            ],
+            notIntentionList: []
+          }
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new GaokaoCnAdapter(universities, admissions);
+
+    const result = await adapter.sync({
+      universityId: nanjing.id,
+      limit: 1,
+      provinces: ["江苏"],
+      subjectTypes: ["物理类"],
+      planYears: [2026],
+      includePlans: true,
+      includeScores: false,
+      includeSpecialScores: false,
+      includePlanDetails: true,
+      useMnzyPlanDetails: true,
+      maxSourceRequests: 4
+    });
+
+    const urls = fetchMock.mock.calls.map(([input]) => input instanceof Request ? input.url : String(input));
+    expect(result.errors).toEqual([]);
+    expect(result.planSummaryRows).toBe(1);
+    expect(result.majorPlanRows).toBe(1);
+    expect(result.sourceRequests).toBe(2);
+    expect(urls).toEqual([
+      "https://mnzy.gaokao.cn/api/v3/v1/query/recommendPage",
+      "https://mnzy.gaokao.cn/api/v4/v1/query/recommendMajorList"
+    ]);
+    expect(admissions.queryPlans({
+      universityId: nanjing.id,
+      provinceName: "江苏",
+      subjectType: "物理类",
+      years: [2026],
+      planGroup: "08"
+    }).map((row) => ({
+      majorName: row.majorName,
+      planCount: row.planCount,
+      tuition: row.tuition,
+      duration: row.duration,
+      selectionRequirements: row.selectionRequirements
+    }))).toEqual([
+      {
+        majorName: null,
+        planCount: 1,
+        tuition: null,
+        duration: null,
+        selectionRequirements: "化"
+      },
+      {
+        majorName: "人工智能（至诚班）",
+        planCount: 1,
+        tuition: "6380",
+        duration: "四年",
+        selectionRequirements: "化"
+      }
+    ]);
+    database.close();
+  });
+
   it("pauses a batch before starting another endpoint when source request budget is exhausted", async () => {
     const dir = mkdtempSync(join(tmpdir(), "myqqbot-gaokao-test-"));
     tempDirs.push(dir);
