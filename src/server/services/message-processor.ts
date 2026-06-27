@@ -1213,8 +1213,8 @@ export class MessageProcessor {
     const normalizedSchoolName = normalizeSchoolName(schoolName);
     if (!normalizedSchoolName) return null;
 
-    const localCandidate = analysis.candidates.find((row) => candidateMatchesSchoolName(row, normalizedSchoolName));
-    if (localCandidate) return localCandidate;
+    const exactLocalCandidate = analysis.candidates.find((row) => candidateHasExactName(row, normalizedSchoolName));
+    if (exactLocalCandidate) return exactLocalCandidate;
 
     const repository = this.universities as UniversityRepository & {
       listUniversities?: (query?: string, limit?: number) => ReturnType<UniversityRepository["listUniversities"]>;
@@ -1224,6 +1224,9 @@ export class MessageProcessor {
       .listUniversities?.(schoolName, 8)
       .find((row) => normalizeSchoolName(row.name) === normalizedSchoolName || normalizeSchoolName(row.slug) === normalizedSchoolName);
     if (exact) return exact;
+
+    const localCandidate = analysis.candidates.find((row) => candidateMatchesSchoolName(row, normalizedSchoolName));
+    if (localCandidate) return localCandidate;
 
     const candidate = repository.findSchoolCandidates?.(schoolName, 1)[0];
     return candidate ?? null;
@@ -1236,9 +1239,11 @@ export class MessageProcessor {
     if (intent.schoolNames.length !== 1 || analysis.candidates.length < 2) return [];
     const normalizedSchoolName = normalizeSchoolName(intent.schoolNames[0]);
     if (!normalizedSchoolName) return [];
-    return dedupeCandidates(
+    const candidates = dedupeCandidates(
       analysis.candidates.filter((candidate) => candidateMatchesSchoolName(candidate, normalizedSchoolName))
-    ).slice(0, 5);
+    );
+    if (candidates.some((candidate) => candidateHasExactName(candidate, normalizedSchoolName))) return [];
+    return candidates.slice(0, 5);
   }
 
   private async answerAdmissionGeneralWithLlm(input: {
@@ -1700,6 +1705,10 @@ function candidateMatchesSchoolName(candidate: MessageAnalysis["candidates"][num
     const normalized = normalizeSchoolName(value);
     return normalized === normalizedSchoolName || normalized.includes(normalizedSchoolName) || normalizedSchoolName.includes(normalized);
   });
+}
+
+function candidateHasExactName(candidate: MessageAnalysis["candidates"][number], normalizedSchoolName: string): boolean {
+  return normalizeSchoolName(candidate.name) === normalizedSchoolName || normalizeSchoolName(candidate.slug) === normalizedSchoolName;
 }
 
 function parseJsonObject(text: string): Record<string, unknown> {

@@ -217,7 +217,6 @@ describe("MessageProcessor", () => {
     });
 
     expect(result.handled).toBe(true);
-    expect(result.handled).toBe(true);
     expect(result.reason).toBe("超出服务边界");
     expect(result.reply).toContain("只做高校生活服务");
     expect(result.reply).toContain("专业推荐/避坑");
@@ -294,6 +293,88 @@ describe("MessageProcessor", () => {
     expect(result.reason).toBe("模型判断为高校资料回答");
     expect(result.reply).toContain("南师大整体不错。");
     expect(nlu.analyze).toHaveBeenCalledWith("南师大你觉得怎么样", undefined);
+    expect(vi.mocked(llm.chat)).toHaveBeenCalledTimes(2);
+  });
+
+  it("prefers an exact school over campus candidates that share the same base name", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 900,
+          timeoutMs: 45000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: false,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
+        }
+      })
+    } as SettingsStore;
+    const mainSchool = {
+      id: 101,
+      name: "贵州师范大学",
+      slug: "gui-zhou-shi-fan-da-xue",
+      file_path: "docs/universities/gui-zhou-shi-fan-da-xue.md",
+      source_url: "https://example.com/gznu.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "贵州师范大学",
+      score: 0.9
+    };
+    const campusSchool = {
+      id: 102,
+      name: "贵州师范大学花溪校区",
+      slug: "gui-zhou-shi-fan-da-xue-hua-xi-xiao-qu",
+      file_path: "docs/universities/gui-zhou-shi-fan-da-xue-hua-xi-xiao-qu.md",
+      source_url: "https://example.com/gznu-huaxi.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "贵州师范大学",
+      score: 0.9
+    };
+    const nlu = {
+      analyze: vi.fn(() => ({
+        candidates: [campusSchool, mainSchool],
+        reason: "本地学校候选，仅供模型路由参考"
+      })),
+      buildRetrievalContext: vi.fn(() => "贵州师范大学问卷资料")
+    } as unknown as NaturalLanguageService;
+    const llm = {
+      chat: vi.fn()
+        .mockResolvedValueOnce(routeJson("university_info", {
+          schoolNames: ["贵州师范大学"],
+          topicKey: "general",
+          topicLabel: "整体评价"
+        }))
+        .mockResolvedValueOnce("贵州师范大学整体生活体验可以参考这些资料。")
+    } as unknown as LlmClient;
+    const logs = {
+      message: vi.fn()
+    } as unknown as LogStore;
+    const universities = {
+      getTopicQuestions: vi.fn(() => [{ question: "宿舍怎么样？", answers: [] }]),
+      getSchoolProfile: vi.fn(() => null)
+    } as unknown as UniversityRepository;
+    const processor = new MessageProcessor(settings, universities, nlu, llm, logs);
+
+    const result = await processor.process({
+      platform: "debug",
+      text: "贵州师范大学",
+      messageType: "private",
+      userId: "u1",
+      conversationKey: "private:u1"
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.reason).toBe("模型判断为高校资料回答");
+    expect(result.reply).toContain("贵州师范大学整体生活体验");
+    expect(result.reply).not.toContain("我找到了几个可能的学校");
+    expect(universities.getTopicQuestions).toHaveBeenCalledWith(101, "general", "贵州师范大学", 6);
     expect(vi.mocked(llm.chat)).toHaveBeenCalledTimes(2);
   });
 
