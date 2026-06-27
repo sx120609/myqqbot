@@ -801,20 +801,17 @@ function NaturalLanguagePage() {
   };
   return (
     <section>
-      <Header title="自然语言设置" subtitle="控制群聊是否需要 @、上下文、冷却和招生问答；消息入口由大模型判断。" />
+      <Header title="自然语言设置" subtitle="控制群聊是否需要 @、上下文和冷却；消息入口由大模型判断。" />
       <Panel title="触发策略" icon={<MessageSquareText size={18} />}>
         <div className="toggle-row">
           <Switch label="群聊自然触发" checked={settings["nl.groupNaturalEnabled"] !== "false"} onChange={(v) => update("nl.groupNaturalEnabled", String(v))} />
           <Switch label="群聊必须 @ 机器人" checked={settings["nl.requireMentionInGroup"] === "true"} onChange={(v) => update("nl.requireMentionInGroup", String(v))} />
-          <Switch label="招生问答" checked={settings["nl.admissionQaEnabled"] !== "false"} onChange={(v) => update("nl.admissionQaEnabled", String(v))} />
-          <Switch label="仅支持江苏考生" checked={settings["nl.admissionJiangsuOnlyEnabled"] !== "false"} onChange={(v) => update("nl.admissionJiangsuOnlyEnabled", String(v))} />
           <Switch label="QQ 回复渲染为图片" checked={settings["onebot.replyAsImage"] !== "false"} onChange={(v) => update("onebot.replyAsImage", String(v))} />
         </div>
+        <p className="notice">服务边界：QQBot 只回答高校生活服务和校园体验资料。招生计划、分数线、位次、志愿填报、冲稳保和专业推荐统一告知边界，不调用招生数据。</p>
         <FormGrid>
           <Input label="上下文分钟" value={String(settings["nl.contextTtlMinutes"] ?? "")} onChange={(v) => update("nl.contextTtlMinutes", v)} />
           <Input label="单用户冷却秒" value={String(settings["nl.cooldownSeconds"] ?? "")} onChange={(v) => update("nl.cooldownSeconds", v)} />
-          <Input label="招生实时请求间隔毫秒" value={String(settings["sync.gaokaoCnRealtimeRequestDelayMs"] ?? "0")} onChange={(v) => update("sync.gaokaoCnRealtimeRequestDelayMs", v)} hint="只用于招生计划和专业组明细；江苏分数/位次优先走考试院官方库，缺口再用雪峰 Agent。" />
-          <Input label="招生实时请求预算" value={String(settings["sync.gaokaoCnRealtimeMaxRequestsPerRun"] ?? "12")} onChange={(v) => update("sync.gaokaoCnRealtimeMaxRequestsPerRun", v)} hint="单次回答最多请求多少个掌上高考计划接口；默认 12，够拉专业组明细。" />
           <Input label="回复图片标题" value={String(settings["onebot.replyImageTitle"] ?? "高校资料助手")} onChange={(v) => update("onebot.replyImageTitle", v)} />
           <Input label="回复图片角标" value={String(settings["onebot.replyImageBadge"] ?? "AI 生成回复")} onChange={(v) => update("onebot.replyImageBadge", v)} />
         </FormGrid>
@@ -1149,7 +1146,7 @@ function OfficialDataPage() {
 
   return (
     <section>
-      <Header title="官方数据" subtitle="把省考试院和高校官网数据提前拉到本地库；机器人回答时只读本地，避免临时请求拖慢。" />
+      <Header title="官方数据" subtitle="历史/备用数据维护页；当前 QQBot 不使用招生数据回答用户。" />
       <div className="tabs">
         <button className={provinceTab === "jiangsu" ? "active" : ""} onClick={() => setProvinceTab("jiangsu")}>江苏</button>
         <button disabled>其他省份待接入</button>
@@ -1161,12 +1158,12 @@ function OfficialDataPage() {
             <Metric label="覆盖学校" value={String(scoreCoverage?.scoreUniversities ?? 0)} />
             <Metric label="一分一段/来源" value={String(scoreCoverage?.sourceRows ?? 0)} />
             <Metric label="高校计划行" value={String(planCoverage?.planRows ?? 0)} />
-            <Metric label="专业计划行" value={String(planCoverage?.majorPlanRows ?? 0)} />
+            <Metric label="组内专业明细" value={String(planCoverage?.majorPlanRows ?? 0)} />
             <Metric label="最近官方分数" value={formatTime(scoreCoverage?.latestScoreFetchedAt)} />
           </div>
 
           <Panel title="江苏官方拉取" icon={<RefreshCcw size={18} />}>
-            <p className="notice">默认按钮会同步内置的江苏考试院投档线和一分一段表，保存到本地 `jiangsu_eea`；不会调用掌上高考。</p>
+            <p className="notice">默认按钮会同步内置的江苏考试院投档线和一分一段表，保存到本地 `jiangsu_eea`；高校官方计划会保存专业组下的具体专业、计划数、学费和选科要求，不会调用掌上高考。</p>
             <FormGrid>
               <Input label="学校过滤" value={schoolQuery} onChange={setSchoolQuery} hint="留空拉取内置来源中的全部已适配学校；填学校名只保存匹配学校。" />
               <Input label="入库上限" value={limit} onChange={setLimit} hint="留空不限制；调试时可填 20。" />
@@ -1191,7 +1188,7 @@ function OfficialDataPage() {
                 <RefreshCcw size={16} />按自定义来源拉取
               </button>
               <button onClick={() => void syncJiangsuPlans()} disabled={syncingPlans}>
-                <RefreshCcw size={16} />{syncingPlans ? "拉取中..." : "拉取高校官方计划"}
+                <RefreshCcw size={16} />{syncingPlans ? "拉取中..." : "拉取高校官网组内专业"}
               </button>
               <button onClick={() => void load()}><Search size={16} />刷新</button>
             </div>
@@ -1222,7 +1219,7 @@ function OfficialDataPage() {
                 </table>
               </div>
             </Panel>
-            <Panel title="江苏高校官方计划样例" icon={<Database size={18} />}>
+            <Panel title="江苏高校官方组内专业样例" icon={<Database size={18} />}>
               <div className="table-wrap compact-table">
                 <table>
                   <thead><tr><th>学校</th><th>年份</th><th>科类</th><th>专业组</th><th>专业</th><th>计划</th><th>学费</th><th>选科</th><th>时间</th></tr></thead>
@@ -1794,7 +1791,7 @@ function AdmissionsPage() {
 
   return (
     <section>
-      <Header title="招生数据" subtitle="使用官方来源和历史缓存补充分省招生计划、历年分数线和最低位次。" />
+      <Header title="招生数据" subtitle="历史缓存管理页；当前 QQBot 会对招生、志愿和专业推荐问题统一说明服务边界。" />
       <Panel title="覆盖进度" icon={<Activity size={18} />}>
         <div className="metrics">
           <Metric label="源站状态" value={formatGaokaoSourceStatus(scheduler)} tone={gaokaoSourceCooldownUntil(scheduler) ? "warn" : "good"} />
@@ -1920,9 +1917,7 @@ function AdmissionsPage() {
           <Input label="批次间隔毫秒" value={String(settings["sync.gaokaoCnBatchDelayMs"] ?? "1800000")} onChange={(v) => updateSetting("sync.gaokaoCnBatchDelayMs", v)} hint="每轮多批同步时，批与批之间等待多久；建议不少于 1800000。" />
           <Input label="请求间隔毫秒" value={String(settings["sync.gaokaoCnRequestDelayMs"] ?? "180000")} onChange={(v) => updateSetting("sync.gaokaoCnRequestDelayMs", v)} hint="默认 180000；低于 180000 会自动按 180000 保存，频繁 1069 时继续调高。" />
           <Input label="每批请求预算" value={String(settings["sync.gaokaoCnMaxRequestsPerRun"] ?? "1")} onChange={(v) => updateSetting("sync.gaokaoCnMaxRequestsPerRun", v)} hint="每批最多启动多少个掌上高考接口；低于 1 会自动按 1 保存。" />
-          <Input label="QQ 实时请求间隔毫秒" value={String(settings["sync.gaokaoCnRealtimeRequestDelayMs"] ?? "0")} onChange={(v) => updateSetting("sync.gaokaoCnRealtimeRequestDelayMs", v)} hint="用户问招生数据时临时补数使用；默认 0，最高 60000。" />
-          <Input label="QQ 实时请求预算" value={String(settings["sync.gaokaoCnRealtimeMaxRequestsPerRun"] ?? "12")} onChange={(v) => updateSetting("sync.gaokaoCnRealtimeMaxRequestsPerRun", v)} hint="用户单次问题最多请求多少个掌上高考接口；默认 12，足够拉专业组明细和历史位次。" />
-          <Input label="限流冷却分钟" value={String(settings["sync.gaokaoCnRateLimitCooldownMinutes"] ?? "1440")} onChange={(v) => updateSetting("sync.gaokaoCnRateLimitCooldownMinutes", v)} hint="遇到 1069 后定时任务、手动同步和 QQ 临时补数都会暂停源站请求。" />
+          <Input label="限流冷却分钟" value={String(settings["sync.gaokaoCnRateLimitCooldownMinutes"] ?? "1440")} onChange={(v) => updateSetting("sync.gaokaoCnRateLimitCooldownMinutes", v)} hint="遇到 1069 后定时任务和手动同步都会暂停源站请求。" />
           <Input label="失败重试次数" value={String(settings["sync.gaokaoCnRetryLimit"] ?? "1")} onChange={(v) => updateSetting("sync.gaokaoCnRetryLimit", v)} hint="仅普通错误会延迟重试；1069 限流不会重试，只进入冷却。" />
         </FormGrid>
         <div className="scheduler-grid">

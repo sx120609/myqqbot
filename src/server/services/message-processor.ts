@@ -21,6 +21,11 @@ import { XUEFENG_AGENT_SOURCE } from "./xuefeng-agent-adapter.js";
 
 const DEFAULT_ADMISSION_REALTIME_REQUEST_BUDGET = 12;
 const JIANGSU_EEA_SOURCE = "jiangsu_eea";
+const SERVICE_BOUNDARY_REPLY = [
+  "这个问题我先划个边界：我现在只做高校生活服务和校园体验资料查询，比如宿舍、食堂、校园网、澡堂、外卖、管理、校区环境、学校生活评价等。",
+  "招生计划、分数线、位次、志愿填报、冲稳保、能不能上、专业推荐/避坑这类问题，我们暂时不提供判断，避免因为数据口径或时效问题误导你。",
+  "你可以换个问法问生活体验：比如“南京师范大学宿舍怎么样”“中国药科大学食堂和校园环境如何”。"
+].join("\n");
 
 export interface IncomingImage {
   url?: string;
@@ -200,20 +205,18 @@ export class MessageProcessor {
       }
     }
 
-    let routeIntent = await this.analyzeMessageRouteWithLlm(input, context);
-    if (runtime.naturalLanguage.admissionQaEnabled) {
-      routeIntent = this.mergeAdmissionFollowUp(routeIntent, context, input.text);
-    }
+    const routeIntent = await this.analyzeMessageRouteWithLlm(input, context);
     const shouldReply = routeIntent?.shouldReply || input.messageType === "private" || input.mentionedBot;
     if (!routeIntent || routeIntent.route === "ignore" || !shouldReply) {
       return this.finish(input, { handled: false, reason: "模型判断无需回复", analysis: { routeIntent, schoolAnalysis: emptyMessageAnalysis() } });
     }
 
-    if (routeIntent.route === "admission" && !runtime.naturalLanguage.admissionQaEnabled) {
+    if (routeIntent.route === "admission") {
+      this.clearAdmissionFollowUp(input.conversationKey);
       return this.finish(input, {
         handled: true,
-        reason: "招生问答已关闭",
-        reply: renderAdmissionDisabledReply(),
+        reason: "超出服务边界",
+        reply: renderServiceBoundaryReply(),
         analysis: { routeIntent, schoolAnalysis: emptyMessageAnalysis() }
       });
     }
@@ -261,11 +264,6 @@ export class MessageProcessor {
         sourcePageUrl,
         analysis: { routeIntent, schoolAnalysis: analysis }
       });
-    }
-
-    if (routeIntent.route === "admission") {
-      const admissionReply = await this.answerAdmissionQuery(input, routeIntent, analysis, now);
-      return this.finish(input, admissionReply);
     }
 
     if (routeIntent.route === "casual") {
@@ -407,11 +405,11 @@ export class MessageProcessor {
               "这是唯一入口：程序不会再用关键词或低置信度模板抢先决定回复类型。" +
               "不要使用固定关键词思维；要根据整句语义、上下文、是否在群聊被提及、是否包含图片来判断。" +
               "route 只能是 admission、university_info、casual、ignore。" +
-              "admission 表示高校招生/报考/志愿数据问题，例如招生计划、历年分数线、最低位次、专业录取分、专业组投档线、专业组里有哪些专业、冲稳保、多少分多少位能不能上。" +
+              "admission 表示所有超出当前服务边界的高校招生/报考/志愿/专业推荐问题，例如招生计划、历年分数线、最低位次、专业录取分、专业组投档线、专业组里有哪些专业、冲稳保、多少分多少位能不能上、某专业怎么报、专业推荐或避坑。" +
               "university_info 表示高校资料/校园生活/院校评价/学校对比，例如学校介绍、院校定位、宿舍、食堂、校园网、外卖、澡堂、管理、学校怎么样、两校生活体验怎么选。" +
               "casual 表示应该正常闲聊、看图闲聊、解释图片、或回答能力/模型/使用方式问题。ignore 表示群聊里没有必要回复的旁观消息。" +
               "如果 route 是 university_info 或 admission，只要用户原话里出现了疑似学校名，就把原文片段尽量放入 schoolNames；即使不确定是否为标准全称、是否缺少校区后缀，也不要留空。" +
-              "如果 route 是 admission，请尽量抽取 province、subjectType、years、planGroup、majorName、score、rank 和 queryTypes；用户给了“630分”就把 score 设为 630，给了“1万位”就把 rank 设为 10000；不确定的字段填 null 或空数组，后续会追问。" +
+              "如果 route 是 admission，只需要准确识别为 admission，后续会统一回复服务边界；可顺手抽取 province、subjectType、years、planGroup、majorName、score、rank 和 queryTypes，但不要把这类问题转成 university_info。" +
               "私聊或明确 @ 机器人时，除非是明显垃圾内容，否则 shouldReply 通常为 true；未 @ 的群聊普通路人闲聊 shouldReply 可为 false。" +
               "如果消息含图片且需要回复，请仍然选择最接近的 route；后续图片理解会按你的 route 和学校/主题字段组织资料。" +
               "只输出一个 JSON 对象，不要 Markdown，不要解释。字段：" +
@@ -426,7 +424,7 @@ export class MessageProcessor {
               `消息场景：${input.messageType === "group" ? "群聊" : "私聊"}；是否 @ 机器人：${input.mentionedBot ? "是" : "否"}。\n` +
               `是否包含图片：${input.images?.length ? `是，${input.images.length} 张` : "否"}。\n` +
               "程序不会提供本地关键词候选。请你直接从用户原话和上下文中理解是否涉及学校、涉及哪些学校、属于哪类请求。\n" +
-              `当前日期：${today}。招生计划可以看 ${currentYear} 年，录取分数线/位次通常优先参考近几年历史数据；如果用户问 ${currentYear} 年录取分数线，要提醒可能尚未完整公布。\n\n` +
+              `当前日期：${today}。当前产品不提供招生信息、志愿建议和专业推荐，只提供高校生活服务与校园体验资料查询。\n\n` +
               `用户消息：${input.text}`
           }
         ],
@@ -726,6 +724,16 @@ export class MessageProcessor {
         rank: intent.rank,
         queryTypes: intent.queryTypes
       }
+    });
+  }
+
+  private clearAdmissionFollowUp(conversationKey: string): void {
+    const context = this.contexts.get(conversationKey);
+    if (!context?.pendingAdmission) return;
+    this.contexts.set(conversationKey, {
+      universityId: context.universityId,
+      universityName: context.universityName,
+      expiresAt: context.expiresAt
     });
   }
 
@@ -1490,8 +1498,8 @@ export class MessageProcessor {
               xuefengAgentBasePrompt() +
               `你是 QQ 群/私聊里的雪峰 Agent 式高校资料助手，也可以自然回应用户的日常闲聊、能力询问和模型询问。` +
               `后台配置的模型 ID 是 ${model}，如果用户问你是什么模型，可以说明“后台配置的模型是 ${model}”，但不要编造供应商或你不知道的内部细节。` +
-              "你可以做院校介绍、校园生活资料总结，也可以在入口路由交给 admission 分支时查询招生计划、分数线、位次、专业组和志愿建议。用户不用命令，直接自然提问即可。" +
-              "如果用户在普通闲聊里问你能做什么，可以说明你能查学校生活资料，也能按省份、科类、分数/位次和专业组做报考数据参考；最终仍以省考试院和学校招生网为准。" +
+              "你可以做院校介绍、校园生活资料总结、校园服务体验查询。用户不用命令，直接自然提问即可。" +
+              "如果用户在普通闲聊里问你能做什么，可以说明你能查宿舍、食堂、校园网、澡堂、外卖、管理、校区环境和学校生活评价；招生计划、分数线、位次、志愿填报和专业推荐不在当前服务范围内。" +
               "如果用户的问题像是在问高校资料，但没有明确学校、简称不确定、或没有完成资料检索，不要编造学校资料；请简短追问完整学校名或具体方面。" +
               "请用中文回复，语气自然、直给，适合 QQ 阅读。普通寒暄可以很短；能力介绍、解释类问题可以适当展开，不要固定限制在 120 字以内。"
           },
@@ -2853,7 +2861,11 @@ function renderGreetingReply(): string {
 }
 
 function renderAdmissionDisabledReply(): string {
-  return "后台现在关闭了招生问答，所以这类分数线、位次、招生计划、专业组和志愿冲稳保问题暂时不能查。可以在 WebUI 的“自然语言设置”里打开“招生问答”，再按学校、省份、科类、分数/位次继续问。";
+  return renderServiceBoundaryReply();
+}
+
+function renderServiceBoundaryReply(): string {
+  return SERVICE_BOUNDARY_REPLY;
 }
 
 function renderCasualFallback(hasContext: boolean): string {
