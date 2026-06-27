@@ -122,6 +122,7 @@ export interface AdmissionRankLookupResult {
 }
 
 export interface AdmissionSourceQuery {
+  source?: string | null;
   universityId?: number;
   sourceSchoolId?: string | null;
   sourceKind?: string | null;
@@ -963,6 +964,10 @@ export class AdmissionRepository {
   listSources(query: AdmissionSourceQuery = {}): AdmissionSourceRow[] {
     const where: string[] = [];
     const params: Array<string | number> = [];
+    if (query.source) {
+      where.push("s.source = ?");
+      params.push(query.source);
+    }
     if (query.universityId) {
       where.push("s.university_id = ?");
       params.push(query.universityId);

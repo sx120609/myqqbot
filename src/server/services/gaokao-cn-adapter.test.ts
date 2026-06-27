@@ -548,7 +548,11 @@ describe("GaokaoCnAdapter", () => {
           classify: "物理",
           batch: "本科批",
           recruitCode: "110108",
-          universityMajorGroup: "08"
+          universityMajorGroup: "08",
+          ranks: 1,
+          score: 1,
+          pageNum: 1,
+          pageSize: 100
         });
         return jsonResponse({
           code: 200,

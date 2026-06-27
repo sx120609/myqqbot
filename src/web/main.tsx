@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-type Page = "dashboard" | "model" | "site" | "natural" | "data" | "aliases" | "debug" | "logs" | "security";
+type Page = "dashboard" | "model" | "site" | "natural" | "data" | "official" | "admissions" | "aliases" | "debug" | "logs" | "security";
 
 const ADMISSION_CURRENT_YEAR = new Date().getFullYear();
 const ADMISSION_CURRENT_MONTH = new Date().getMonth() + 1;
@@ -387,6 +387,8 @@ const NAV = [
   { id: "site", label: "站点", icon: Settings },
   { id: "natural", label: "自然语言", icon: MessageSquareText },
   { id: "data", label: "高校数据", icon: Database },
+  { id: "official", label: "官方数据", icon: RefreshCcw },
+  { id: "admissions", label: "招生数据", icon: Database },
   { id: "aliases", label: "别名", icon: ListFilter },
   { id: "debug", label: "调试", icon: Send },
   { id: "logs", label: "日志", icon: Bot },
@@ -475,6 +477,8 @@ function App() {
         {page === "site" && <SitePage />}
         {page === "natural" && <NaturalLanguagePage />}
         {page === "data" && <DataPage />}
+        {page === "official" && <OfficialDataPage />}
+        {page === "admissions" && <AdmissionsPage />}
         {page === "aliases" && <AliasesPage />}
         {page === "debug" && <DebugPage />}
         {page === "logs" && <LogsPage />}
@@ -1024,6 +1028,247 @@ function DataPage() {
           ) : <p className="muted">选择左侧学校查看原始 Markdown 摘要。</p>}
         </Panel>
       </div>
+    </section>
+  );
+}
+
+function OfficialDataPage() {
+  const [provinceTab, setProvinceTab] = useState<"jiangsu">("jiangsu");
+  const [scoreCoverage, setScoreCoverage] = useState<AdmissionCoverage | null>(null);
+  const [planCoverage, setPlanCoverage] = useState<AdmissionCoverage | null>(null);
+  const [scores, setScores] = useState<AdmissionScore[]>([]);
+  const [plans, setPlans] = useState<AdmissionPlan[]>([]);
+  const [sources, setSources] = useState<AdmissionSourceSnapshot[]>([]);
+  const [status, setStatus] = useState("");
+  const [schoolQuery, setSchoolQuery] = useState("");
+  const [subject, setSubject] = useState("");
+  const [year, setYear] = useState("2025");
+  const [limit, setLimit] = useState("");
+  const [pageUrl, setPageUrl] = useState("");
+  const [pdfUrl, setPdfUrl] = useState("");
+  const [excelUrl, setExcelUrl] = useState("");
+  const [syncingScores, setSyncingScores] = useState(false);
+  const [syncingPlans, setSyncingPlans] = useState(false);
+
+  const sourceQuery = (source: string, extra: Record<string, string> = {}) => {
+    const params = new URLSearchParams({
+      source,
+      province: "江苏",
+      limit: "16",
+      ...extra
+    });
+    if (schoolQuery.trim()) params.set("university", schoolQuery.trim());
+    return params;
+  };
+
+  const load = async () => {
+    const scoreYears = year.trim() ? year.trim() : DEFAULT_ADMISSION_SCORE_YEARS;
+    const [scoreCoverageData, planCoverageData, scoreData, planData, sourceData] = await Promise.all([
+      api<AdmissionCoverage>("/api/admissions/coverage?source=jiangsu_eea"),
+      api<AdmissionCoverage>("/api/admissions/coverage?source=jiangsu_school_official"),
+      api<{ scores: AdmissionScore[]; plans: AdmissionPlan[] }>(`/api/admissions/query?${sourceQuery("jiangsu_eea", {
+        years: scoreYears,
+        subject,
+        limit: "16"
+      }).toString()}`),
+      api<{ scores: AdmissionScore[]; plans: AdmissionPlan[] }>(`/api/admissions/query?${sourceQuery("jiangsu_school_official", {
+        years: DEFAULT_ADMISSION_PLAN_YEARS,
+        limit: "16"
+      }).toString()}`),
+      api<AdmissionSourceSnapshot[]>(`/api/admissions/sources?${new URLSearchParams({
+        source: "jiangsu_eea",
+        province: "江苏",
+        limit: "12"
+      }).toString()}`)
+    ]);
+    setScoreCoverage(scoreCoverageData);
+    setPlanCoverage(planCoverageData);
+    setScores(scoreData.scores);
+    setPlans(planData.plans);
+    setSources(sourceData);
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const syncJiangsuScores = async (custom: boolean) => {
+    const trimmedSubject = subject.trim();
+    if (custom && !trimmedSubject) {
+      setStatus("按自定义来源同步时，请先选择物理类或历史类。");
+      return;
+    }
+    setSyncingScores(true);
+    setStatus(custom ? "正在按自定义官方来源拉取江苏投档线..." : "正在拉取内置江苏考试院投档线和一分一段表...");
+    try {
+      const body: Record<string, unknown> = {
+        query: schoolQuery.trim() || undefined,
+        limit: Number(limit) || undefined
+      };
+      if (custom) {
+        body.subjectType = trimmedSubject;
+        body.year = Number(year) || 2025;
+        if (pageUrl.trim()) body.pageUrl = pageUrl.trim();
+        if (pdfUrl.trim()) body.pdfUrl = pdfUrl.trim();
+        if (excelUrl.trim()) body.excelUrl = excelUrl.trim();
+      }
+      const result = await api<{ total: number; mapped: number; scoreRows: number; sourceRows: number; skipped: number; errors: unknown[] }>("/api/data/sync-jiangsu-official", {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+      await load();
+      const errorText = result.errors.length ? `，失败 ${result.errors.length} 个：${formatGaokaoSyncErrorPreview(result.errors)}` : "";
+      setStatus(`江苏官方分数同步完成：来源快照 ${result.sourceRows}，解析 ${result.total} 行，入库 ${result.scoreRows} 条，映射 ${result.mapped}，跳过 ${result.skipped}${errorText}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSyncingScores(false);
+    }
+  };
+
+  const syncJiangsuPlans = async () => {
+    setSyncingPlans(true);
+    setStatus("正在拉取江苏高校官方招生计划...");
+    try {
+      const result = await api<{ total: number; mapped: number; planRows: number; sourceRows: number; skipped: number; errors: unknown[] }>("/api/data/sync-jiangsu-official-plans", {
+        method: "POST",
+        body: JSON.stringify({
+          query: schoolQuery.trim() || undefined,
+          limit: Number(limit) || undefined
+        })
+      });
+      await load();
+      const errorText = result.errors.length ? `，失败 ${result.errors.length} 个：${formatGaokaoSyncErrorPreview(result.errors)}` : "";
+      setStatus(`江苏高校官方计划同步完成：来源快照 ${result.sourceRows}，解析 ${result.total} 行，入库计划 ${result.planRows} 条，映射 ${result.mapped}，跳过 ${result.skipped}${errorText}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSyncingPlans(false);
+    }
+  };
+
+  return (
+    <section>
+      <Header title="官方数据" subtitle="把省考试院和高校官网数据提前拉到本地库；机器人回答时只读本地，避免临时请求拖慢。" />
+      <div className="tabs">
+        <button className={provinceTab === "jiangsu" ? "active" : ""} onClick={() => setProvinceTab("jiangsu")}>江苏</button>
+        <button disabled>其他省份待接入</button>
+      </div>
+      {provinceTab === "jiangsu" && (
+        <>
+          <div className="metrics">
+            <Metric label="考试院分数行" value={String(scoreCoverage?.scoreRows ?? 0)} />
+            <Metric label="覆盖学校" value={String(scoreCoverage?.scoreUniversities ?? 0)} />
+            <Metric label="一分一段/来源" value={String(scoreCoverage?.sourceRows ?? 0)} />
+            <Metric label="高校计划行" value={String(planCoverage?.planRows ?? 0)} />
+            <Metric label="专业计划行" value={String(planCoverage?.majorPlanRows ?? 0)} />
+            <Metric label="最近官方分数" value={formatTime(scoreCoverage?.latestScoreFetchedAt)} />
+          </div>
+
+          <Panel title="江苏官方拉取" icon={<RefreshCcw size={18} />}>
+            <p className="notice">默认按钮会同步内置的江苏考试院投档线和一分一段表，保存到本地 `jiangsu_eea`；不会调用掌上高考。</p>
+            <FormGrid>
+              <Input label="学校过滤" value={schoolQuery} onChange={setSchoolQuery} hint="留空拉取内置来源中的全部已适配学校；填学校名只保存匹配学校。" />
+              <Input label="入库上限" value={limit} onChange={setLimit} hint="留空不限制；调试时可填 20。" />
+              <label className="field">
+                <span>自定义科类</span>
+                <select value={subject} onChange={(event) => setSubject(event.target.value)}>
+                  <option value="">物理类 + 历史类</option>
+                  <option value="物理类">物理类</option>
+                  <option value="历史类">历史类</option>
+                </select>
+              </label>
+              <Input label="自定义年份" value={year} onChange={setYear} />
+              <Input label="官方页面 URL" value={pageUrl} onChange={setPageUrl} hint="可选；从考试院页面解析 PDF/xls/xlsx 链接。" />
+              <Input label="官方 PDF URL" value={pdfUrl} onChange={setPdfUrl} hint="可选；直接指定投档线 PDF。" />
+              <Input label="官方 Excel URL" value={excelUrl} onChange={setExcelUrl} hint="可选；直接指定投档线 xls/xlsx。" />
+            </FormGrid>
+            <div className="actions">
+              <button className="primary" onClick={() => void syncJiangsuScores(false)} disabled={syncingScores}>
+                <RefreshCcw size={16} />{syncingScores ? "拉取中..." : "一键拉取江苏考试院分数"}
+              </button>
+              <button onClick={() => void syncJiangsuScores(true)} disabled={syncingScores}>
+                <RefreshCcw size={16} />按自定义来源拉取
+              </button>
+              <button onClick={() => void syncJiangsuPlans()} disabled={syncingPlans}>
+                <RefreshCcw size={16} />{syncingPlans ? "拉取中..." : "拉取高校官方计划"}
+              </button>
+              <button onClick={() => void load()}><Search size={16} />刷新</button>
+            </div>
+            {status && <p className="notice">{status}</p>}
+          </Panel>
+
+          <div className="logs-grid">
+            <Panel title="江苏考试院分数样例" icon={<Database size={18} />}>
+              <div className="table-wrap compact-table">
+                <table>
+                  <thead><tr><th>学校</th><th>年份</th><th>科类</th><th>批次/组</th><th>最低分</th><th>最低位次</th><th>选科</th><th>来源</th><th>时间</th></tr></thead>
+                  <tbody>
+                    {scores.map((row) => (
+                      <tr key={row.id}>
+                        <td>{row.universityName}</td>
+                        <td>{row.year}</td>
+                        <td>{row.subjectType ?? "-"}</td>
+                        <td>{[row.batch, row.planGroup].filter(Boolean).join(" ") || "-"}</td>
+                        <td>{row.minScore ?? "-"}</td>
+                        <td>{row.minRank ?? "-"}</td>
+                        <td>{row.selectionRequirements ?? "-"}</td>
+                        <td>{row.sourceRecordId ? `#${row.sourceRecordId}` : "-"}</td>
+                        <td>{formatTime(row.fetchedAt)}</td>
+                      </tr>
+                    ))}
+                    {!scores.length && <tr><td colSpan={9}>暂无江苏考试院分数样例。</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </Panel>
+            <Panel title="江苏高校官方计划样例" icon={<Database size={18} />}>
+              <div className="table-wrap compact-table">
+                <table>
+                  <thead><tr><th>学校</th><th>年份</th><th>科类</th><th>专业组</th><th>专业</th><th>计划</th><th>学费</th><th>选科</th><th>时间</th></tr></thead>
+                  <tbody>
+                    {plans.map((row) => (
+                      <tr key={row.id}>
+                        <td>{row.universityName}</td>
+                        <td>{row.year}</td>
+                        <td>{row.subjectType ?? "-"}</td>
+                        <td>{row.planGroup ?? "-"}</td>
+                        <td>{row.majorName ?? "院校汇总"}</td>
+                        <td>{row.planCount ?? row.schoolPlanCount ?? "-"}</td>
+                        <td>{row.tuition ?? "-"}</td>
+                        <td>{row.selectionRequirements ?? "-"}</td>
+                        <td>{formatTime(row.fetchedAt)}</td>
+                      </tr>
+                    ))}
+                    {!plans.length && <tr><td colSpan={9}>暂无江苏高校官方计划样例。</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </Panel>
+          </div>
+
+          <Panel title="最近官方来源" icon={<Database size={18} />}>
+            <div className="table-wrap compact-table">
+              <table>
+                <thead><tr><th>ID</th><th>类型</th><th>状态</th><th>请求条件</th><th>抓取时间</th><th>错误</th></tr></thead>
+                <tbody>
+                  {sources.map((row) => (
+                    <tr key={row.id}>
+                      <td>#{row.id}</td>
+                      <td>{formatAdmissionSourceKind(row.sourceKind)}</td>
+                      <td>{row.status}</td>
+                      <td>{formatAdmissionSourceRequest(row.requestJson)}</td>
+                      <td>{formatTime(row.fetchedAt)}</td>
+                      <td>{row.error ?? "-"}</td>
+                    </tr>
+                  ))}
+                  {!sources.length && <tr><td colSpan={6}>暂无官方来源快照。</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </Panel>
+        </>
+      )}
     </section>
   );
 }

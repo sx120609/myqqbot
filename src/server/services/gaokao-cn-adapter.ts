@@ -203,6 +203,9 @@ interface MnzyRecommendPageBody {
 interface MnzyRecommendMajorBody {
   intentionList?: MnzyRecommendMajor[];
   notIntentionList?: MnzyRecommendMajor[];
+  total?: number;
+  pageNum?: number;
+  pageSize?: number;
 }
 
 interface MnzyRecommendGroup {
@@ -583,62 +586,72 @@ export class GaokaoCnAdapter {
                   summary.requestBudgetExhausted = true;
                   break;
                 }
-                const majorRequest = buildMnzyRecommendMajorRequest(group, options.province, subjectType, year, batch);
-                const majorResponse = await this.fetchMnzyRealtime<MnzyRecommendMajorBody>(
-                  "mnzy-recommend-major",
-                  "/v4/v1/query/recommendMajorList",
-                  majorRequest,
-                  options,
-                  requestContext,
-                  sourceSnapshots,
-                  now
-                );
-                const majors = [
-                  ...(majorResponse.payload.body?.intentionList ?? []),
-                  ...(majorResponse.payload.body?.notIntentionList ?? [])
-                ];
-                for (const major of majors) {
-                  const majorName = joinMajorName(major.majorName, major.majorRemarks);
-                  if (!majorName) continue;
-                  if (yearNeedsPlans) {
-                    plans.push(makeRealtimePlanRow({
-                      id: rowId--,
-                      options,
-                      now,
-                      subjectType,
-                      year: toInt(major.year) ?? year,
-                      batch,
-                      planGroup: stringify(major.universityMajorGroup) ?? planGroup,
-                      majorName,
-                      planCount: toInt(major.planNum),
-                      tuition: stringify(major.studyCost),
-                      duration: stringify(major.studyYear),
-                      selectionRequirements: stringify(major.claim),
-                      sourceUrl: `${MNZY_API_BASE}/v4/v1/query/recommendMajorList`,
-                      rawJson: JSON.stringify(major)
-                    }));
-                  }
-                  if (includeScores) {
-                    for (const history of parseMnzyHistoryScores(major.historyScore)) {
-                      if (!scoreYears.includes(history.year)) continue;
-                      scores.push(makeRealtimeScoreRow({
+                for (let majorPage = 1; majorPage <= MAX_PAGES; majorPage += 1) {
+                  const majorRequest = buildMnzyRecommendMajorRequest(group, options.province, subjectType, year, batch, majorPage);
+                  const majorResponse = await this.fetchMnzyRealtime<MnzyRecommendMajorBody>(
+                    "mnzy-recommend-major",
+                    "/v4/v1/query/recommendMajorList",
+                    majorRequest,
+                    options,
+                    requestContext,
+                    sourceSnapshots,
+                    now
+                  );
+                  const majors = [
+                    ...(majorResponse.payload.body?.intentionList ?? []),
+                    ...(majorResponse.payload.body?.notIntentionList ?? [])
+                  ];
+                  for (const major of majors) {
+                    const majorName = joinMajorName(major.majorName, major.majorRemarks);
+                    if (!majorName) continue;
+                    if (yearNeedsPlans) {
+                      plans.push(makeRealtimePlanRow({
                         id: rowId--,
                         options,
                         now,
                         subjectType,
-                        scoreType: "major",
-                        year: history.year,
+                        year: toInt(major.year) ?? year,
                         batch,
                         planGroup: stringify(major.universityMajorGroup) ?? planGroup,
                         majorName,
-                        minScore: history.minScore ?? toNumber(major.minScore),
-                        minRank: history.minRank ?? toInt(major.minRanks),
-                        planCount: history.planCount ?? toInt(major.planNum),
+                        planCount: toInt(major.planNum),
+                        tuition: stringify(major.studyCost),
+                        duration: stringify(major.studyYear),
                         selectionRequirements: stringify(major.claim),
                         sourceUrl: `${MNZY_API_BASE}/v4/v1/query/recommendMajorList`,
                         rawJson: JSON.stringify(major)
                       }));
                     }
+                    if (includeScores) {
+                      for (const history of parseMnzyHistoryScores(major.historyScore)) {
+                        if (!scoreYears.includes(history.year)) continue;
+                        scores.push(makeRealtimeScoreRow({
+                          id: rowId--,
+                          options,
+                          now,
+                          subjectType,
+                          scoreType: "major",
+                          year: history.year,
+                          batch,
+                          planGroup: stringify(major.universityMajorGroup) ?? planGroup,
+                          majorName,
+                          minScore: history.minScore ?? toNumber(major.minScore),
+                          minRank: history.minRank ?? toInt(major.minRanks),
+                          planCount: history.planCount ?? toInt(major.planNum),
+                          selectionRequirements: stringify(major.claim),
+                          sourceUrl: `${MNZY_API_BASE}/v4/v1/query/recommendMajorList`,
+                          rawJson: JSON.stringify(major)
+                        }));
+                      }
+                    }
+                  }
+                  const totalMajors = Number(majorResponse.payload.body?.total ?? majors.length);
+                  const majorPageSize = Number(majorResponse.payload.body?.pageSize ?? majorRequest.pageSize ?? majors.length);
+                  if (!majors.length || !Number.isFinite(totalMajors) || !Number.isFinite(majorPageSize) || majorPage * majorPageSize >= totalMajors) break;
+                  if (!this.hasRequestBudget(requestContext)) {
+                    requestContext.requestBudgetExhausted = true;
+                    summary.requestBudgetExhausted = true;
+                    break;
                   }
                 }
               }
@@ -1082,46 +1095,51 @@ export class GaokaoCnAdapter {
           rows += 1;
           summaryRows += 1;
 
-          const majorRequest = buildMnzyRecommendMajorRequest(group, provinceName, subjectType, year, batch);
-          if (!this.hasRequestBudget(requestContext)) {
-            requestContext.requestBudgetExhausted = true;
-            return { rows, summaryRows, detailRows, sourceRows, requestBudgetExhausted: true };
-          }
-          const majorResponse = await this.fetchMnzyAndRecord<MnzyRecommendMajorBody>(
-            "mnzy-recommend-major",
-            "/v4/v1/query/recommendMajorList",
-            majorRequest,
-            university.id,
-            sourceSchoolId,
-            requestContext
-          );
-          if (majorResponse.sourceId) sourceRows += 1;
-          const majors = [
-            ...(majorResponse.payload.body?.intentionList ?? []),
-            ...(majorResponse.payload.body?.notIntentionList ?? [])
-          ];
-          for (const major of majors) {
-            const majorName = joinMajorName(major.majorName, major.majorRemarks);
-            if (!majorName) continue;
-            this.admissions.upsertPlan({
-              universityId: university.id,
+          for (let majorPage = 1; majorPage <= MAX_PAGES; majorPage += 1) {
+            const majorRequest = buildMnzyRecommendMajorRequest(group, provinceName, subjectType, year, batch, majorPage);
+            if (!this.hasRequestBudget(requestContext)) {
+              requestContext.requestBudgetExhausted = true;
+              return { rows, summaryRows, detailRows, sourceRows, requestBudgetExhausted: true };
+            }
+            const majorResponse = await this.fetchMnzyAndRecord<MnzyRecommendMajorBody>(
+              "mnzy-recommend-major",
+              "/v4/v1/query/recommendMajorList",
+              majorRequest,
+              university.id,
               sourceSchoolId,
-              year: toInt(major.year) ?? year,
-              provinceName,
-              subjectType,
-              batch,
-              planGroup: stringify(major.universityMajorGroup) ?? planGroup,
-              majorName,
-              planCount: toInt(major.planNum),
-              tuition: stringify(major.studyCost),
-              duration: stringify(major.studyYear),
-              selectionRequirements: stringify(major.claim),
-              sourceUrl: `${MNZY_API_BASE}/v4/v1/query/recommendMajorList`,
-              sourceRecordId: String(majorResponse.sourceId),
-              rawJson: JSON.stringify(major)
-            });
-            rows += 1;
-            detailRows += 1;
+              requestContext
+            );
+            if (majorResponse.sourceId) sourceRows += 1;
+            const majors = [
+              ...(majorResponse.payload.body?.intentionList ?? []),
+              ...(majorResponse.payload.body?.notIntentionList ?? [])
+            ];
+            for (const major of majors) {
+              const majorName = joinMajorName(major.majorName, major.majorRemarks);
+              if (!majorName) continue;
+              this.admissions.upsertPlan({
+                universityId: university.id,
+                sourceSchoolId,
+                year: toInt(major.year) ?? year,
+                provinceName,
+                subjectType,
+                batch,
+                planGroup: stringify(major.universityMajorGroup) ?? planGroup,
+                majorName,
+                planCount: toInt(major.planNum),
+                tuition: stringify(major.studyCost),
+                duration: stringify(major.studyYear),
+                selectionRequirements: stringify(major.claim),
+                sourceUrl: `${MNZY_API_BASE}/v4/v1/query/recommendMajorList`,
+                sourceRecordId: String(majorResponse.sourceId),
+                rawJson: JSON.stringify(major)
+              });
+              rows += 1;
+              detailRows += 1;
+            }
+            const totalMajors = Number(majorResponse.payload.body?.total ?? majors.length);
+            const majorPageSize = Number(majorResponse.payload.body?.pageSize ?? majorRequest.pageSize ?? majors.length);
+            if (!majors.length || !Number.isFinite(totalMajors) || !Number.isFinite(majorPageSize) || majorPage * majorPageSize >= totalMajors) break;
           }
         }
         const total = Number(body?.total ?? groups.length);
@@ -1484,15 +1502,17 @@ function buildMnzyRecommendMajorRequest(
   provinceName: string,
   subjectType: string,
   year: number,
-  batch: string
+  batch: string,
+  pageNum = 1
 ): Record<string, unknown> {
   const subject = mnzySubjectProfile(subjectType);
   return {
-    pageNum: 1,
+    pageNum,
+    pageSize: 100,
     universityMajorGroup: stringify(group.universityMajorGroup),
     province: normalizeProvinceName(provinceName),
     ranks: 1,
-    score: 750,
+    score: 1,
     classify: subject?.classify ?? subjectType.replace(/类$/u, ""),
     subjects: subject?.subjects ?? "物理,化学,生物",
     batch,

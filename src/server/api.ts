@@ -342,7 +342,10 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
     return deps.admissions.listMappings(query.query ?? "", Number(query.limit ?? 80));
   });
 
-  app.get("/api/admissions/coverage", async () => deps.admissions.coverageStats());
+  app.get("/api/admissions/coverage", async (request) => {
+    const query = request.query as { source?: string };
+    return deps.admissions.coverageStats(cleanApiString(query.source) ?? undefined);
+  });
 
   app.get("/api/admissions/coverage-gaps", async (request) => {
     const query = request.query as { planYears?: string; scoreYears?: string; provinces?: string; subjectTypes?: string; limit?: string };
@@ -442,6 +445,7 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       planGroup?: string;
       scoreType?: string;
       major?: string;
+      source?: string;
       limit?: string;
     };
     const scoreType: "school" | "major" | undefined =
@@ -462,6 +466,7 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       planGroup: query.planGroup,
       scoreType,
       majorName: query.major,
+      source: cleanApiString(query.source) ?? undefined,
       limit: Number(query.limit ?? 80)
     };
     return {
@@ -488,6 +493,7 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
     const query = request.query as {
       universityId?: string;
       sourceSchoolId?: string;
+      source?: string;
       sourceKind?: string;
       status?: string;
       year?: string;
@@ -496,6 +502,7 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       limit?: string;
     };
     return deps.admissions.listSources({
+      source: cleanApiString(query.source) ?? undefined,
       universityId: query.universityId ? Number(query.universityId) : undefined,
       sourceSchoolId: query.sourceSchoolId?.trim() || undefined,
       sourceKind: query.sourceKind,

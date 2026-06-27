@@ -318,6 +318,29 @@ textarea {
   margin-top: 12px;
 }
 
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  border-bottom: 1px solid #d9e0e7;
+}
+
+.tabs button {
+  min-height: 38px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: #536170;
+}
+
+.tabs button.active {
+  border-bottom-color: #246b68;
+  color: #1f2937;
+  font-weight: 600;
+}
+
 .status-text {
   color: #536170;
   overflow-wrap: anywhere;
