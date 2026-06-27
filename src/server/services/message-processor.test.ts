@@ -137,6 +137,110 @@ describe("MessageProcessor", () => {
     expect(vi.mocked(llm.chat)).toHaveBeenCalledTimes(1);
   });
 
+  it("turns a score-only admission question into rank-aware general advice", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        site: {
+          publicBaseUrl: "http://127.0.0.1:8787",
+          filingNumber: ""
+        },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1600,
+          timeoutMs: 45000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: false,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5,
+          admissionQaEnabled: true
+        }
+      })
+    } as SettingsStore;
+    const nlu = {
+      analyze: vi.fn(() => ({
+        candidates: [],
+        reason: "没有本地学校候选"
+      }))
+    } as unknown as NaturalLanguageService;
+    const llm = {
+      chat: vi.fn()
+        .mockResolvedValueOnce(routeJson("admission", {
+          majorName: "计算机",
+          queryTypes: ["rank", "plan"]
+        }))
+        .mockResolvedValueOnce("江苏物理类 630 分先按 9031 位左右看，计算机要按位次分层冲稳保。")
+    } as unknown as LlmClient;
+    const logs = {
+      message: vi.fn()
+    } as unknown as LogStore;
+    const admissions = {
+      lookupRankByScore: vi.fn(() => ({
+        year: 2026,
+        provinceName: "江苏",
+        subjectType: "物理类",
+        score: 630,
+        sameCount: 32,
+        cumulative: 9031,
+        sourceId: 12,
+        sourceUrl: "https://www.jseea.cn/example-rank.png",
+        fetchedAt: "2026-06-25T00:00:00.000Z",
+        rawLine: "630 32 9031"
+      }))
+    };
+    const answerSources = {
+      create: vi.fn(() => "source-token")
+    } as unknown as AnswerSourceStore;
+    const processor = new MessageProcessor(
+      settings,
+      {} as UniversityRepository,
+      nlu,
+      llm,
+      logs,
+      undefined,
+      answerSources,
+      admissions as never
+    );
+
+    const result = await processor.process({
+      platform: "debug",
+      text: "江苏物化地 630分 计算机怎么报",
+      messageType: "private",
+      userId: "u1",
+      conversationKey: "private:u1"
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.reason).toBe("招生泛报考回答");
+    expect(result.reply).toContain("9031");
+    expect(result.sourcePageUrl).toBe("http://127.0.0.1:8787/sources/source-token");
+    expect(admissions.lookupRankByScore).toHaveBeenCalledWith(expect.objectContaining({
+      provinceName: "江苏",
+      subjectType: "物理类",
+      score: 630,
+      years: expect.arrayContaining([2026])
+    }));
+    const prompt = JSON.stringify(vi.mocked(llm.chat).mock.calls[1][0]);
+    expect(prompt).toContain("泛报考查询");
+    expect(prompt).toContain("省份：江苏");
+    expect(prompt).toContain("科类：物理类");
+    expect(prompt).toContain("分数 630");
+    expect(prompt).toContain("折算/提供位次 9031");
+    expect(prompt).toContain("不要让用户自己查位次");
+    expect(prompt).toContain("不要反问学校名来中断回答");
+    expect(answerSources.create).toHaveBeenCalledWith(expect.objectContaining({
+      universityId: null,
+      universityName: "江苏物理类报考建议",
+      sourceUrl: "https://www.jseea.cn/example-rank.png",
+      contextText: expect.stringContaining("折算/提供位次 9031")
+    }));
+  });
+
   it("falls back to local school candidates when the LLM route omits school names", async () => {
     const settings = {
       runtime: () => ({
@@ -1101,9 +1205,12 @@ describe("MessageProcessor", () => {
     expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
       universityId: 6,
       provinces: ["四川"],
-      subjectTypes: ["理科"]
+      subjectTypes: ["物理类"],
+      includePlans: true,
+      includeScores: false
     }));
     expect(admissions.queryScores).toHaveBeenCalledWith(expect.objectContaining({
+      source: "xuefeng_agent",
       universityId: 6,
       provinceName: "四川",
       subjectType: "理科",
@@ -1116,7 +1223,7 @@ describe("MessageProcessor", () => {
     }));
   });
 
-  it("syncs school and major score data for admission score queries", async () => {
+  it("uses local score data and only realtime-syncs plans for admission score queries", async () => {
     const settings = {
       runtime: () => ({
         onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
@@ -1402,31 +1509,13 @@ describe("MessageProcessor", () => {
       planYears: [2026],
       includePlans: true,
       includeScores: false,
-      includePlanDetails: true,
+      includePlanDetails: false,
       useMnzyPlanDetails: true,
       skipExisting: true
     }));
-    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
-      universityId: 7,
-      provinces: ["四川"],
-      subjectTypes: ["物理类"],
-      scoreYears: [2025],
-      includePlans: false,
-      includeScores: true,
-      includeSpecialScores: false,
-      skipExisting: true
-    }));
-    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
-      universityId: 7,
-      provinces: ["四川"],
-      subjectTypes: ["理科"],
-      scoreYears: [2024, 2023],
-      includePlans: false,
-      includeScores: true,
-      includeSpecialScores: false,
-      skipExisting: true
-    }));
+    expect(gaokaoCn.sync).toHaveBeenCalledTimes(1);
     expect(admissions.queryScores).toHaveBeenCalledWith(expect.objectContaining({
+      source: "xuefeng_agent",
       universityId: 7,
       provinceName: "四川",
       subjectType: "理科",
@@ -1473,6 +1562,134 @@ describe("MessageProcessor", () => {
     expect(prompt).toContain("plan-major");
     expect(prompt).toContain("item_count=1");
     expect(prompt).toContain("item_count=0");
+  });
+
+  it("prefers Jiangsu EEA score rows before Xuefeng score supplements", async () => {
+    const settings = {
+      runtime: () => ({
+        onebot: { accessToken: "", replyEnabled: true, replyAsImage: true },
+        site: {
+          publicBaseUrl: "http://127.0.0.1:8787",
+          filingNumber: ""
+        },
+        llm: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "test-key",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1600,
+          timeoutMs: 45000
+        },
+        naturalLanguage: {
+          groupNaturalEnabled: true,
+          requireMentionInGroup: false,
+          contextTtlMinutes: 10,
+          cooldownSeconds: 5,
+          admissionQaEnabled: true,
+          admissionJiangsuOnlyEnabled: true
+        }
+      })
+    } as SettingsStore;
+    const university = {
+      id: 77,
+      name: "苏州大学",
+      slug: "su-zhou-da-xue",
+      file_path: "docs/universities/su-zhou-da-xue.md",
+      source_url: "https://example.com/suda.md",
+      updated_at: "2026-06-24T00:00:00.000Z",
+      matchedBy: "苏州大学",
+      score: 0.99
+    };
+    const nlu = {
+      analyze: vi.fn(() => ({ candidates: [university], reason: "本地候选" }))
+    } as unknown as NaturalLanguageService;
+    const universities = {
+      getUniversity: vi.fn(() => university),
+      getSchoolProfile: vi.fn(() => null)
+    } as unknown as UniversityRepository;
+    const makeScore = (source: string, year: number, minRank: number, minScore: number, id: number) => ({
+      id,
+      source,
+      scoreType: "school" as const,
+      universityId: 77,
+      universityName: "苏州大学",
+      sourceSchoolId: "suda",
+      year,
+      provinceName: "江苏",
+      subjectType: "物理类",
+      batch: "本科批",
+      planGroup: "05",
+      majorName: null,
+      minScore,
+      minRank,
+      avgScore: null,
+      avgRank: null,
+      maxScore: null,
+      planCount: null,
+      controlScore: null,
+      diffScore: null,
+      selectionRequirements: "物理,化学",
+      sourceUrl: source === "jiangsu_eea" ? "https://www.jseea.cn/" : "https://xuefeng.example/",
+      sourceRecordId: String(id),
+      rawJson: "{}",
+      fetchedAt: "2026-06-25T00:00:00.000Z"
+    });
+    const admissions = {
+      queryPlans: vi.fn(() => []),
+      queryScores: vi.fn((query: { source?: string }) => {
+        if (query.source === "jiangsu_eea") return [makeScore("jiangsu_eea", 2025, 12000, 610, 501)];
+        if (query.source === "xuefeng_agent") {
+          return [
+            makeScore("xuefeng_agent", 2025, 13000, 609, 601),
+            makeScore("xuefeng_agent", 2024, 14000, 606, 602)
+          ];
+        }
+        return [];
+      }),
+      getMapping: vi.fn(() => null)
+    };
+    const llm = {
+      chat: vi.fn()
+        .mockResolvedValueOnce(routeJson("admission", {
+          schoolNames: ["苏州大学"],
+          province: "江苏",
+          subjectType: "物理类",
+          years: [2025, 2024],
+          queryTypes: ["score", "rank"]
+        }))
+        .mockResolvedValueOnce("苏州大学江苏物理类先看官方位次。")
+    } as unknown as LlmClient;
+    const logs = { message: vi.fn() } as unknown as LogStore;
+    const answerSources = { create: vi.fn(() => "jiangsu-source") } as unknown as AnswerSourceStore;
+    const processor = new MessageProcessor(
+      settings,
+      universities,
+      nlu,
+      llm,
+      logs,
+      undefined,
+      answerSources,
+      admissions as never
+    );
+
+    const result = await processor.process({
+      platform: "debug",
+      text: "苏州大学江苏物理类近两年分数线",
+      messageType: "private",
+      userId: "u1",
+      conversationKey: "private:u1"
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.reason).toBe("招生数据回答");
+    expect(admissions.queryScores).toHaveBeenNthCalledWith(1, expect.objectContaining({ source: "jiangsu_eea" }));
+    expect(admissions.queryScores).toHaveBeenNthCalledWith(2, expect.objectContaining({ source: "xuefeng_agent" }));
+    const prompt = JSON.stringify(vi.mocked(llm.chat).mock.calls[1][0]);
+    expect(prompt).toContain("江苏考试院官方");
+    expect(prompt).toContain("雪峰Agent历史库");
+    expect(prompt).toContain("12000 | 610");
+    expect(prompt).toContain("14000 | 606");
+    expect(prompt).not.toContain("13000 | 609");
   });
 
   it("fills missing score plan counts from matching same-year admission plans", async () => {
@@ -1976,23 +2193,17 @@ describe("MessageProcessor", () => {
     expect(result.handled).toBe(true);
     expect(result.reason).toBe("招生数据回答");
     expect(nlu.analyze).toHaveBeenCalledWith("南京航空航天大学", undefined);
+    expect(gaokaoCn.sync).toHaveBeenCalledTimes(1);
     expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
       universityId: 18,
       provinces: ["四川"],
       subjectTypes: ["物理类"],
-      scoreYears: [2025],
-      includePlans: false,
-      includeScores: true
-    }));
-    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
-      universityId: 18,
-      provinces: ["四川"],
-      subjectTypes: ["理科"],
-      scoreYears: [2024, 2023],
-      includePlans: false,
-      includeScores: true
+      planYears: [2026],
+      includePlans: true,
+      includeScores: false
     }));
     expect(admissions.queryScores).toHaveBeenCalledWith(expect.objectContaining({
+      source: "xuefeng_agent",
       universityId: 18,
       provinceName: "四川",
       subjectType: "理科",
@@ -2318,11 +2529,9 @@ describe("MessageProcessor", () => {
     expect(result.handled).toBe(true);
     expect(result.reason).toBe("招生数据对比回答");
     expect(result.sourcePageUrl).toBe("https://bot.example.com/sources/admission-comparison-source");
-    expect(gaokaoCn.sync).toHaveBeenCalledTimes(4);
+    expect(gaokaoCn.sync).toHaveBeenCalledTimes(2);
     expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({ universityId: 31, provinces: ["山东"], includePlans: true, includeScores: false }));
-    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({ universityId: 31, provinces: ["山东"], includePlans: false, includeScores: true }));
     expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({ universityId: 32, provinces: ["山东"], includePlans: true, includeScores: false }));
-    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({ universityId: 32, provinces: ["山东"], includePlans: false, includeScores: true }));
     expect(vi.mocked(llm.chat).mock.calls[1][1]).toBe("admission-comparison");
     const prompt = JSON.stringify(vi.mocked(llm.chat).mock.calls[1][0]);
     expect(prompt).toContain("雪峰 Agent");
@@ -2484,8 +2693,8 @@ describe("MessageProcessor", () => {
     }));
     const prompt = JSON.stringify(vi.mocked(llm.chat).mock.calls[1][0]);
     expect(prompt).toContain("实时获取结果：已请求掌上高考");
-    expect(prompt).toContain("数据状态：本次实时请求正常完成");
-    expect(prompt).toContain("数据缺口：本次实时请求没有拿到足够匹配的招生数据");
+    expect(prompt).toContain("数据状态：本次掌上高考计划请求正常完成");
+    expect(prompt).toContain("数据缺口：本次没有拿到足够匹配的招生数据");
     expect(prompt).toContain("查询条件：学校=安徽大学；省份=四川；科类=物理类");
     expect(prompt).toContain("缺少内容：招生计划（年份 2026）");
     expect(prompt).toContain("来源摘要 2");
@@ -2619,23 +2828,9 @@ describe("MessageProcessor", () => {
       includePlans: true,
       includeScores: false
     }));
-    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
-      universityId: 21,
-      provinces: ["河南"],
-      subjectTypes: ["物理类"],
-      scoreYears: [2025],
-      includePlans: false,
-      includeScores: true
-    }));
-    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
-      universityId: 21,
-      provinces: ["河南"],
-      subjectTypes: ["理科"],
-      scoreYears: [2024, 2023],
-      includePlans: false,
-      includeScores: true
-    }));
+    expect(gaokaoCn.sync).toHaveBeenCalledTimes(1);
     expect(admissions.queryScores).toHaveBeenCalledWith(expect.objectContaining({
+      source: "xuefeng_agent",
       universityId: 21,
       provinceName: "河南",
       subjectType: "理科",
@@ -3075,7 +3270,7 @@ describe("MessageProcessor", () => {
     expect(first.reason).toBe("招生查询需要省份");
     expect(second.reason).toBe("招生查询需要科类");
     expect(third.reason).toBe("招生数据回答");
-    expect(gaokaoCn.sync).toHaveBeenCalledTimes(3);
+    expect(gaokaoCn.sync).toHaveBeenCalledTimes(1);
     expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
       universityId: 10,
       provinces: ["四川"],
@@ -3084,21 +3279,8 @@ describe("MessageProcessor", () => {
       includePlans: true,
       includeScores: false
     }));
-    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
-      universityId: 10,
-      provinces: ["四川"],
-      subjectTypes: ["物理类"],
-      scoreYears: [2025],
-      includeScores: true
-    }));
-    expect(gaokaoCn.sync).toHaveBeenCalledWith(expect.objectContaining({
-      universityId: 10,
-      provinces: ["四川"],
-      subjectTypes: ["理科"],
-      scoreYears: [2024, 2023],
-      includeScores: true
-    }));
     expect(admissions.queryScores).toHaveBeenCalledWith(expect.objectContaining({
+      source: "xuefeng_agent",
       universityId: 10,
       provinceName: "四川",
       subjectType: "理科",
@@ -3122,6 +3304,8 @@ function routeJson(
     years: [],
     planGroup: null,
     majorName: null,
+    score: null,
+    rank: null,
     queryTypes: [],
     topicKey: null,
     topicLabel: null,

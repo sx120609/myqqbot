@@ -6,7 +6,7 @@ import {
   normalizeSubjectType
 } from "./admission-repository.js";
 import type { AdmissionPlanRow, AdmissionScoreRow, AdmissionSourceRow } from "./admission-repository.js";
-import { defaultAdmissionPlanYears, defaultAdmissionScoreYears } from "./admission-calendar.js";
+import { currentAdmissionYear, defaultAdmissionPlanYears, defaultAdmissionScoreYears } from "./admission-calendar.js";
 import { defaultAdmissionSubjectTypeNamesForProvinceYear, GAOKAO_PROVINCES, GAOKAO_SUBJECT_TYPES } from "./admission-regions.js";
 import type { UniversityRepository, UniversityRow } from "./university-repository.js";
 
@@ -20,6 +20,8 @@ const DEFAULT_REQUEST_DELAY_MS = process.env.NODE_ENV === "test" ? 0 : 180000;
 const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES = 1440;
 const DEFAULT_MAX_SOURCE_REQUESTS = process.env.NODE_ENV === "test" ? 0 : 1;
 const GLOBAL_RATE_LIMIT_COOLDOWN_KEY = "sync.internal.gaokaoCn.rateLimitCooldownUntil";
+const REALTIME_FETCH_RETRIES = 1;
+const REALTIME_FETCH_TIMEOUT_MS = 12_000;
 
 export type GaokaoCnProgressReporter = (message: string) => void;
 
@@ -487,22 +489,21 @@ export class GaokaoCnAdapter {
       return { plans, scores, sourceSnapshots, summary, sourceUrl: MNZY_API_BASE };
     }
 
-    const subjectTypes = options.subjectTypes?.length ? options.subjectTypes : [options.subjectType];
     const planYears = normalizeYears(options.planYears, defaultAdmissionPlanYears());
     const scoreYears = normalizeYears(options.scoreYears, defaultAdmissionScoreYears());
     const includePlans = options.includePlans !== false;
     const includeScores = options.includeScores !== false;
     const includePlanDetails = options.includePlanDetails !== false;
+    const queryYears = realtimeMnzyQueryYears(planYears, scoreYears, includePlans, includeScores);
+    const subjectTypes = realtimeMnzySubjectTypes(options.subjectType, options.province, queryYears[0] ?? currentAdmissionYear());
     const seenGroups = new Set<string>();
     let rowId = -1;
 
     try {
       for (const subjectType of subjectTypes) {
-        const allYears = Array.from(new Set([...planYears, ...scoreYears])).sort((a, b) => b - a);
-        const queryYears = allYears.length ? allYears : [new Date().getFullYear()];
         for (const year of queryYears) {
           const yearNeedsPlans = includePlans && planYears.includes(year);
-          const yearNeedsScores = includeScores && scoreYears.some((scoreYear) => scoreYear <= year);
+          const yearNeedsScores = includeScores;
           if (!yearNeedsPlans && !yearNeedsScores) continue;
 
           for (const batch of mnzyBatchCandidates(subjectType)) {
@@ -595,7 +596,7 @@ export class GaokaoCnAdapter {
                 const majors = [
                   ...(majorResponse.payload.body?.intentionList ?? []),
                   ...(majorResponse.payload.body?.notIntentionList ?? [])
-                ].filter((major) => matchesRequestedMajor(major.majorName, major.majorRemarks, options.majorName));
+                ];
                 for (const major of majors) {
                   const majorName = joinMajorName(major.majorName, major.majorRemarks);
                   if (!majorName) continue;
@@ -1351,7 +1352,7 @@ export class GaokaoCnAdapter {
       }
       await this.waitBeforeRequest(requestContext);
       requestContext.requestCount += 1;
-      payload = (await fetchJsonPostWithRetry(url, request)) as MnzyApiResponse<T>;
+      payload = (await fetchJsonPostWithRetry(url, request, REALTIME_FETCH_RETRIES, REALTIME_FETCH_TIMEOUT_MS)) as MnzyApiResponse<T>;
       if (!isMnzySuccessPayload(payload)) {
         const message = `Mnzy ${sourceKind} returned ${payload.code ?? "unknown"} (${summarizeMnzyRequestTarget(request)}): ${payload.msg ?? payload.message ?? "unknown_error"}`;
         if (isGaokaoCnRateLimitMessage(message)) {
@@ -1498,6 +1499,26 @@ function buildMnzyRecommendMajorRequest(
     year,
     recruitCode: stringify(group.recruitCode)
   };
+}
+
+function realtimeMnzyQueryYears(
+  planYears: number[],
+  scoreYears: number[],
+  includePlans: boolean,
+  includeScores: boolean
+): number[] {
+  if (includePlans && planYears.length) return [planYears[0]];
+  if (includeScores) return [Math.max(currentAdmissionYear(), Math.max(...scoreYears, 0) + 1)];
+  return [currentAdmissionYear()];
+}
+
+function realtimeMnzySubjectTypes(subjectType: string, provinceName: string, year: number): string[] {
+  const normalized = normalizeSubjectType(subjectType) ?? subjectType;
+  const defaults = defaultAdmissionSubjectTypeNamesForProvinceYear(provinceName, year);
+  if ((normalized === "物理类" || normalized === "理科") && defaults.includes("物理类")) return ["物理类"];
+  if ((normalized === "历史类" || normalized === "文科") && defaults.includes("历史类")) return ["历史类"];
+  if (normalized === "综合改革" || defaults.includes("综合改革")) return ["综合改革"];
+  return [normalized];
 }
 
 function makeRealtimeSourceSnapshot(input: {
@@ -1660,13 +1681,6 @@ function matchesRequestedPlanGroup(value: unknown, requested: string | null | un
   const left = normalizePlanGroup(stringify(value));
   const right = normalizePlanGroup(requested);
   return Boolean(left && right && left === right);
-}
-
-function matchesRequestedMajor(name: unknown, remarks: unknown, requested: string | null | undefined): boolean {
-  if (!requested) return true;
-  const text = normalizeName([name, remarks].map((item) => String(item ?? "")).join(""));
-  const target = normalizeName(requested);
-  return Boolean(text && target && (text.includes(target) || target.includes(text)));
 }
 
 function mnzySubjectProfile(subjectType: string): { classify: string; subjects: string } | null {
@@ -2013,11 +2027,11 @@ async function fetchJsonWithRetry(url: string, retries = 3): Promise<unknown> {
   throw lastError;
 }
 
-async function fetchJsonPostWithRetry(url: string, body: Record<string, unknown>, retries = 2): Promise<unknown> {
+async function fetchJsonPostWithRetry(url: string, body: Record<string, unknown>, retries = 2, timeoutMs = 45_000): Promise<unknown> {
   let lastError: unknown = null;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 45_000);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(url, {
         method: "POST",

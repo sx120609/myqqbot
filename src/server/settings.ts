@@ -36,6 +36,7 @@ export interface RuntimeSettings {
     contextTtlMinutes: number;
     cooldownSeconds: number;
     admissionQaEnabled: boolean;
+    admissionJiangsuOnlyEnabled: boolean;
   };
   sync: {
     collegesAutoEnabled: boolean;
@@ -103,6 +104,7 @@ const DEFAULTS: Record<string, string> = {
   "nl.contextTtlMinutes": "10",
   "nl.cooldownSeconds": "5",
   "nl.admissionQaEnabled": process.env.NL_ADMISSION_QA_ENABLED ?? "true",
+  "nl.admissionJiangsuOnlyEnabled": process.env.NL_ADMISSION_JIANGSU_ONLY_ENABLED ?? "true",
   "sync.collegesAutoEnabled": "false",
   "sync.collegesIntervalHours": "24",
   "sync.srgaoxiaoAutoEnabled": "false",
@@ -190,7 +192,8 @@ export class SettingsStore {
         requireMentionInGroup: this.getBoolean("nl.requireMentionInGroup", false),
         contextTtlMinutes: this.getNumber("nl.contextTtlMinutes", 10),
         cooldownSeconds: this.getNumber("nl.cooldownSeconds", 5),
-        admissionQaEnabled: this.getBoolean("nl.admissionQaEnabled", true)
+        admissionQaEnabled: this.getBoolean("nl.admissionQaEnabled", true),
+        admissionJiangsuOnlyEnabled: this.getBoolean("nl.admissionJiangsuOnlyEnabled", true)
       },
       sync: {
         collegesAutoEnabled: this.getBoolean("sync.collegesAutoEnabled", false),

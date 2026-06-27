@@ -53,6 +53,8 @@ describe("SettingsStore", () => {
     expect(settings.all(false)["onebot.napcatWebUrl"]).toBe("http://127.0.0.1:6099");
     expect(settings.runtime().onebot.napcatWebKey).toBe("");
     expect(settings.all(false)["onebot.napcatWebKey"]).toBe("");
+    expect(settings.runtime().naturalLanguage.admissionJiangsuOnlyEnabled).toBe(true);
+    expect(settings.all(false)["nl.admissionJiangsuOnlyEnabled"]).toBe("true");
 
     database.close();
   });

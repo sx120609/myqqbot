@@ -1032,6 +1032,47 @@ describe("admission normalization", () => {
     database.close();
   });
 
+  it("looks up rank by score from saved one-score-one-section snapshots", () => {
+    const dir = mkdtempSync(join(tmpdir(), "myqqbot-admission-test-"));
+    tempDirs.push(dir);
+    const database = new AppDatabase(join(dir, "test.sqlite"));
+    const admissions = new AdmissionRepository(database);
+    const sourceId = admissions.insertSource({
+      source: "jiangsu_eea",
+      sourceKind: "jiangsu-eea-rank-image",
+      sourceUrl: "https://www.jseea.cn/example-rank.png",
+      requestJson: JSON.stringify({
+        year: 2026,
+        province: "江苏",
+        subjectType: "物理类",
+        title: "江苏省2026年普通高考逐分段统计表"
+      }),
+      responseJson: JSON.stringify({
+        text: "631 18 8999\n630 32 9031\n629 41 9072"
+      }),
+      status: "success"
+    });
+
+    expect(admissions.lookupRankByScore({
+      provinceName: "江苏省",
+      subjectType: "物化地",
+      score: 630,
+      years: [2026]
+    })).toEqual({
+      year: 2026,
+      provinceName: "江苏",
+      subjectType: "物理类",
+      score: 630,
+      sameCount: 32,
+      cumulative: 9031,
+      sourceId,
+      sourceUrl: "https://www.jseea.cn/example-rank.png",
+      fetchedAt: expect.any(String),
+      rawLine: "630 32 9031"
+    });
+    database.close();
+  });
+
   it("filters admission sync jobs for operational logs", () => {
     const dir = mkdtempSync(join(tmpdir(), "myqqbot-admission-test-"));
     tempDirs.push(dir);

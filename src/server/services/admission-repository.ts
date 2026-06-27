@@ -100,6 +100,27 @@ export interface AdmissionSourceRow {
   fetchedAt: string;
 }
 
+export interface AdmissionRankLookupQuery {
+  provinceName: string;
+  subjectType: string;
+  score: number;
+  year?: number | null;
+  years?: number[];
+}
+
+export interface AdmissionRankLookupResult {
+  year: number;
+  provinceName: string;
+  subjectType: string;
+  score: number;
+  sameCount: number;
+  cumulative: number;
+  sourceId: number;
+  sourceUrl: string;
+  fetchedAt: string;
+  rawLine: string;
+}
+
 export interface AdmissionSourceQuery {
   universityId?: number;
   sourceSchoolId?: string | null;
@@ -136,6 +157,7 @@ export interface AdmissionSyncJobRow {
 }
 
 export interface AdmissionQuery {
+  source?: string | null;
   universityId?: number;
   universityIds?: number[];
   provinceName?: string | null;
@@ -998,6 +1020,42 @@ export class AdmissionRepository {
       .all(...params, clampLimit(query.limit)) as unknown as AdmissionSourceRow[];
   }
 
+  lookupRankByScore(query: AdmissionRankLookupQuery): AdmissionRankLookupResult | null {
+    const provinceName = normalizeProvinceName(query.provinceName);
+    const subjectType = normalizeSubjectType(query.subjectType);
+    const score = Math.floor(Number(query.score));
+    if (!provinceName || !subjectType || !Number.isFinite(score)) return null;
+    const years = normalizeRankLookupYears(query);
+    for (const year of years) {
+      const sources = this.listSources({
+        sourceKind: "jiangsu-eea-rank-image",
+        status: "success",
+        year,
+        provinceName,
+        subjectType,
+        limit: 12
+      });
+      for (const source of sources) {
+        const rows = parseRankRowsFromSource(source.responseJson);
+        const row = rows.find((item) => item.score === score);
+        if (!row) continue;
+        return {
+          year,
+          provinceName,
+          subjectType,
+          score,
+          sameCount: row.sameCount,
+          cumulative: row.cumulative,
+          sourceId: source.id,
+          sourceUrl: source.sourceUrl,
+          fetchedAt: source.fetchedAt,
+          rawLine: row.rawLine
+        };
+      }
+    }
+    return null;
+  }
+
   startJob(input: AdmissionSyncJobInput): number {
     const result = this.database.db
       .prepare(
@@ -1391,6 +1449,46 @@ function parseJsonObject(value: string | null): Record<string, unknown> | null {
   }
 }
 
+function normalizeRankLookupYears(query: AdmissionRankLookupQuery): number[] {
+  const raw = query.years?.length ? query.years : query.year ? [query.year] : defaultAdmissionScoreYears();
+  return Array.from(
+    new Set(
+      raw
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value))
+        .map((value) => Math.floor(value))
+    )
+  ).sort((left, right) => right - left);
+}
+
+function parseRankRowsFromSource(responseJson: string | null): Array<{ score: number; sameCount: number; cumulative: number; rawLine: string }> {
+  const response = parseJsonObject(responseJson);
+  const text = typeof response?.text === "string" ? response.text : null;
+  if (!text) return [];
+  const rows = text
+    .replace(/\u00a0/gu, " ")
+    .replace(/\r/gu, "\n")
+    .split("\n")
+    .map((line) => line.replace(/\s+/gu, " ").trim())
+    .map((line) => {
+      const match = line.match(/^(\d{3})\s+(\d{1,7})\s+(\d{1,7})(?:\s|$)/u);
+      if (!match) return null;
+      const score = Number(match[1]);
+      const sameCount = Number(match[2]);
+      const cumulative = Number(match[3]);
+      if (!Number.isFinite(score) || !Number.isFinite(sameCount) || !Number.isFinite(cumulative)) return null;
+      if (score < 100 || score > 750 || sameCount <= 0 || cumulative < sameCount) return null;
+      return { score, sameCount, cumulative, rawLine: line };
+    })
+    .filter((row): row is { score: number; sameCount: number; cumulative: number; rawLine: string } => Boolean(row))
+    .sort((left, right) => right.score - left.score);
+  const byScore = new Map<number, { score: number; sameCount: number; cumulative: number; rawLine: string }>();
+  for (const row of rows) {
+    if (!byScore.has(row.score)) byScore.set(row.score, row);
+  }
+  return Array.from(byScore.values());
+}
+
 function toPositiveNumber(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -1424,6 +1522,10 @@ function coverageSubjectTypesForProvinceYear(provinceName: string, year: number,
 }
 
 function appendCommonWhere(where: string[], params: Array<string | number>, query: AdmissionQuery, alias: string): void {
+  if (query.source) {
+    where.push(`${alias}.source = ?`);
+    params.push(query.source);
+  }
   if (query.universityId) {
     where.push(`${alias}.university_id = ?`);
     params.push(query.universityId);
@@ -1531,6 +1633,8 @@ export function normalizeProvinceName(value: string | null | undefined): string 
 export function normalizeSubjectType(value: string | null | undefined): string | null {
   const text = clean(value);
   if (!text) return null;
+  if (/物化|物生|物政|物地|物技|^物$/u.test(text)) return "物理类";
+  if (/史化|史生|史政|史地|史技|历化|历生|历政|历地|历技|^史$|^历$/u.test(text)) return "历史类";
   if (/物理/u.test(text)) return "物理类";
   if (/历史/u.test(text)) return "历史类";
   if (/理科/u.test(text)) return "理科";

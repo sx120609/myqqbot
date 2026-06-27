@@ -803,13 +803,14 @@ function NaturalLanguagePage() {
           <Switch label="群聊自然触发" checked={settings["nl.groupNaturalEnabled"] !== "false"} onChange={(v) => update("nl.groupNaturalEnabled", String(v))} />
           <Switch label="群聊必须 @ 机器人" checked={settings["nl.requireMentionInGroup"] === "true"} onChange={(v) => update("nl.requireMentionInGroup", String(v))} />
           <Switch label="招生问答" checked={settings["nl.admissionQaEnabled"] !== "false"} onChange={(v) => update("nl.admissionQaEnabled", String(v))} />
+          <Switch label="仅支持江苏考生" checked={settings["nl.admissionJiangsuOnlyEnabled"] !== "false"} onChange={(v) => update("nl.admissionJiangsuOnlyEnabled", String(v))} />
           <Switch label="QQ 回复渲染为图片" checked={settings["onebot.replyAsImage"] !== "false"} onChange={(v) => update("onebot.replyAsImage", String(v))} />
         </div>
         <FormGrid>
           <Input label="上下文分钟" value={String(settings["nl.contextTtlMinutes"] ?? "")} onChange={(v) => update("nl.contextTtlMinutes", v)} />
           <Input label="单用户冷却秒" value={String(settings["nl.cooldownSeconds"] ?? "")} onChange={(v) => update("nl.cooldownSeconds", v)} />
-          <Input label="招生实时请求间隔毫秒" value={String(settings["sync.gaokaoCnRealtimeRequestDelayMs"] ?? "0")} onChange={(v) => update("sync.gaokaoCnRealtimeRequestDelayMs", v)} hint="用户问分数线、位次、招生计划或专业组时实时请求；默认 0，最高 60000。" />
-          <Input label="招生实时请求预算" value={String(settings["sync.gaokaoCnRealtimeMaxRequestsPerRun"] ?? "12")} onChange={(v) => update("sync.gaokaoCnRealtimeMaxRequestsPerRun", v)} hint="单次回答最多请求多少个掌上高考接口；默认 12，够拉专业组明细和历史位次。" />
+          <Input label="招生实时请求间隔毫秒" value={String(settings["sync.gaokaoCnRealtimeRequestDelayMs"] ?? "0")} onChange={(v) => update("sync.gaokaoCnRealtimeRequestDelayMs", v)} hint="只用于招生计划和专业组明细；江苏分数/位次优先走考试院官方库，缺口再用雪峰 Agent。" />
+          <Input label="招生实时请求预算" value={String(settings["sync.gaokaoCnRealtimeMaxRequestsPerRun"] ?? "12")} onChange={(v) => update("sync.gaokaoCnRealtimeMaxRequestsPerRun", v)} hint="单次回答最多请求多少个掌上高考计划接口；默认 12，够拉专业组明细。" />
           <Input label="回复图片标题" value={String(settings["onebot.replyImageTitle"] ?? "高校资料助手")} onChange={(v) => update("onebot.replyImageTitle", v)} />
           <Input label="回复图片角标" value={String(settings["onebot.replyImageBadge"] ?? "AI 生成回复")} onChange={(v) => update("onebot.replyImageBadge", v)} />
         </FormGrid>

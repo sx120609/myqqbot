@@ -631,6 +631,108 @@ describe("GaokaoCnAdapter", () => {
     database.close();
   });
 
+  it("keeps bot realtime Mnzy requests narrow while preserving full major group details", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "myqqbot-gaokao-test-"));
+    tempDirs.push(dir);
+    const database = new AppDatabase(join(dir, "test.sqlite"));
+    const universities = new UniversityRepository(database);
+    universities.importAll([fixtureUniversity("南京大学", "nan-jing-da-xue")]);
+    const [nanjing] = universities.listUniversities("南京大学", 1);
+    const admissions = new AdmissionRepository(database);
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      expect(body.year).toBe(2026);
+      expect(body.classify).toBe("物理");
+      if (url.includes("/v3/v1/query/recommendPage")) {
+        return jsonResponse({
+          code: 200,
+          msg: "OK",
+          body: {
+            total: 1,
+            pageNum: 1,
+            pageSize: 20,
+            list: [
+              {
+                universityName: "南京大学",
+                zsgkId: 111,
+                recruitCode: "110108",
+                universityMajorGroup: "08",
+                year: 2026,
+                planNum: 4,
+                majorNum: 2,
+                claim: "化",
+                historyScore: "[{\"2025\":\"680,165,4\"},{\"2024\":\"676,190,4\"}]"
+              }
+            ]
+          }
+        });
+      }
+      if (url.includes("/v4/v1/query/recommendMajorList")) {
+        return jsonResponse({
+          code: 200,
+          msg: "OK",
+          body: {
+            intentionList: [
+              {
+                universityName: "南京大学",
+                recruitCode: "110108",
+                universityMajorGroup: "08",
+                majorName: "软件工程",
+                majorRemarks: "（国家特色化软件学院实验班）",
+                year: 2026,
+                planNum: 2,
+                claim: "化"
+              },
+              {
+                universityName: "南京大学",
+                recruitCode: "110108",
+                universityMajorGroup: "08",
+                majorName: "人工智能",
+                year: 2026,
+                planNum: 2,
+                claim: "化"
+              }
+            ],
+            notIntentionList: []
+          }
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new GaokaoCnAdapter(universities, admissions);
+
+    const result = await adapter.fetchRealtimeAdmissionData({
+      universityId: nanjing.id,
+      universityName: "南京大学",
+      sourceSchoolId: "111",
+      province: "江苏",
+      subjectType: "物理类",
+      subjectTypes: ["物理类", "理科"],
+      planYears: [2026],
+      scoreYears: [2025, 2024, 2023],
+      majorName: "计算机",
+      includePlans: true,
+      includeScores: true,
+      includePlanDetails: true,
+      maxSourceRequests: 12
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.summary.sourceRequests).toBe(2);
+    expect(result.plans.map((row) => row.majorName)).toEqual([
+      null,
+      "软件工程（国家特色化软件学院实验班）",
+      "人工智能"
+    ]);
+    expect(result.scores.map((row) => ({ year: row.year, minRank: row.minRank, planGroup: row.planGroup }))).toEqual([
+      { year: 2025, minRank: 165, planGroup: "08" },
+      { year: 2024, minRank: 190, planGroup: "08" }
+    ]);
+    database.close();
+  });
+
   it("pauses a batch before starting another endpoint when source request budget is exhausted", async () => {
     const dir = mkdtempSync(join(tmpdir(), "myqqbot-gaokao-test-"));
     tempDirs.push(dir);

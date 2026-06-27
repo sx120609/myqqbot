@@ -1,7 +1,7 @@
 import { TOPICS, topicLabel } from "../domain/topics.js";
 import type { SettingsStore } from "../settings.js";
 import { ADMISSION_SOURCE, normalizePlanGroup, normalizeProvinceName } from "./admission-repository.js";
-import type { AdmissionPlanRow, AdmissionRepository, AdmissionScoreRow, AdmissionSourceRow } from "./admission-repository.js";
+import type { AdmissionPlanRow, AdmissionRankLookupResult, AdmissionRepository, AdmissionScoreRow, AdmissionSourceRow } from "./admission-repository.js";
 import {
   currentAdmissionDate,
   currentAdmissionYear,
@@ -17,8 +17,10 @@ import { isGaokaoCnRateLimitError, type GaokaoCnAdapter, type GaokaoCnSyncResult
 import type { MessageAnalysis, NaturalLanguageService } from "./nlu.js";
 import type { SrgaoxiaoSyncService } from "./srgaoxiao-sync.js";
 import type { UniversityRepository } from "./university-repository.js";
+import { XUEFENG_AGENT_SOURCE } from "./xuefeng-agent-adapter.js";
 
 const DEFAULT_ADMISSION_REALTIME_REQUEST_BUDGET = 12;
+const JIANGSU_EEA_SOURCE = "jiangsu_eea";
 
 export interface IncomingImage {
   url?: string;
@@ -77,6 +79,8 @@ interface AdmissionIntent {
   years: number[];
   planGroup: string | null;
   majorName: string | null;
+  score: number | null;
+  rank: number | null;
   queryTypes: Array<"plan" | "score" | "rank" | "major_score" | "trend" | "compare">;
   needsFollowUp: boolean;
   followUpQuestion: string | null;
@@ -89,6 +93,8 @@ interface AdmissionFollowUpContext {
   years: number[];
   planGroup: string | null;
   majorName: string | null;
+  score: number | null;
+  rank: number | null;
   queryTypes: AdmissionIntent["queryTypes"];
 }
 
@@ -136,6 +142,19 @@ interface AdmissionSchoolData {
 interface AdmissionRealtimeSyncBudget {
   initial: number | null;
   remaining: number | null;
+}
+
+interface AdmissionRankContext {
+  score: number | null;
+  rank: number | null;
+  year: number | null;
+  province: string;
+  subjectType: string;
+  sameCount: number | null;
+  sourceId: number | null;
+  sourceUrl: string | null;
+  fetchedAt: string | null;
+  note: string | null;
 }
 
 export class MessageProcessor {
@@ -392,11 +411,11 @@ export class MessageProcessor {
               "university_info 表示高校资料/校园生活/院校评价/学校对比，例如学校介绍、院校定位、宿舍、食堂、校园网、外卖、澡堂、管理、学校怎么样、两校生活体验怎么选。" +
               "casual 表示应该正常闲聊、看图闲聊、解释图片、或回答能力/模型/使用方式问题。ignore 表示群聊里没有必要回复的旁观消息。" +
               "如果 route 是 university_info 或 admission，只要用户原话里出现了疑似学校名，就把原文片段尽量放入 schoolNames；即使不确定是否为标准全称、是否缺少校区后缀，也不要留空。" +
-              "如果 route 是 admission，请尽量抽取 province、subjectType、years、planGroup、majorName 和 queryTypes；不确定的字段填 null 或空数组，后续会追问。" +
+              "如果 route 是 admission，请尽量抽取 province、subjectType、years、planGroup、majorName、score、rank 和 queryTypes；用户给了“630分”就把 score 设为 630，给了“1万位”就把 rank 设为 10000；不确定的字段填 null 或空数组，后续会追问。" +
               "私聊或明确 @ 机器人时，除非是明显垃圾内容，否则 shouldReply 通常为 true；未 @ 的群聊普通路人闲聊 shouldReply 可为 false。" +
               "如果消息含图片且需要回复，请仍然选择最接近的 route；后续图片理解会按你的 route 和学校/主题字段组织资料。" +
               "只输出一个 JSON 对象，不要 Markdown，不要解释。字段：" +
-              "route:string, shouldReply:boolean, confidence:number, schoolNames:string[], province:string|null, subjectType:string|null, years:number[], planGroup:string|null, majorName:string|null, queryTypes:string[], topicKey:string|null, topicLabel:string|null, needsFollowUp:boolean, followUpQuestion:string|null, reason:string。" +
+              "route:string, shouldReply:boolean, confidence:number, schoolNames:string[], province:string|null, subjectType:string|null, years:number[], planGroup:string|null, majorName:string|null, score:number|null, rank:number|null, queryTypes:string[], topicKey:string|null, topicLabel:string|null, needsFollowUp:boolean, followUpQuestion:string|null, reason:string。" +
               "confidence 只用于调试记录，程序不会因为低置信度拒绝回复。" +
               `topicKey 如果是高校生活资料，请从这些 key 中选一个或返回 general：${topicOptions}。`
           },
@@ -413,7 +432,7 @@ export class MessageProcessor {
         ],
         "message-route"
       );
-      return normalizeMessageRouteIntent(parseJsonObject(text));
+      return enrichAdmissionIntentFromText(normalizeMessageRouteIntent(parseJsonObject(text)), input.text);
     } catch {
       if (input.messageType === "private" || input.mentionedBot) {
         return {
@@ -427,6 +446,8 @@ export class MessageProcessor {
           years: [],
           planGroup: null,
           majorName: null,
+          score: extractAdmissionScoreFromText(input.text),
+          rank: extractAdmissionRankFromText(input.text),
           queryTypes: [],
           topicKey: null,
           topicLabel: null,
@@ -448,7 +469,7 @@ export class MessageProcessor {
     const pending = context.pendingAdmission;
     if (!pending) return routeIntent;
     const localSlots = extractAdmissionFollowUpSlots(messageText);
-    const hasLocalSlots = Boolean(localSlots.province || localSlots.subjectType || localSlots.years.length);
+    const hasLocalSlots = Boolean(localSlots.province || localSlots.subjectType || localSlots.years.length || localSlots.score || localSlots.rank);
     if (!routeIntent) {
       if (!hasLocalSlots) return null;
       return {
@@ -462,6 +483,8 @@ export class MessageProcessor {
         years: localSlots.years.length ? localSlots.years : pending.years,
         planGroup: pending.planGroup,
         majorName: pending.majorName,
+        score: localSlots.score ?? pending.score,
+        rank: localSlots.rank ?? pending.rank,
         queryTypes: pending.queryTypes,
         topicKey: null,
         topicLabel: null,
@@ -477,6 +500,8 @@ export class MessageProcessor {
         routeIntent.planGroup ||
         routeIntent.majorName ||
         routeIntent.years.length ||
+        routeIntent.score ||
+        routeIntent.rank ||
         routeIntent.queryTypes.length
     );
     if (!hasAdmissionSlots && !hasLocalSlots) return routeIntent;
@@ -491,6 +516,8 @@ export class MessageProcessor {
       years: routeIntent.years.length ? routeIntent.years : localSlots.years.length ? localSlots.years : pending.years,
       planGroup: routeIntent.planGroup ?? pending.planGroup,
       majorName: routeIntent.majorName ?? pending.majorName,
+      score: routeIntent.score ?? localSlots.score ?? pending.score,
+      rank: routeIntent.rank ?? localSlots.rank ?? pending.rank,
       queryTypes: routeIntent.queryTypes.length ? routeIntent.queryTypes : pending.queryTypes,
       reason: [routeIntent.reason, hasLocalSlots ? "本地续接上一次招生追问" : "续接上一次招生追问"].filter(Boolean).join("；")
     };
@@ -508,15 +535,56 @@ export class MessageProcessor {
 
     const universities = this.resolveAdmissionUniversities(intent, analysis, input.conversationKey, now);
     const university = universities[0];
+    const years = buildAdmissionYears(intent);
+    const province = intent.province ? normalizeAdmissionProvince(intent.province) : null;
+    const subjectType = province ? intent.subjectType ?? inferAdmissionSubjectType(province) : intent.subjectType;
+    const provinceRestriction = this.admissionProvinceRestrictionReply(province);
+    if (provinceRestriction) return provinceRestriction;
+    const rankContext = province && subjectType ? this.resolveAdmissionRankContext(intent, input.text, province, subjectType) : null;
     if (!university) {
+      if (province && subjectType && (rankContext || intent.score || intent.rank || intent.majorName)) {
+        const contextText = renderAdmissionGeneralContext({
+          userMessage: input.text,
+          province,
+          subjectType,
+          majorName: intent.majorName,
+          years,
+          rankContext
+        });
+        const reply = await this.answerAdmissionGeneralWithLlm({
+          userMessage: input.text,
+          province,
+          subjectType,
+          majorName: intent.majorName,
+          contextText
+        });
+        const sourcePageUrl = this.createAnswerSourcePage({
+          question: input.text,
+          universityId: null,
+          universityName: `${province}${subjectType}报考建议`,
+          topic: "招生数据",
+          sourceUrl: rankContext?.sourceUrl ?? null,
+          contextText,
+          schoolProfileText: null,
+          srgaoxiaoReviewsText: null,
+          answerText: reply
+        });
+        return {
+          handled: true,
+          reason: "招生泛报考回答",
+          reply,
+          sourcePageUrl,
+          analysis: { admissionIntent: intent, schoolAnalysis: analysis }
+        };
+      }
       return {
         handled: true,
         reason: "招生查询需要学校名",
-        reply: intent.followUpQuestion || "你想查哪所学校的招生计划或分数线？可以直接说完整学校名。"
+        reply: intent.followUpQuestion || "你想查哪所学校，或者想按分数/位次做报考建议？目前只支持江苏考生数据，可以直接说“江苏物化地630分计算机怎么报”这种完整条件。"
       };
     }
 
-    if (!intent.province) {
+    if (!province) {
       this.setAdmissionFollowUpContext(input.conversationKey, university, intent, now, {
         province: null,
         subjectType: intent.subjectType
@@ -524,13 +592,12 @@ export class MessageProcessor {
       return {
         handled: true,
         reason: "招生查询需要省份",
-        reply: intent.followUpQuestion || `你想看 ${university.name} 在哪个省份的招生计划或分数线？`
+        reply: intent.followUpQuestion || (this.admissionJiangsuOnlyEnabled()
+          ? `目前招生/志愿数据只支持江苏考生。你如果是江苏考生，可以直接说“${university.name} 江苏物理类 630 分”或“${university.name} 江苏历史类 位次 10000”。`
+          : `你想看 ${university.name} 在哪个省份的招生计划或分数线？`)
       };
     }
 
-    const years = buildAdmissionYears(intent);
-    const province = normalizeAdmissionProvince(intent.province);
-    const subjectType = intent.subjectType ?? inferAdmissionSubjectType(province);
     const syncKinds = pickAdmissionSyncKinds(intent);
     if (!subjectType) {
       this.setAdmissionFollowUpContext(input.conversationKey, university, intent, now, {
@@ -547,7 +614,7 @@ export class MessageProcessor {
     if (universities.length > 1) {
       const schoolData: AdmissionSchoolData[] = [];
       for (const school of universities.slice(0, 3)) {
-        schoolData.push(await this.buildAdmissionSchoolData(school, intent, province, subjectType, years, syncKinds, realtimeSyncBudget));
+        schoolData.push(await this.buildAdmissionSchoolData(school, intent, province, subjectType, years, syncKinds, realtimeSyncBudget, rankContext));
       }
       const contextText = renderAdmissionComparisonContext({
         userMessage: input.text,
@@ -596,7 +663,7 @@ export class MessageProcessor {
       };
     }
 
-    const data = await this.buildAdmissionSchoolData(university, intent, province, subjectType, years, syncKinds, realtimeSyncBudget);
+    const data = await this.buildAdmissionSchoolData(university, intent, province, subjectType, years, syncKinds, realtimeSyncBudget, rankContext);
     const reply = await this.answerAdmissionWithLlm({
       userMessage: input.text,
       universityName: university.name,
@@ -655,6 +722,8 @@ export class MessageProcessor {
         years: intent.years,
         planGroup: intent.planGroup,
         majorName: intent.majorName,
+        score: intent.score,
+        rank: intent.rank,
         queryTypes: intent.queryTypes
       }
     });
@@ -691,6 +760,21 @@ export class MessageProcessor {
     return { initial: max, remaining: max };
   }
 
+  private admissionJiangsuOnlyEnabled(): boolean {
+    return this.settings.runtime().naturalLanguage.admissionJiangsuOnlyEnabled === true;
+  }
+
+  private admissionProvinceRestrictionReply(province: string | null): ProcessedMessage | null {
+    if (!this.admissionJiangsuOnlyEnabled() || !province) return null;
+    const normalized = normalizeAdmissionProvince(province);
+    if (normalized === "江苏") return null;
+    return {
+      handled: true,
+      reason: "招生省份暂不支持",
+      reply: `目前招生/志愿数据只支持江苏考生，${normalized} 考生的分数线、位次和报考建议暂不解答。你可以问江苏物理类/历史类的分数、位次、招生计划或专业组。`
+    };
+  }
+
   private async buildAdmissionSchoolData(
     university: ResolvedUniversity,
     intent: AdmissionIntent,
@@ -698,7 +782,8 @@ export class MessageProcessor {
     subjectType: string,
     years: ReturnType<typeof buildAdmissionYears>,
     syncKinds: ReturnType<typeof pickAdmissionSyncKinds>,
-    realtimeSyncBudget?: AdmissionRealtimeSyncBudget
+    realtimeSyncBudget?: AdmissionRealtimeSyncBudget,
+    rankContext?: AdmissionRankContext | null
   ): Promise<AdmissionSchoolData> {
     let syncError: string | null = null;
     let syncSummary: AdmissionSyncSummary | null = null;
@@ -710,7 +795,7 @@ export class MessageProcessor {
     const realtimeFetcher = (this.gaokaoCn as (GaokaoCnAdapter & {
       fetchRealtimeAdmissionData?: GaokaoCnAdapter["fetchRealtimeAdmissionData"];
     }) | undefined)?.fetchRealtimeAdmissionData;
-    if (this.gaokaoCn && typeof realtimeFetcher === "function") {
+    if (this.gaokaoCn && typeof realtimeFetcher === "function" && syncKinds.includePlans) {
       try {
         const syncSettings = this.settings.runtime().sync;
         const requestDelayMs = syncSettings?.gaokaoCnRealtimeRequestDelayMs ?? 0;
@@ -729,14 +814,13 @@ export class MessageProcessor {
           planGroup: intent.planGroup,
           majorName: intent.majorName,
           includePlans: syncKinds.includePlans,
-          includeScores: syncKinds.includeScores,
+          includeScores: false,
           includePlanDetails,
           requestDelayMs,
           rateLimitCooldownMinutes,
           maxSourceRequests: admissionRealtimeMaxSourceRequests(realtimeSyncBudget, maxSourceRequests)
         });
         plans = result.plans;
-        scores = result.scores;
         sourceSnapshots = result.sourceSnapshots;
         syncSummary = summarizeAdmissionSyncResults([result.summary]);
         consumeAdmissionRealtimeSyncBudget(realtimeSyncBudget, result.summary);
@@ -748,7 +832,7 @@ export class MessageProcessor {
       } catch (error) {
         syncError = error instanceof Error ? error.message : String(error);
       }
-    } else {
+    } else if (syncKinds.includePlans) {
       const legacySyncer = (this.gaokaoCn as (GaokaoCnAdapter & {
         sync?: GaokaoCnAdapter["sync"];
       }) | undefined)?.sync;
@@ -801,23 +885,6 @@ export class MessageProcessor {
             }
           }
 
-          if (!syncError && syncKinds.includeScores && hasAdmissionRealtimeSyncBudget(realtimeSyncBudget)) {
-            const scoreGroups = groupYearsByAdmissionSubjectTypes(province, subjectType, years.scoreYears);
-            const groups = scoreGroups.length ? scoreGroups : [{ subjectTypes, years: years.scoreYears }];
-            for (const group of groups) {
-              const shouldContinue = await runLegacySync({
-                universityId: university.id,
-                provinces: [province],
-                subjectTypes: group.subjectTypes,
-                scoreYears: group.years,
-                includePlans: false,
-                includeScores: true,
-                includeSpecialScores: shouldSyncMajorScores(intent)
-              });
-              if (!shouldContinue) break;
-            }
-          }
-
           syncSummary = summarizeAdmissionSyncResults(results);
           if (!syncError) {
             const messages = results.flatMap((result) => result.errors.map((error) => error.message));
@@ -827,8 +894,10 @@ export class MessageProcessor {
           syncError = error instanceof Error ? error.message : String(error);
         }
       }
+    }
 
-      if (this.admissions) {
+    if (this.admissions) {
+      if (syncKinds.includePlans && !plans.length) {
         plans = this.admissions.queryPlans({
           universityId: university.id,
           provinceName: province,
@@ -839,9 +908,11 @@ export class MessageProcessor {
           majorName: intent.majorName,
           limit: 80
         });
-        scores = this.admissions.queryScores({
+      }
+      if (syncKinds.includeScores) {
+        scores = this.queryLocalAdmissionScores({
           universityId: university.id,
-          provinceName: province,
+          province,
           subjectType,
           subjectTypes,
           years: years.scoreYears,
@@ -850,29 +921,31 @@ export class MessageProcessor {
           limit: 120
         });
         if (intent.majorName && !scores.length) {
-          scores = this.admissions.queryScores({
+          scores = this.queryLocalAdmissionScores({
             universityId: university.id,
-            provinceName: province,
+            province,
             subjectType,
             subjectTypes,
             years: years.scoreYears,
             planGroup: intent.planGroup,
+            majorName: null,
             limit: 80
           });
         }
-        if (intent.majorName && !plans.length) {
-          plans = this.admissions.queryPlans({
-            universityId: university.id,
-            provinceName: province,
-            subjectType,
-            subjectTypes,
-            years: years.planYears,
-            planGroup: intent.planGroup,
-            limit: 40
-          });
-        }
-        sourceSnapshots = this.collectAdmissionSourceSnapshots(university.id, plans, scores, syncSummary);
       }
+      if (intent.majorName && syncKinds.includePlans && !plans.length) {
+        plans = this.admissions.queryPlans({
+          universityId: university.id,
+          provinceName: province,
+          subjectType,
+          subjectTypes,
+          years: years.planYears,
+          planGroup: intent.planGroup,
+          limit: 40
+        });
+      }
+      const localSnapshots = this.collectAdmissionSourceSnapshots(university.id, plans, scores, syncSummary);
+      sourceSnapshots = mergeAdmissionSourceSnapshots(sourceSnapshots, localSnapshots);
     }
 
     const planMajorFallback = Boolean(intent.majorName && plans.length && !admissionRowsContainMajor(plans, intent.majorName));
@@ -899,6 +972,7 @@ export class MessageProcessor {
       includeScores: syncKinds.includeScores,
       queryTypes: intent.queryTypes,
       unavailableScoreYears: syncKinds.includeScores ? years.unavailableScoreYears : [],
+      rankContext,
       syncSummary,
       syncError
     });
@@ -950,6 +1024,116 @@ export class MessageProcessor {
     return snapshots;
   }
 
+  private queryLocalAdmissionScores(input: {
+    universityId: number;
+    province: string;
+    subjectType: string;
+    subjectTypes: string[];
+    years: number[];
+    planGroup: string | null;
+    majorName: string | null;
+    limit: number;
+  }): AdmissionScoreRow[] {
+    if (!this.admissions) return [];
+    const baseQuery = {
+      universityId: input.universityId,
+      provinceName: input.province,
+      subjectType: input.subjectType,
+      subjectTypes: input.subjectTypes,
+      years: input.years,
+      planGroup: input.planGroup,
+      majorName: input.majorName,
+      limit: input.limit
+    };
+    const officialScores =
+      normalizeProvinceName(input.province) === "江苏"
+        ? this.admissions.queryScores({
+          ...baseQuery,
+          source: JIANGSU_EEA_SOURCE
+        })
+        : [];
+    const xuefengScores = this.admissions.queryScores({
+      ...baseQuery,
+      source: XUEFENG_AGENT_SOURCE
+    });
+    return mergeAdmissionScoreRows(officialScores, xuefengScores).slice(0, input.limit);
+  }
+
+  private resolveAdmissionRankContext(
+    intent: AdmissionIntent,
+    messageText: string,
+    province: string,
+    subjectType: string
+  ): AdmissionRankContext | null {
+    const score = intent.score ?? extractAdmissionScoreFromText(messageText);
+    const providedRank = intent.rank ?? extractAdmissionRankFromText(messageText);
+    if (!score && !providedRank) return null;
+
+    if (providedRank) {
+      return {
+        score,
+        rank: providedRank,
+        year: null,
+        province,
+        subjectType,
+        sameCount: null,
+        sourceId: null,
+        sourceUrl: null,
+        fetchedAt: null,
+        note: "位次由用户直接提供；回答时以位次为主，分数只作辅助口径。"
+      };
+    }
+
+    if (!score) return null;
+    const years = buildAdmissionRankLookupYears(intent.years);
+    const repository = this.admissions as (AdmissionRepository & {
+      lookupRankByScore?: (query: {
+        provinceName: string;
+        subjectType: string;
+        score: number;
+        years: number[];
+      }) => AdmissionRankLookupResult | null;
+    }) | undefined;
+    const result = repository?.lookupRankByScore?.({
+      provinceName: province,
+      subjectType,
+      score,
+      years
+    }) ?? null;
+
+    if (result) {
+      const currentYear = currentAdmissionYear();
+      const note = result.year === currentYear
+        ? "位次来自本地一分一段表；回答时不要再要求用户自己查询位次。"
+        : `本地没有命中 ${currentYear} 年同条件一分一段表，先使用 ${result.year} 年同省同科类一分一段表作粗参考。`;
+      return {
+        score: result.score,
+        rank: result.cumulative,
+        year: result.year,
+        province: result.provinceName,
+        subjectType: result.subjectType,
+        sameCount: result.sameCount,
+        sourceId: result.sourceId,
+        sourceUrl: result.sourceUrl,
+        fetchedAt: result.fetchedAt,
+        note
+      };
+    }
+
+    return {
+      score,
+      rank: null,
+      year: null,
+      province,
+      subjectType,
+      sameCount: null,
+      sourceId: null,
+      sourceUrl: null,
+      fetchedAt: null,
+      note: `本地暂未找到 ${years.join("、")} 年${province}${subjectType}一分一段表，无法自动折算位次；回答时可以先按分数粗讲思路，但必须说明不能精确判断。`
+    };
+  }
+
   private resolveAdmissionUniversity(
     intent: AdmissionIntent,
     analysis: MessageAnalysis,
@@ -985,6 +1169,8 @@ export class MessageProcessor {
         years: [],
         planGroup: null,
         majorName: null,
+        score: null,
+        rank: null,
         queryTypes: [],
         needsFollowUp: false,
         followUpQuestion: null,
@@ -1047,6 +1233,40 @@ export class MessageProcessor {
     ).slice(0, 5);
   }
 
+  private async answerAdmissionGeneralWithLlm(input: {
+    userMessage: string;
+    province: string;
+    subjectType: string;
+    majorName: string | null;
+    contextText: string;
+  }): Promise<string> {
+    try {
+      return await this.llm.chat(
+        [
+          {
+            role: "system",
+            content:
+              xuefengAgentBasePrompt() +
+              xuefengAdmissionPrompt() +
+              "用户没有指定目标学校。你要基于省份、科类、分数/位次、专业方向给泛报考策略，不要把它退回成“你先告诉我学校”。" +
+              "如果上下文已经给出一分一段折算位次，必须直接使用该位次，不要让用户自己查位次。位次数字越小，通常竞争力越强。" +
+              "没有具体学校实时招生数据时，不要编某校录取概率或具体投档线；可以给冲稳保筛选方法、专业取舍、城市/学校层次选择、下一步应查哪些学校和专业组。" +
+              "回答要先拍板：这个分数/位次在当前省份科类下大概怎么打；然后讲专业方向，尤其是计算机/软件/电子/电气/自动化这类工科方向的取舍；最后给下一步让用户补充或继续查询的最小信息。" +
+              "适合 QQ 阅读，可以用 Markdown 标题、加粗和列表。结尾提醒：最终以省考试院和学校招生网为准，一分一段和第三方资料仅供参考。"
+          },
+          {
+            role: "user",
+            content: `用户问题：${input.userMessage}\n省份：${input.province}\n科类：${input.subjectType}\n专业倾向：${input.majorName ?? "未指定"}\n\n可用上下文：\n${input.contextText}`
+          }
+        ],
+        "admission-general-answer"
+      );
+    } catch (error) {
+      const message = normalizeLlmFailureMessage(error, this.settings.runtime().llm.timeoutMs);
+      return `我已经识别到这是${input.province}${input.subjectType}的报考问题，但模型总结失败：${message}\n\n${input.contextText.slice(0, 1200)}\n\n最终以省考试院和学校招生网为准，一分一段和第三方资料仅供参考。`;
+    }
+  }
+
   private async answerAdmissionWithLlm(input: {
     userMessage: string;
     universityName: string;
@@ -1067,7 +1287,7 @@ export class MessageProcessor {
             content:
               xuefengAgentBasePrompt() +
               xuefengAdmissionPrompt() +
-              "请基于本次实时获取的招生数据回答，数据可能来自掌上高考志愿接口、省考试院、学校招生网等公开来源，也可能包含雪峰 Agent 历史库等第三方参考；不要编造不存在的分数、位次、计划数。" +
+              "请基于本次招生上下文回答：招生计划和专业组明细可来自掌上高考实时接口；江苏录取分数/位次优先使用江苏省教育考试院官方数据，缺口再参考雪峰 Agent 历史库；不要编造不存在的分数、位次、计划数。" +
               `当前日期是 ${currentAdmissionDate()}：${currentAdmissionYear()} 招生计划可以优先参考；${currentAdmissionYear()} 录取分数线和最低位次通常要等各省录取后才陆续出现，因此涉及分数/位次时优先使用 ${defaultAdmissionScoreYearRange()} 历史数据。` +
               "比较投档线、录取门槛或趋势时必须优先使用同一年同省同科类的最低位次（minRank）：位次数字越小通常代表门槛越高；最低分只作为附带参考，不能用裸分跨年判断涨跌。" +
               "回答结构改成雪峰 Agent 式：1. 先一句话拍板，告诉用户这事儿该怎么看；2. 再给关键依据，优先讲位次、专业组、计划变化和数据口径；3. 然后讲报考打法，明确冲、稳、保或适合/不适合；4. 最后补风险和还缺什么信息。" +
@@ -1440,6 +1660,8 @@ function renderRouteContextLine(context: ConversationContext | null): string {
         `年份=${context.pendingAdmission.years.length ? context.pendingAdmission.years.join(",") : "默认"}`,
         `专业组=${context.pendingAdmission.planGroup ?? "未指定"}`,
         `专业=${context.pendingAdmission.majorName ?? "未指定"}`,
+        `分数=${context.pendingAdmission.score ?? "未指定"}`,
+        `位次=${context.pendingAdmission.rank ?? "未指定"}`,
         `查询类型=${context.pendingAdmission.queryTypes.length ? context.pendingAdmission.queryTypes.join(",") : "默认"}`
       ].join("；")
     : null;
@@ -1496,10 +1718,28 @@ function normalizeMessageRouteIntent(raw: Record<string, unknown>): MessageRoute
   };
 }
 
-function extractAdmissionFollowUpSlots(text: string): { province: string | null; subjectType: string | null; years: number[] } {
+function enrichAdmissionIntentFromText(intent: MessageRouteIntent, text: string): MessageRouteIntent {
+  if (intent.route !== "admission") return intent;
+  const compact = text.replace(/\s+/gu, "");
+  const localProvince = extractAdmissionProvinceFromText(compact);
+  const localSubjectType = extractKnownAdmissionSubjectType(compact);
+  const localScore = extractAdmissionScoreFromText(compact);
+  const localRank = extractAdmissionRankFromText(compact);
+  return {
+    ...intent,
+    province: intent.province ?? localProvince,
+    subjectType: intent.subjectType ?? localSubjectType,
+    score: intent.score ?? localScore,
+    rank: intent.rank ?? localRank
+  };
+}
+
+function extractAdmissionFollowUpSlots(text: string): { province: string | null; subjectType: string | null; years: number[]; score: number | null; rank: number | null } {
   const compact = text.replace(/\s+/gu, "");
   const province = extractAdmissionProvinceFromText(compact);
   const subjectType = extractKnownAdmissionSubjectType(compact);
+  const score = extractAdmissionScoreFromText(compact);
+  const rank = extractAdmissionRankFromText(compact);
   const currentYear = currentAdmissionYear();
   const years = Array.from(
     new Set(
@@ -1508,7 +1748,7 @@ function extractAdmissionFollowUpSlots(text: string): { province: string | null;
         .filter((year) => Number.isFinite(year) && year >= 2020 && year <= currentYear)
     )
   ).sort((left, right) => right - left);
-  return { province, subjectType, years };
+  return { province, subjectType, years, score, rank };
 }
 
 function extractAdmissionProvinceFromText(text: string): string | null {
@@ -1525,6 +1765,27 @@ function extractKnownAdmissionSubjectType(text: string): string | null {
     : null;
 }
 
+function extractAdmissionScoreFromText(text: string): number | null {
+  const compact = text.replace(/\s+/gu, "");
+  const match = compact.match(/(?:^|[^\d])(\d{3})(?:\.\d+)?分/u);
+  if (!match) return null;
+  const score = Number(match[1]);
+  return Number.isFinite(score) && score >= 100 && score <= 750 ? score : null;
+}
+
+function extractAdmissionRankFromText(text: string): number | null {
+  const compact = text.replace(/\s+/gu, "");
+  const wan = compact.match(/(\d+(?:\.\d+)?)万(?:名|位|位次|左右)?/u);
+  if (wan) {
+    const rank = Math.round(Number(wan[1]) * 10000);
+    return Number.isFinite(rank) && rank > 0 ? rank : null;
+  }
+  const match = compact.match(/(\d{3,7})(?:名|位|位次)/u);
+  if (!match) return null;
+  const rank = Number(match[1]);
+  return Number.isFinite(rank) && rank > 0 ? Math.floor(rank) : null;
+}
+
 function normalizeAdmissionIntent(raw: Record<string, unknown>): AdmissionIntent {
   const queryTypes = toStringArray(raw.queryTypes).filter((value): value is AdmissionIntent["queryTypes"][number] =>
     ["plan", "score", "rank", "major_score", "trend", "compare"].includes(value)
@@ -1539,6 +1800,8 @@ function normalizeAdmissionIntent(raw: Record<string, unknown>): AdmissionIntent
     years: toNumberArray(raw.years),
     planGroup: normalizePlanGroup(toCleanString(raw.planGroup)),
     majorName: toCleanString(raw.majorName),
+    score: toAdmissionScore(raw.score),
+    rank: toAdmissionRank(raw.rank),
     queryTypes,
     needsFollowUp: Boolean(raw.needsFollowUp),
     followUpQuestion: toCleanString(raw.followUpQuestion),
@@ -1561,6 +1824,8 @@ function normalizeTopicKey(value: string | null): string | null {
 function normalizeSubjectFromLlm(value: unknown): string | null {
   const text = toCleanString(value);
   if (!text) return null;
+  if (/物理|物化|物生|物政|物地|物技|^物$/u.test(text)) return "物理类";
+  if (/历史|史化|史生|史政|史地|史技|历化|历生|历政|历地|历技|^史$|^历$/u.test(text)) return "历史类";
   if (/物理/u.test(text)) return "物理类";
   if (/历史/u.test(text)) return "历史类";
   if (/理科/u.test(text)) return "理科";
@@ -1584,6 +1849,13 @@ function buildAdmissionYears(intent: AdmissionIntent): { scoreYears: number[]; p
     scoreYears: scoreYears.length ? Array.from(new Set(scoreYears)).sort((a, b) => b - a) : defaultAdmissionScoreYears(),
     unavailableScoreYears: Array.from(new Set(unavailableScoreYears)).sort((a, b) => b - a)
   };
+}
+
+function buildAdmissionRankLookupYears(intentYears: number[]): number[] {
+  const currentYear = currentAdmissionYear();
+  const requested = intentYears.filter((year) => year >= 2020 && year <= currentYear);
+  const raw = requested.length ? requested : [currentYear, ...defaultAdmissionScoreYears()];
+  return Array.from(new Set(raw)).sort((left, right) => right - left);
 }
 
 function pickAdmissionSyncKinds(intent: AdmissionIntent): { includePlans: boolean; includeScores: boolean } {
@@ -1615,11 +1887,7 @@ function shouldSyncPlanDetails(intent: AdmissionIntent, includePlanDetailsSettin
     Boolean(intent.planGroup) ||
     includePlanDetailsSetting ||
     types.has("plan") ||
-    types.has("score") ||
-    types.has("rank") ||
-    types.has("major_score") ||
-    types.has("trend") ||
-    types.has("compare")
+    types.has("major_score")
   );
 }
 
@@ -1739,12 +2007,54 @@ function xuefengAgentBasePrompt(): string {
 function xuefengAdmissionPrompt(): string {
   return [
     "招生和志愿判断优先级：位次优先于分数，专业和就业出口优先于空泛校名，普通家庭优先看可就业的技术/行业方向。",
-    "用户没给省份、科类、位次、专业偏好时，要直接追问最关键的 1-2 个信息；不要假装已经能精确报。",
+    "用户没给省份、科类、分数/位次、专业偏好时，要直接追问最关键的 1-2 个信息；不要假装已经能精确报。",
+    "用户给了分数但没给位次时，优先使用上下文里的一分一段折算结果，不要要求用户自己去查位次；上下文明确没有分段表时，再说明只能粗略判断。",
     "如果用户问“能不能上/怎么选/值不值”，回答要给冲稳保或风险档位：能冲就说明风险，稳就说明依据，保就说明为什么保。",
     "专业建议要直接：计算机、软件、电子、电气、自动化、机械、医学、师范、法学、财经等要结合家庭资源、城市和就业讲；生化环材土木护理等争议方向要提醒风险，但不要一棍子打死。",
     "涉及院校专业组时，只有拿到该专业组下的专业计划明细，才能推荐具体专业；如果上下文只有专业组投档线/位次，就只能判断这个组的门槛和风险，必须明确缺少组内专业清单。",
     "跨年比较不能看裸分，必须看同省同科类位次；2026 招生计划只能说明名额和方向，不能当成 2026 录取线。"
   ].join("");
+}
+
+function renderAdmissionGeneralContext(input: {
+  userMessage: string;
+  province: string;
+  subjectType: string;
+  majorName: string | null;
+  years: ReturnType<typeof buildAdmissionYears>;
+  rankContext: AdmissionRankContext | null;
+}): string {
+  return [
+    `泛报考查询：${input.userMessage}`,
+    `当前日期：${currentAdmissionDate()}。`,
+    `省份：${input.province}；科类：${input.subjectType}；专业倾向：${input.majorName ?? "未指定"}`,
+    renderAdmissionRankContext(input.rankContext) ?? "用户没有提供可用分数/位次；如需判断冲稳保，应先追问分数或位次。",
+    `可参考计划年份：${formatAdmissionYears(input.years.planYears)}；历史录取位次年份：${formatAdmissionYears(input.years.scoreYears)}。`,
+    "用户没有指定目标学校：不要反问学校名来中断回答；先按分数/位次、专业方向和省份给筛选策略。没有具体学校实时数据时，不得编造某校录取概率或具体投档线。",
+    "回答目标：先给一句话结论，再讲分数/位次口径，再讲计算机等专业方向怎么分层筛学校，最后给用户下一步可以继续问的具体格式。"
+  ].join("\n");
+}
+
+function renderAdmissionRankContext(context: AdmissionRankContext | null): string | null {
+  if (!context) return null;
+  const parts = [
+    context.score !== null ? `分数 ${context.score}` : null,
+    context.rank !== null ? `折算/提供位次 ${context.rank}` : "位次暂未折算成功",
+    context.year !== null ? `分段表年份 ${context.year}` : null,
+    context.sameCount !== null ? `同分人数 ${context.sameCount}` : null,
+    `省份 ${context.province}`,
+    `科类 ${context.subjectType}`
+  ].filter(Boolean);
+  const source = [
+    context.sourceId !== null ? `来源快照 #${context.sourceId}` : null,
+    context.fetchedAt ? `抓取时间 ${formatDateTimeShort(context.fetchedAt)}` : null,
+    context.sourceUrl ? `来源 ${context.sourceUrl}` : null
+  ].filter(Boolean);
+  return [
+    `用户分数/位次：${parts.join("；")}。`,
+    source.length ? `一分一段来源：${source.join("；")}。` : null,
+    context.note ? `位次口径提示：${context.note}` : null
+  ].filter(Boolean).join("\n");
 }
 
 function renderAdmissionComparisonContext(input: {
@@ -1759,7 +2069,7 @@ function renderAdmissionComparisonContext(input: {
     `多校招生对比查询：${input.schools.map((school) => school.university.name).join(" / ")}`,
     `用户问题：${input.userMessage}`,
     `省份：${input.province}；科类：${input.subjectType}；专业组：${input.planGroup ?? "未指定"}；专业：${input.majorName ?? "未指定"}`,
-    "本次招生数据来自实时请求，不写入本地 admission_* 缓存表。",
+    "招生计划可来自掌上高考实时请求；江苏历史分数/位次优先来自江苏省教育考试院官方数据，缺口再参考雪峰 Agent 历史库，不实时请求掌上高考分数。",
     ""
   ];
   for (const school of input.schools) {
@@ -1767,7 +2077,7 @@ function renderAdmissionComparisonContext(input: {
     lines.push(school.contextText);
     lines.push("");
   }
-  lines.push("多校对比说明：以上每所学校均单独实时请求并保留本回答内的来源摘要；招生数据最终请以省考试院和学校招生网为准。");
+  lines.push("多校对比说明：招生计划可按学校单独实时请求；江苏历史分数/位次优先来自江苏省教育考试院官方数据，缺口再参考雪峰 Agent 历史库；招生数据最终请以省考试院和学校招生网为准。");
   return lines.join("\n");
 }
 
@@ -1790,6 +2100,7 @@ function renderAdmissionContext(input: {
   includeScores: boolean;
   queryTypes: AdmissionIntent["queryTypes"];
   unavailableScoreYears: number[];
+  rankContext?: AdmissionRankContext | null;
   syncSummary: AdmissionSyncSummary | null;
   syncError: string | null;
 }): string {
@@ -1797,6 +2108,8 @@ function renderAdmissionContext(input: {
     `查询条件：${input.universityName}；省份：${input.province}；科类：${input.subjectType ?? "未指定"}${renderAdmissionSubjectQuerySuffix(input.subjectType, input.subjectTypes)}；专业组：${input.planGroup ?? "未指定"}；专业：${input.majorName ?? "未指定"}`,
     `当前日期：${currentAdmissionDate()}。${currentAdmissionYear()} 录取分数线/位次通常要等各省录取后陆续出现；投档线和录取门槛请优先看当年同省同科类最低位次，历史参考默认使用 ${defaultAdmissionScoreYearRange()}。`
   ];
+  const rankText = renderAdmissionRankContext(input.rankContext ?? null);
+  if (rankText) lines.push(rankText);
   const compatibilityNote = renderSubjectCompatibilityNote(input.subjectType, input.subjectTypes);
   if (compatibilityNote) lines.push(compatibilityNote);
   if (input.schoolProfileText) {
@@ -1814,7 +2127,7 @@ function renderAdmissionContext(input: {
   }
   if (input.syncSummary) {
     lines.push(
-      `实时获取结果：已请求掌上高考；计划 ${input.syncSummary.planRows}（汇总 ${input.syncSummary.planSummaryRows}，专业计划 ${input.syncSummary.majorPlanRows}），院校线 ${input.syncSummary.schoolScoreRows}，专业线 ${input.syncSummary.majorScoreRows}，来源摘要 ${input.syncSummary.sourceRows}，源站请求 ${input.syncSummary.sourceRequests}/${input.syncSummary.sourceRequestBudget ?? "不限"}，错误 ${input.syncSummary.errorCount}。本次结果不写入本地缓存。`
+      `实时获取结果：已请求掌上高考招生计划接口；计划 ${input.syncSummary.planRows}（汇总 ${input.syncSummary.planSummaryRows}，专业计划 ${input.syncSummary.majorPlanRows}），来源摘要 ${input.syncSummary.sourceRows}，源站请求 ${input.syncSummary.sourceRequests}/${input.syncSummary.sourceRequestBudget ?? "不限"}，错误 ${input.syncSummary.errorCount}。分数/位次不实时请求掌上高考；江苏优先使用江苏省教育考试院官方数据，缺口再参考雪峰 Agent 历史库。`
     );
     if (input.syncSummary.requestBudgetExhausted) {
       lines.push(`实时获取节流：本批已用 ${input.syncSummary.sourceRequests}/${input.syncSummary.sourceRequestBudget ?? "不限"} 次源站请求预算，已主动暂停继续请求。`);
@@ -1823,7 +2136,7 @@ function renderAdmissionContext(input: {
   if (!input.plans.length && !input.scores.length && !input.syncError) {
     lines.push(
       input.syncSummary
-        ? "数据状态：本次实时请求正常完成，但当前学校/省份/科类/年份/专业条件没有返回可用的计划或分数。常见原因是源站暂未开放该年份数据、该校当年未在该省该科类招生，或源站字段与当前条件不完全一致。"
+        ? "数据状态：本次掌上高考计划请求正常完成，但当前学校/省份/科类/年份/专业条件没有返回可用计划；若缺的是江苏分数/位次，说明江苏考试院官方库和雪峰 Agent 历史库当前条件都没有匹配记录。"
         : "数据状态：本次暂未获取到当前条件的招生计划或录取分数。"
     );
   }
@@ -1903,7 +2216,7 @@ function renderAdmissionContext(input: {
   );
   const fetchedTimes = Array.from(new Set([...input.plans, ...input.scores].map((row) => formatDateTimeShort(row.fetchedAt))));
   lines.push("\n资料页追溯：");
-  lines.push("本次招生数据来自实时请求，不写入 admission_plans、admission_scores、admission_sources 缓存表。");
+  lines.push("招生计划可来自掌上高考实时请求或本地计划表；江苏分数/位次优先来自江苏省教育考试院官方数据，缺口再参考雪峰 Agent 历史库；不实时请求掌上高考分数接口。");
   if (input.schoolProfileText) lines.push("院校基础信息补充表：school_profiles。");
   lines.push(`实时行标记：${sourceIds.length ? sourceIds.slice(0, 24).join("、") : "本次没有可展示的行标记"}`);
   if (input.sourceSnapshots.length) {
@@ -1989,11 +2302,7 @@ function renderAdmissionCoverageSuggestion(input: {
 }): string | null {
   const missingPlan = input.includePlans && input.plans.length === 0;
   const missingScore = input.includeScores && input.scores.length === 0;
-  const sourceReturnedNoRows = Boolean(
-    input.syncSummary &&
-      ((input.includePlans && input.syncSummary.planRows === 0) ||
-        (input.includeScores && input.syncSummary.schoolScoreRows + input.syncSummary.majorScoreRows === 0))
-  );
+  const sourceReturnedNoRows = Boolean(input.syncSummary && input.includePlans && input.syncSummary.planRows === 0);
   if (!missingPlan && !missingScore && !sourceReturnedNoRows && !input.syncError) return null;
   if (!missingPlan && !missingScore) return null;
 
@@ -2002,13 +2311,13 @@ function renderAdmissionCoverageSuggestion(input: {
     : input.subjectType ?? "未指定";
   const missingParts = [
     missingPlan ? `招生计划（年份 ${formatAdmissionYears(input.planYears)}）` : null,
-    missingScore ? `录取分数/位次（年份 ${formatAdmissionYears(input.scoreYears)}）` : null
+    missingScore ? `录取分数/位次（江苏优先考试院官方，缺口参考雪峰 Agent；年份 ${formatAdmissionYears(input.scoreYears)}）` : null
   ].filter(Boolean);
   const lines = [
-    "数据缺口：本次实时请求没有拿到足够匹配的招生数据，不会使用本地缓存补齐。",
+    "数据缺口：本次没有拿到足够匹配的招生数据；招生计划可来自掌上高考实时接口，江苏分数/位次优先查江苏考试院官方库，缺口再查雪峰 Agent 历史库，不实时拉掌上高考分数。",
     `查询条件：学校=${input.universityName}；省份=${input.province}；科类=${subjectText}；专业组=${input.planGroup ?? "未指定"}；专业=${input.majorName ?? "未指定"}`,
     `缺少内容：${missingParts.length ? missingParts.join("；") : "当前条件可用数据"}。`,
-    "建议：让用户补充更准确的省份、科类、年份、专业组或专业名；如果条件已经明确，可以稍后重试，源站可能暂时没有返回。"
+    "建议：让用户补充更准确的省份、科类、年份、专业组或专业名；如果是江苏分数缺口，需要先在后台导入或更新江苏考试院官方库或雪峰 Agent 历史库。"
   ];
   return lines.join("\n");
 }
@@ -2242,6 +2551,48 @@ function summarizeAdmissionSyncResults(results: GaokaoCnSyncResult[]): Admission
   };
 }
 
+function mergeAdmissionScoreRows(...groups: AdmissionScoreRow[][]): AdmissionScoreRow[] {
+  const rows: AdmissionScoreRow[] = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    for (const row of group) {
+      const key = [
+        row.universityId,
+        row.year,
+        row.scoreType,
+        normalizeScoreDedupeText(row.provinceName),
+        normalizeScoreDedupeText(row.subjectType),
+        normalizeScoreDedupeText(row.batch),
+        normalizeScoreDedupeText(row.planGroup),
+        normalizeScoreDedupeText(row.majorName)
+      ].join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push(row);
+    }
+  }
+  return rows;
+}
+
+function normalizeScoreDedupeText(value: string | null): string {
+  return (value ?? "").replace(/\s+/gu, "").trim();
+}
+
+function mergeAdmissionSourceSnapshots(...groups: AdmissionSourceRow[][]): AdmissionSourceRow[] {
+  const rows: AdmissionSourceRow[] = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    for (const row of group) {
+      const key = [row.id, row.source, row.sourceKind, row.sourceUrl, row.requestJson].join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push(row);
+      if (rows.length >= 16) return rows;
+    }
+  }
+  return rows;
+}
+
 function hasGaokaoRateLimitSyncResult(result: GaokaoCnSyncResult): boolean {
   return Array.isArray(result.errors) && result.errors.some((error) => isGaokaoCnRateLimitError(error.message));
 }
@@ -2393,6 +2744,25 @@ function toNumberArray(value: unknown): number[] {
     .map((item) => Number(item))
     .filter((item) => Number.isFinite(item))
     .map((item) => Math.floor(item));
+}
+
+function toAdmissionScore(value: unknown): number | null {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  const score = Math.floor(number);
+  return score >= 100 && score <= 750 ? score : null;
+}
+
+function toAdmissionRank(value: unknown): number | null {
+  const text = toCleanString(value);
+  if (text) {
+    const parsed = extractAdmissionRankFromText(text);
+    if (parsed) return parsed;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  const rank = Math.floor(number);
+  return rank > 0 ? rank : null;
 }
 
 function toSafeCount(value: unknown): number {
